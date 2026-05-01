@@ -271,6 +271,11 @@ def generate_docker_run_command(
             docker_command += [
                 "--mount", f"type=bind,src={repo_root_path}/tt-media-server,dst={user_home_path}/tt-metal/server",
             ]
+            if model_spec.hf_model_repo in {"BAAI/bge-m3", "BAAI/bge-reranker-v2-m3"}:
+                docker_command += [
+                    "--mount", f"type=bind,src={repo_root_path}/vllm-tt-metal/src,dst={user_home_path}/app/src",
+                    "--mount", "type=bind,src=/home/ubuntu/worktrees/tt-metal-bgm-reranker-p150x1/models/demos/wormhole/bge_m3,dst=/home/container_app_user/tt-metal/models/demos/wormhole/bge_m3,readonly",
+                ]
         else:
             docker_command += [
                 "--mount", f"type=bind,src={repo_root_path}/vllm-tt-metal/src,dst={user_home_path}/app/src",
