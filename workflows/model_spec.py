@@ -3419,6 +3419,33 @@ embedding_templates = [
         ],
     ),
     ModelSpecTemplate(
+        weights=["BAAI/bge-reranker-v2-m3"],
+        tt_metal_commit="ec28d12",
+        impl=tt_vllm_plugin_impl,
+        min_disk_gb=15,
+        min_ram_gb=6,
+        docker_image="ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.10.0-555f240-22be241",
+        model_type=ModelType.LLM,
+        inference_engine=InferenceEngine.VLLM.value,
+        device_model_specs=[
+            DeviceModelSpec(
+                device=DeviceTypes.P150,
+                max_concurrency=1,
+                max_context=64 * 1024,
+                default_impl=True,
+                env_vars={
+                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
+                    "VLLM__MAX_NUM_BATCHED_TOKENS": "262144",
+                    "VLLM__MAX_MODEL_LENGTH": "8192",
+                    "VLLM__MIN_CONTEXT_LENGTH": "32",
+                    "VLLM__MAX_NUM_SEQS": "32",
+                    "MAX_BATCH_SIZE": "32",
+                    "DEFAULT_THROTTLE_LEVEL": "0",
+                },
+            ),
+        ],
+    ),
+    ModelSpecTemplate(
         weights=["Qwen/Qwen3-Embedding-8B"],
         tt_metal_commit="555f240",
         impl=tt_transformers_impl,

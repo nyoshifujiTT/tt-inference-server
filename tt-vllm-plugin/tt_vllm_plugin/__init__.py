@@ -30,6 +30,15 @@ def register_models():
             "models.demos.wormhole.bge_large_en.demo.generator_vllm:BGEForEmbedding",
         )
         print("Registered BGE embedding model")
+        ModelRegistry.register_model(
+            "XLMRobertaForSequenceClassification",
+            "models.demos.wormhole.bge_m3.demo.generator_vllm:BgeM3ForEmbedding",
+        )
+        ModelRegistry.register_model(
+            "TTXLMRobertaForSequenceClassification",
+            "models.demos.wormhole.bge_m3.demo.generator_vllm:BgeM3ForEmbedding",
+        )
+        print("Registered BGE reranker model")
     except Exception as e:
         # If registration fails (e.g., module not found), log warning but continue
         # This allows the plugin to work even if BGE model isn't available
