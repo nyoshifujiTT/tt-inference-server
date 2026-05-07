@@ -662,6 +662,19 @@ def _patch_v1_tt_model_runner_execute_for_embedding() -> None:
         if not isinstance(embeddings, torch.Tensor):
             raise TypeError(f"Expected tensor embeddings from model.forward, got {type(embeddings)}")
 
+        # Align with pooler normalize behavior expected by embedding APIs.
+        normalize = False
+        try:
+            pooler_cfg = getattr(self.vllm_config.model_config, "pooler_config", None)
+            if pooler_cfg is not None:
+                normalize = bool(getattr(pooler_cfg, "normalize", False))
+        except Exception:
+            pass
+        if not normalize:
+            normalize = bool(getattr(model, "normalize_embeddings", False))
+        if normalize:
+            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=-1)
+
         pooler_output = [embeddings[i].detach().cpu() for i in range(batch_size)]
         req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
         sampled_token_ids = [torch.empty((0,), dtype=torch.int64) for _ in range(batch_size)]
