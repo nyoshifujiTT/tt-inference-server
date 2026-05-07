@@ -3277,6 +3277,14 @@ embedding_templates = [
         min_ram_gb=6,
         docker_image="",
         model_type=ModelType.EMBEDDING,
+        # NOTE(#1779): bge-m3 runtime configuration is still split across two config surfaces:
+        # - workflows/model_spec.py: model selection/template-side config
+        # - tt-media-server/config/constants.py: BGEM3 ModelConfigs runtime config
+        # Keep this explicit until those surfaces converge into a single source of truth.
+        # TODO: once BGEM3/P150X4 is fully represented in tt-media-server ModelConfigs,
+        # migrate p150x4 runtime ownership there and remove duplicated cross-surface values
+        # from this model_spec entry.
+        # Ref: https://github.com/tenstorrent/tt-inference-server/issues/1779
         inference_engine=InferenceEngine.MEDIA.value,
         device_model_specs=[
             DeviceModelSpec(

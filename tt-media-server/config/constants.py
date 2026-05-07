@@ -1073,6 +1073,14 @@ ModelConfigs = {
         "default_throttle_level": 0,
         "use_queue_per_worker": True,
     },
+    # NOTE(#1779): BGEM3 runtime settings are currently duplicated across
+    # workflows/model_spec.py and this ModelConfigs table. Values such as
+    # max_model_length / max_num_batched_tokens / max_num_seqs and mesh/device
+    # assumptions must stay aligned until config-surface convergence is complete.
+    # TODO: add explicit (ModelRunners.BGEM3, DeviceTypes.P150X4) config and
+    # use this table as the runtime source for BGEM3 MEDIA path, so p150x4-specific
+    # runtime knobs can be removed from workflows/model_spec.py duplication.
+    # Ref: https://github.com/tenstorrent/tt-inference-server/issues/1779
     (ModelRunners.BGEM3, DeviceTypes.N150): {
         "device_mesh_shape": (1, 1),
         "is_galaxy": False,
