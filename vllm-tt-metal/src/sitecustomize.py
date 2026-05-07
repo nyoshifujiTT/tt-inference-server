@@ -603,3 +603,85 @@ def _force_bge_v1_ttworker_pooling_runner() -> None:
 
 
 _force_bge_v1_ttworker_pooling_runner()
+
+
+def _patch_v1_tt_model_runner_execute_for_embedding() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        import torch
+        from vllm.v1.worker.tt_model_runner import TTModelRunner
+        from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: v1 TTModelRunner execute patch skipped: %s", e)
+        return
+
+    original_execute = TTModelRunner.execute_model
+
+    def _patched_execute(self, scheduler_output, intermediate_tensors=None):
+        model = getattr(self, "model", None)
+        is_embed_model = model is not None and hasattr(model, "get_embedding_dim") and hasattr(model, "forward")
+        if not is_embed_model:
+            return original_execute(self, scheduler_output, intermediate_tensors)
+
+        scheduled_reqs = list(getattr(scheduler_output, "scheduled_new_reqs", []) or [])
+        if not scheduled_reqs:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        req_ids = []
+        token_ids_list = []
+        max_seq_len = 0
+        for req_data in scheduled_reqs:
+            req_ids.append(req_data.req_id)
+            tids = list(req_data.prompt_token_ids)
+            token_ids_list.append(tids)
+            max_seq_len = max(max_seq_len, len(tids))
+
+        batch_size = len(token_ids_list)
+        input_ids = torch.zeros((batch_size, max_seq_len), dtype=torch.int64)
+        attention_mask = torch.zeros((batch_size, max_seq_len), dtype=torch.float32)
+        for i, tids in enumerate(token_ids_list):
+            if tids:
+                input_ids[i, : len(tids)] = torch.tensor(tids, dtype=torch.int64)
+                attention_mask[i, : len(tids)] = 1.0
+
+        out = model.forward(input_ids=input_ids, attention_mask=attention_mask)
+        if isinstance(out, dict):
+            dense = out.get("dense_vecs")
+            if dense is None:
+                # Fallback to first tensor-like value in dict
+                for v in out.values():
+                    if isinstance(v, torch.Tensor):
+                        dense = v
+                        break
+            embeddings = dense
+        else:
+            embeddings = out
+
+        if not isinstance(embeddings, torch.Tensor):
+            raise TypeError(f"Expected tensor embeddings from model.forward, got {type(embeddings)}")
+
+        pooler_output = [embeddings[i].detach().cpu() for i in range(batch_size)]
+        req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
+        sampled_token_ids = [torch.empty((0,), dtype=torch.int64) for _ in range(batch_size)]
+
+        logger.warning(
+            "sitecustomize: using embedding execute_model fast path in TTModelRunner for batch_size=%d",
+            batch_size,
+        )
+
+        return ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=sampled_token_ids,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=pooler_output,
+        )
+
+    TTModelRunner.execute_model = _patched_execute
+    logger.warning("sitecustomize: installed v1 TTModelRunner execute_model embedding patch for bge-m3")
+
+
+_patch_v1_tt_model_runner_execute_for_embedding()
