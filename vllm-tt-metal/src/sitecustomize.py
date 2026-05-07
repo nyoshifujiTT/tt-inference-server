@@ -288,3 +288,119 @@ def _patch_vllm_tt_loader_vllm_config_passthrough() -> None:
 _patch_vllm_tt_loader_vllm_config_passthrough()
 
 _patch_bge_model_registry_registration()
+
+
+def _force_bge_runner_type_pooling() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.worker.tt_worker import TTWorker
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: TTWorker import skipped for runner_type patch: %s", e)
+        return
+
+    original_load_model = TTWorker.load_model
+
+    def _patched_load_model(self):
+        try:
+            self.model_config.runner_type = "pooling"
+            logger.warning("sitecustomize: forced model_config.runner_type=pooling for bge-m3")
+        except Exception as e:
+            logger.warning("sitecustomize: failed to force runner_type=pooling: %s", e)
+        return original_load_model(self)
+
+    TTWorker.load_model = _patched_load_model
+    logger.warning("sitecustomize: installed TTWorker runner_type pooling patch for bge-m3")
+
+
+_force_bge_runner_type_pooling()
+
+
+def _patch_v1_tt_model_runner_kv_for_embedding() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.v1.worker.tt_model_runner import TTModelRunner
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: v1 TTModelRunner import skipped for kv patch: %s", e)
+        return
+
+    original_init_kv = TTModelRunner.initialize_kv_cache
+
+    def _patched_init_kv(self, kv_cache_config):
+        m = getattr(self, "model", None)
+        # Embedding wrappers do not implement KV cache path.
+        if m is not None and hasattr(m, "get_embedding_dim") and not hasattr(m, "allocate_kv_cache"):
+            self.kv_caches = []
+            self.input_batch = None
+            self.max_num_blocks_per_req = 0
+            logger.warning(
+                "sitecustomize: skipping TTModelRunner.initialize_kv_cache for embedding model %s",
+                type(m).__name__,
+            )
+            return
+        return original_init_kv(self, kv_cache_config)
+
+    TTModelRunner.initialize_kv_cache = _patched_init_kv
+    logger.warning("sitecustomize: installed v1 TTModelRunner KV bypass patch for bge-m3")
+
+
+_patch_v1_tt_model_runner_kv_for_embedding()
+
+
+def _patch_v1_tt_model_runner_warmup_for_embedding() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.v1.worker.tt_model_runner import TTModelRunner
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: v1 TTModelRunner import skipped for warmup patch: %s", e)
+        return
+
+    original_warmup = TTModelRunner.warmup_model
+
+    def _patched_warmup(self):
+        m = getattr(self, "model", None)
+        if m is not None and hasattr(m, "get_embedding_dim") and not hasattr(m, "warmup_model_prefill"):
+            logger.warning(
+                "sitecustomize: skipping TTModelRunner.warmup_model for embedding model %s",
+                type(m).__name__,
+            )
+            return
+        return original_warmup(self)
+
+    TTModelRunner.warmup_model = _patched_warmup
+    logger.warning("sitecustomize: installed v1 TTModelRunner warmup bypass patch for bge-m3")
+
+
+_patch_v1_tt_model_runner_warmup_for_embedding()
+
+
+def _patch_v1_tt_model_runner_pooling_tasks_for_embedding() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.v1.worker.tt_model_runner import TTModelRunner
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: v1 TTModelRunner import skipped for pooling task patch: %s", e)
+        return
+
+    original = TTModelRunner.get_supported_pooling_tasks
+
+    def _patched(self):
+        # For bge-m3 bring-up, always expose embed task from TTModelRunner.
+        # Relying on model attributes is brittle across worker init timing.
+        logger.warning(
+            "sitecustomize: forcing TTModelRunner supported pooling tasks to ['embed'] in bge context"
+        )
+        return ["embed"]
+
+    TTModelRunner.get_supported_pooling_tasks = _patched
+    logger.warning("sitecustomize: installed v1 TTModelRunner pooling-task patch for bge-m3")
+
+
+_patch_v1_tt_model_runner_pooling_tasks_for_embedding()
