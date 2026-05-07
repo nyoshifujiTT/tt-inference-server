@@ -404,3 +404,134 @@ def _patch_v1_tt_model_runner_pooling_tasks_for_embedding() -> None:
 
 
 _patch_v1_tt_model_runner_pooling_tasks_for_embedding()
+
+
+def _patch_ttplatform_validate_request_pooling_guard() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.platforms.tt import TTPlatform
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: TTPlatform validate_request patch skipped: %s", e)
+        return
+
+    original = TTPlatform.validate_request
+
+    def _patched(cls, prompt, params, processed_inputs):
+        # PoolingParams on embedding path lack generation-only fields used by
+        # the TT generation-request validation.
+        if params is not None and not hasattr(params, "best_of"):
+            logger.warning(
+                "sitecustomize: bypassing TTPlatform.validate_request generation checks for pooling params: %s",
+                type(params).__name__,
+            )
+            return
+        return original(prompt, params, processed_inputs)
+
+    TTPlatform.validate_request = classmethod(_patched)
+    logger.warning("sitecustomize: installed TTPlatform.validate_request pooling guard for bge-m3")
+
+
+_patch_ttplatform_validate_request_pooling_guard()
+
+
+def _patch_pooling_params_tt_compat_attrs() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.pooling_params import PoolingParams
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: PoolingParams patch skipped: %s", e)
+        return
+
+    # TTPlatform.validate_request currently assumes generation-style params.
+    # Provide missing attrs on PoolingParams so embedding path can pass through.
+    if not hasattr(PoolingParams, "best_of"):
+        PoolingParams.best_of = None
+    if not hasattr(PoolingParams, "prompt_logprobs"):
+        PoolingParams.prompt_logprobs = None
+    if not hasattr(PoolingParams, "logits_processors"):
+        PoolingParams.logits_processors = None
+
+    logger.warning(
+        "sitecustomize: installed PoolingParams TT compatibility attrs for bge-m3"
+    )
+
+
+_patch_pooling_params_tt_compat_attrs()
+
+
+def _patch_v1_processor_validate_request_pooling_guard() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.v1.engine.processor import Processor
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: Processor patch skipped: %s", e)
+        return
+
+    original = Processor.process_inputs
+
+    def _patched(self, *args, **kwargs):
+        try:
+            return original(self, *args, **kwargs)
+        except AttributeError as e:
+            msg = str(e)
+            if "best_of" not in msg:
+                raise
+            logger.warning(
+                "sitecustomize: bypassing TT validate_request best_of check for pooling path: %s",
+                msg,
+            )
+
+            # Retry once by temporarily bypassing platform request validation.
+            try:
+                from vllm.platforms import current_platform
+            except Exception:
+                raise
+
+            saved = current_platform.validate_request
+
+            def _noop_validate_request(*_a, **_k):
+                return
+
+            current_platform.validate_request = _noop_validate_request
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                current_platform.validate_request = saved
+
+    Processor.process_inputs = _patched
+    logger.warning("sitecustomize: installed Processor.validate_request pooling guard for bge-m3")
+
+
+_patch_v1_processor_validate_request_pooling_guard()
+
+
+def _patch_pooling_params_getattr_compat() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.pooling_params import PoolingParams
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: PoolingParams __getattr__ patch skipped: %s", e)
+        return
+
+    orig_getattr = getattr(PoolingParams, "__getattr__", None)
+
+    def _patched_getattr(self, name):
+        if name in {"best_of", "prompt_logprobs", "logits_processors"}:
+            return None
+        if orig_getattr is not None:
+            return orig_getattr(self, name)
+        raise AttributeError(name)
+
+    PoolingParams.__getattr__ = _patched_getattr
+    logger.warning("sitecustomize: installed PoolingParams.__getattr__ compatibility patch for bge-m3")
+
+
+_patch_pooling_params_getattr_compat()
