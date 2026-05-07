@@ -3347,6 +3347,13 @@ embedding_templates = [
                     # https://github.com/tenstorrent/tt-inference-server/blob/f29c1f9f/workflows/model_spec.py#L313
                     "data_parallel_size": 4,
                 },
+                # Note on dual-surface settings:
+                # - vllm_args drives direct vLLM CLI/runtime behavior.
+                # - env_vars remains for MEDIA/container compatibility paths that still consume VLLM__* values.
+                # This dual specification is intentional in the current stack because
+                # the two surfaces have different consumers.
+                # TODO(issue-A): when env_vars-vs-vllm_args issue is filed, link it here
+                # and remove this temporary note after source-of-truth is unified.
                 env_vars={
                     # Kept at the existing bge-m3 MEDIA aggregate budget (32 x 8192)
                     # to avoid changing container-side capacity assumptions in this step.
