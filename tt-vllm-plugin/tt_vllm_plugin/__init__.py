@@ -40,6 +40,24 @@ def register_models():
             "BGE model may not be available. Ensure tt-metal is in Python path."
         )
 
+    # Register BGE-M3 embedding model.
+    # bge-m3 reports XLMRobertaModel in HF config; depending on vLLM version,
+    # resolution may pass through TT-prefixed and/or Roberta alias keys.
+    try:
+        for arch_name in ["XLMRobertaModel", "RobertaModel"]:
+            ModelRegistry.register_model(
+                arch_name,
+                "models.demos.wormhole.bge_m3.demo.generator_vllm:BgeM3ForEmbedding",
+            )
+        print("Registered BGE-M3 embedding model")
+    except Exception as e:
+        import logging
+
+        logging.warning(
+            f"Failed to register BGE-M3 architectures (XLMRobertaModel/RobertaModel): {e}. "
+            "BGE-M3 model may not be available. Ensure tt-metal is in Python path and includes bge_m3 demo."
+        )
+
     # Register Qwen3-Embedding model (TTQwen3Model)
     # This allows vLLM to find the TT-specific Qwen3-Embedding implementation
     # Note: Qwen3-Embedding may be detected as Qwen3ForCausalLM by vLLM,

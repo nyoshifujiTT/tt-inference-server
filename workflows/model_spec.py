@@ -3322,6 +3322,24 @@ embedding_templates = [
                 },
             ),
             DeviceModelSpec(
+                device=DeviceTypes.P150X4,
+                max_concurrency=4,
+                max_context=64 * 1024,
+                default_impl=True,
+                vllm_args={
+                    "max_model_len": "8192",
+                    "max_num_batched_tokens": "8192",
+                },
+                env_vars={
+                    "VLLM__MAX_NUM_BATCHED_TOKENS": "262144",
+                    "VLLM__MAX_MODEL_LENGTH": "8192",
+                    "VLLM__MIN_CONTEXT_LENGTH": "32",
+                    "VLLM__MAX_NUM_SEQS": "32",
+                    "MAX_BATCH_SIZE": "32",
+                    "DEFAULT_THROTTLE_LEVEL": "0",
+                },
+            ),
+            DeviceModelSpec(
                 device=DeviceTypes.GALAXY,
                 max_concurrency=32,
                 max_context=64 * 1024,
