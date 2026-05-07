@@ -3336,15 +3336,41 @@ embedding_templates = [
                 default_impl=True,
                 vllm_args={
                     "max_model_len": "8192",
+                    # Chosen to match max_model_len for this temporary p150x4 path:
+                    # one full-length (8k) request budget per scheduling slot.
+                    # Permalink (paired max_model_len value in this same p150x4 block):
+                    # https://github.com/tenstorrent/tt-inference-server/blob/f29c1f9f/workflows/model_spec.py#L327
                     "max_num_batched_tokens": "8192",
+                    # Chosen from the p150x4 bring-up assumption used in this branch:
+                    # four chips are exposed as four data-parallel replicas.
+                    # Permalink (data_parallel_size handling in DeviceModelSpec -> vLLM args):
+                    # https://github.com/tenstorrent/tt-inference-server/blob/f29c1f9f/workflows/model_spec.py#L313
                     "data_parallel_size": 4,
                 },
                 env_vars={
+                    # Kept at the existing bge-m3 MEDIA aggregate budget (32 x 8192)
+                    # to avoid changing container-side capacity assumptions in this step.
+                    # Permalink: https://github.com/tenstorrent/tt-inference-server/blob/f29c1f9f/tt-media-server/config/constants.py#L1084
                     "VLLM__MAX_NUM_BATCHED_TOKENS": "262144",
+                    # Mirror model-native length on MEDIA env surface as well.
+                    # Source of truth: BAAI/bge-m3 config.json
+                    # (https://huggingface.co/BAAI/bge-m3/blob/main/config.json)
+                    # where max_position_embeddings=8194, yielding an effective 8192-token runtime limit.
                     "VLLM__MAX_MODEL_LENGTH": "8192",
+                    # Kept from existing bge-m3 MEDIA defaults; this value was already
+                    # used as the minimum-context floor in the working WH path.
+                    # Permalink: https://github.com/tenstorrent/tt-inference-server/blob/f29c1f9f/tt-media-server/config/constants.py#L1085
                     "VLLM__MIN_CONTEXT_LENGTH": "32",
+                    # Kept from existing bge-m3 MEDIA defaults (32-way serving shape).
+                    # Permalink: https://github.com/tenstorrent/tt-inference-server/blob/f29c1f9f/tt-media-server/config/constants.py#L1086
                     "VLLM__MAX_NUM_SEQS": "32",
+                    # Intentionally matched to VLLM__MAX_NUM_SEQS (=32), following
+                    # existing bge-m3 MEDIA config coupling.
+                    # Permalink: https://github.com/tenstorrent/tt-inference-server/blob/f29c1f9f/tt-media-server/config/constants.py#L1080
                     "MAX_BATCH_SIZE": "32",
+                    # Left unchanged from existing bge-m3 MEDIA config to keep
+                    # throttle behavior identical during this bring-up step.
+                    # Permalink: https://github.com/tenstorrent/tt-inference-server/blob/f29c1f9f/tt-media-server/config/constants.py#L1089
                     "DEFAULT_THROTTLE_LEVEL": "0",
                 },
             ),
