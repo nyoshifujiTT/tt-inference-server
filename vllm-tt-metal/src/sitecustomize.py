@@ -535,3 +535,71 @@ def _patch_pooling_params_getattr_compat() -> None:
 
 
 _patch_pooling_params_getattr_compat()
+
+
+def _force_bge_v1_ttworker_pooling_runner() -> None:
+    if not _is_bge_context():
+        return
+
+    try:
+        from vllm.v1.worker.tt_worker import TTWorker
+    except Exception as e:  # pragma: no cover
+        logger.debug("sitecustomize: v1 TTWorker import skipped for pooling runner patch: %s", e)
+        return
+
+    try:
+        from vllm.v1.worker.tt_model_runner_pooling import TTModelRunnerPooling
+    except Exception:
+        try:
+            from tt_vllm_plugin.v1.worker.tt_model_runner_pooling import TTModelRunnerPooling
+        except Exception as e:  # pragma: no cover
+            logger.debug("sitecustomize: TTModelRunnerPooling import skipped: %s", e)
+            return
+
+    original_load_model = TTWorker.load_model
+
+    def _patched_load_model(self):
+        # Ensure model config clearly expresses pooling intent for bge-m3.
+        try:
+            self.model_config.runner_type = "pooling"
+        except Exception:
+            pass
+
+        result = original_load_model(self)
+
+        runner = getattr(self, "model_runner", None)
+        if runner is None:
+            return result
+
+        if isinstance(runner, TTModelRunnerPooling):
+            return result
+
+        model = getattr(runner, "model", None)
+        is_embed_model = model is not None and hasattr(model, "get_embedding_dim")
+
+        # In bge context, fallback to pooling runner whenever a generation runner
+        # was instantiated for an embedding-capable model.
+        if is_embed_model:
+            logger.warning(
+                "sitecustomize: replacing v1 TTModelRunner with TTModelRunnerPooling for %s",
+                type(model).__name__,
+            )
+            pooled_runner = TTModelRunnerPooling(
+                vllm_config=self.vllm_config,
+                mesh_device=self.mesh_device,
+                trace_mode=getattr(self, "trace_mode", False),
+            )
+            pooled_runner.model = model
+            self.model_runner = pooled_runner
+            try:
+                self.model_config.runner_type = "pooling"
+            except Exception:
+                pass
+
+        return result
+
+    TTWorker.load_model = _patched_load_model
+    logger.warning("sitecustomize: installed v1 TTWorker pooling-runner force patch for bge-m3")
+
+
+_force_bge_v1_ttworker_pooling_runner()
