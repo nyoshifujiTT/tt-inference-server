@@ -3329,6 +3329,7 @@ embedding_templates = [
                 vllm_args={
                     "max_model_len": "8192",
                     "max_num_batched_tokens": "8192",
+                    "data_parallel_size": 4,
                 },
                 env_vars={
                     "VLLM__MAX_NUM_BATCHED_TOKENS": "262144",
