@@ -662,7 +662,23 @@ def _patch_v1_tt_model_runner_execute_for_embedding() -> None:
         if not isinstance(embeddings, torch.Tensor):
             raise TypeError(f"Expected tensor embeddings from model.forward, got {type(embeddings)}")
 
-        # Align with pooler normalize behavior expected by embedding APIs.
+        # Why normalize here:
+        # - This sitecustomize patch replaces TTModelRunner.execute_model for embedding requests and
+        #   directly constructs ModelRunnerOutput(pooler_output=...).
+        # - Bring-up validation for this model uses standard embedding checks (MTEB/BEIR style
+        #   evaluation and OpenAI-compatible embedding benchmark calls), so correctness must be
+        #   judged on the same /v1/embeddings API surface used by those checks.
+        # - Because this patched execute_model path emits the returned vectors, normalization policy
+        #   must be enforced here to keep /v1/embeddings behavior consistent.
+        # - OpenAI embeddings guidance states vectors are normalized to length 1:
+        #   https://help.openai.com/en/articles/6824809-embeddings-faq
+        # - Evaluation policy used in this bring-up follows common MTEB/BEIR practice:
+        #   https://www.sbert.net/docs/sentence_transformer/evaluation/mteb.html
+        #   https://huggingface.co/spaces/mteb/leaderboard
+        #   https://github.com/beir-cellar/beir
+        # - API compatibility context:
+        #   https://platform.openai.com/docs/api-reference/embeddings/create
+        #   https://openai.com/index/new-embedding-models-and-api-updates/
         normalize = False
         try:
             pooler_cfg = getattr(self.vllm_config.model_config, "pooler_config", None)
@@ -680,7 +696,7 @@ def _patch_v1_tt_model_runner_execute_for_embedding() -> None:
         sampled_token_ids = [torch.empty((0,), dtype=torch.int64) for _ in range(batch_size)]
 
         logger.warning(
-            "sitecustomize: using embedding execute_model fast path in TTModelRunner for batch_size=%d",
+            "sitecustomize: using patched embedding execute_model path in TTModelRunner for batch_size=%d",
             batch_size,
         )
 
