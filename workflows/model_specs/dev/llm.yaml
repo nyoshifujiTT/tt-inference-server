@@ -233,7 +233,7 @@ templates:
   inference_engine: VLLM
   device_model_specs:
     - device: P150
-      max_concurrency: 1
+      max_concurrency: 32  # Enable Llama-like short-prompt/high-batch sweeps; long prompts are still capped by max_tokens_all_users
       max_context: 262144  # 256K
       default_impl: true
       # Prefix caching forces vLLM into "align" mamba-cache mode,

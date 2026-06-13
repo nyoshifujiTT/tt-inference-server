@@ -5,6 +5,7 @@
 import json
 import logging
 from pathlib import Path
+import shutil
 import subprocess
 import jwt
 
@@ -27,25 +28,29 @@ def create_model_symlink(symlinks_dir, model_name, weights_dir, file_symlinks_ma
 
     # Handle file-specific symlinks (for vision models)
     if file_symlinks_map:
-        # Clean up any existing symlinks
-        if symlink_path.exists():
-            for _link in symlink_path.iterdir():
-                if _link.is_symlink():
-                    _link.unlink()
+        if symlink_path.is_symlink() or symlink_path.is_file():
+            logger.warning("Removing stale synthetic model link at %s", symlink_path)
+            symlink_path.unlink()
+        elif symlink_path.is_dir():
+            logger.warning("Removing stale synthetic model directory at %s", symlink_path)
+            shutil.rmtree(symlink_path)
         symlink_path.mkdir(parents=True, exist_ok=True)
 
         # Create individual file symlinks
         for target_file, source_file in file_symlinks_map.items():
             (symlink_path / target_file).symlink_to(weights_dir / source_file)
-
         return symlink_path
 
     # Handle single directory/file symlink (standard case)
-    if symlink_path.is_symlink():
+    if symlink_path.is_symlink() or symlink_path.is_file():
+        logger.warning("Removing stale model link at %s before recreating it", symlink_path)
         symlink_path.unlink()
-    assert not symlink_path.exists(), (
-        f"symlink location: {symlink_path} has a non-symlink there."
-    )
+    elif symlink_path.is_dir():
+        logger.warning(
+            "Removing stale model directory at %s before recreating it", symlink_path
+        )
+        shutil.rmtree(symlink_path)
+
     symlink_path.symlink_to(weights_dir)
     return symlink_path
 
