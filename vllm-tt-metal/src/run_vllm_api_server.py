@@ -190,6 +190,12 @@ def apply_qwen35_warmup_compat() -> None:
         wrapper = runner.model[0] if isinstance(runner.model, (list, tuple)) else runner.model
         return wrapper if isinstance(wrapper, TTQwen35ForCausalLM) else None
 
+    def _get_qwen35_req_ids_by_indices(runner, indices=None):
+        req_ids = list(getattr(getattr(runner, "input_batch", None), "req_ids", []) or [])
+        if indices is None:
+            return req_ids
+        return [req_ids[int(idx)] for idx in indices]
+
     def _get_qwen35_request_state_store(wrapper):
         store = getattr(wrapper, "_codex_qwen35_request_state_store", None)
         if store is None:
@@ -484,6 +490,7 @@ def apply_qwen35_warmup_compat() -> None:
 
         model = _extract_qwen35_model(self)
         req_ids = list(getattr(self, "_codex_active_req_ids", []) or [])
+        mixed_prefill = bool(getattr(self, "_codex_qwen35_mixed_prefill", False))
         broadcast_batch = int(getattr(self, "_codex_prefill_state_broadcast_batch", 0) or 0)
         saved_external_states = getattr(model, "_deltanet_external_states", None)
         using_request_state_compat = bool(req_ids) and broadcast_batch == 0 and saved_external_states is not None
@@ -548,7 +555,13 @@ def apply_qwen35_warmup_compat() -> None:
             active_req_ids = req_ids[:batch_size]
             if batch_size <= 1:
                 _save_qwen35_request_states(self, model, active_req_ids)
-            _load_qwen35_request_states(self, model, active_req_ids, saved_external_states)
+            if not mixed_prefill:
+                _load_qwen35_request_states(
+                    self,
+                    model,
+                    active_req_ids,
+                    saved_external_states,
+                )
             self._codex_qwen35_batch_layout_changed = False
 
         if isinstance(output, tuple) and len(output) == 2:
@@ -576,7 +589,7 @@ def apply_qwen35_warmup_compat() -> None:
             _load_qwen35_request_states(self, model, req_ids, external_states)
             self._codex_qwen35_batch_layout_changed = False
 
-        return original_decode_forward(
+        output = original_decode_forward(
             self,
             tokens=tokens,
             start_pos=start_pos,
@@ -586,6 +599,26 @@ def apply_qwen35_warmup_compat() -> None:
             read_from_device=read_from_device,
             **kwargs,
         )
+
+        post_decode_merge_req_ids = list(
+            getattr(self, "_codex_qwen35_post_decode_merge_req_ids", []) or []
+        )
+        if req_ids and external_states is not None and post_decode_merge_req_ids:
+            _save_qwen35_request_states(
+                self,
+                model,
+                req_ids,
+                external_states=external_states,
+            )
+            _load_qwen35_request_states(
+                self,
+                model,
+                post_decode_merge_req_ids,
+                external_states,
+            )
+            self._codex_qwen35_batch_layout_changed = False
+
+        return output
 
     def warmup_model_prefill(
         self, kv_cache, enable_trace, can_sample_on_device, non_greedy_decoding_on_device
@@ -639,11 +672,51 @@ def apply_qwen35_warmup_compat() -> None:
         if wrapper is None:
             return original_execute_with_model_input(self, model_input)
 
-        wrapper._codex_active_req_ids = list(getattr(self.input_batch, "req_ids", []))
+        full_req_ids = _get_qwen35_req_ids_by_indices(self)
+        prompt_lens = getattr(model_input, "prompt_lens", None)
+        prefill_req_ids = full_req_ids
+        decode_req_ids = full_req_ids
+        is_mixed = False
+
+        if isinstance(prompt_lens, list):
+            prefill_indices = [idx for idx, prompt_len in enumerate(prompt_lens) if prompt_len > 0]
+            decode_indices = [idx for idx, prompt_len in enumerate(prompt_lens) if prompt_len == -1]
+            is_mixed = bool(prefill_indices) and bool(decode_indices)
+            if prefill_indices:
+                prefill_req_ids = _get_qwen35_req_ids_by_indices(self, prefill_indices)
+            if decode_indices:
+                decode_req_ids = _get_qwen35_req_ids_by_indices(self, decode_indices)
+        elif prompt_lens is None:
+            decode_req_ids = full_req_ids
+
+        original_wrapper_prefill = wrapper.prefill_forward
+        original_wrapper_decode = wrapper.decode_forward
+
+        def _prefill_forward_with_req_subset(*args, **kwargs):
+            wrapper._codex_active_req_ids = prefill_req_ids
+            wrapper._codex_qwen35_mixed_prefill = is_mixed
+            wrapper._codex_qwen35_post_decode_merge_req_ids = None
+            return original_wrapper_prefill(*args, **kwargs)
+
+        def _decode_forward_with_req_subset(*args, **kwargs):
+            wrapper._codex_active_req_ids = decode_req_ids
+            wrapper._codex_qwen35_mixed_prefill = False
+            wrapper._codex_qwen35_post_decode_merge_req_ids = full_req_ids if is_mixed else None
+            return original_wrapper_decode(*args, **kwargs)
+
+        wrapper.prefill_forward = _prefill_forward_with_req_subset
+        wrapper.decode_forward = _decode_forward_with_req_subset
+        wrapper._codex_active_req_ids = full_req_ids
+        wrapper._codex_qwen35_mixed_prefill = False
+        wrapper._codex_qwen35_post_decode_merge_req_ids = None
         try:
             return original_execute_with_model_input(self, model_input)
         finally:
+            wrapper.prefill_forward = original_wrapper_prefill
+            wrapper.decode_forward = original_wrapper_decode
             wrapper._codex_active_req_ids = None
+            wrapper._codex_qwen35_mixed_prefill = False
+            wrapper._codex_qwen35_post_decode_merge_req_ids = None
 
     def update_states_with_qwen35_request_snapshot(self, scheduler_output):
         wrapper = _extract_qwen35_wrapper_from_runner(self)
@@ -680,6 +753,125 @@ def apply_qwen35_warmup_compat() -> None:
 
 
 apply_qwen35_warmup_compat()
+
+
+def apply_openai_chat_stream_logging_compat() -> None:
+    try:
+        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+    except Exception:
+        return
+
+    if getattr(OpenAIServingChat, "_codex_stream_logging_compat", False):
+        return
+
+    original_stream_generator = OpenAIServingChat.chat_completion_stream_generator
+
+    async def chat_completion_stream_generator_with_logging(
+        self,
+        request,
+        result_generator,
+        request_id,
+        model_name,
+        conversation,
+        tokenizer,
+        request_metadata,
+    ):
+        saw_done = False
+        saw_finish_reason = False
+        finish_reasons = []
+        chunk_count = 0
+        async def logging_result_generator():
+            result_count = 0
+            exhausted = False
+            try:
+                async for res in result_generator:
+                    result_count += 1
+                    outputs_summary = [
+                        {
+                            "index": output.index,
+                            "finish_reason": output.finish_reason,
+                            "token_count": len(getattr(output, "token_ids", []) or []),
+                            "text_len": len(getattr(output, "text", "") or ""),
+                        }
+                        for output in getattr(res, "outputs", [])
+                    ]
+                    if (
+                        result_count <= 3
+                        or result_count % 50 == 0
+                        or any(item["finish_reason"] is not None for item in outputs_summary)
+                    ):
+                        logging.getLogger(__name__).warning(
+                            "Qwen3.5 result_generator event: request_id=%s result_count=%s outputs=%s",
+                            request_id,
+                            result_count,
+                            outputs_summary,
+                        )
+                    yield res
+                exhausted = True
+            finally:
+                logging.getLogger(__name__).warning(
+                    "Qwen3.5 result_generator closed: request_id=%s result_count=%s exhausted=%s",
+                    request_id,
+                    result_count,
+                    exhausted,
+                )
+
+        try:
+            async for chunk in original_stream_generator(
+                self,
+                request,
+                logging_result_generator(),
+                request_id,
+                model_name,
+                conversation,
+                tokenizer,
+                request_metadata,
+            ):
+                chunk_count += 1
+                if isinstance(chunk, str) and chunk.startswith("data: "):
+                    payload = chunk[6:].strip()
+                    if payload == "[DONE]":
+                        saw_done = True
+                        logging.getLogger(__name__).warning(
+                            "Qwen3.5 chat stream observed [DONE]: request_id=%s chunk_count=%s",
+                            request_id,
+                            chunk_count,
+                        )
+                    else:
+                        try:
+                            data = json.loads(payload)
+                        except Exception:
+                            data = None
+                        if isinstance(data, dict):
+                            for choice in data.get("choices", []) or []:
+                                finish_reason = choice.get("finish_reason")
+                                if finish_reason is not None:
+                                    saw_finish_reason = True
+                                    finish_reasons.append(str(finish_reason))
+                                    logging.getLogger(__name__).warning(
+                                        "Qwen3.5 chat stream observed finish_reason: request_id=%s chunk_count=%s finish_reason=%s",
+                                        request_id,
+                                        chunk_count,
+                                        finish_reason,
+                                    )
+                yield chunk
+        finally:
+            logging.getLogger(__name__).warning(
+                "Qwen3.5 chat stream summary: request_id=%s chunks=%s saw_finish_reason=%s finish_reasons=%s saw_done=%s",
+                request_id,
+                chunk_count,
+                saw_finish_reason,
+                finish_reasons[:8],
+                saw_done,
+            )
+
+    OpenAIServingChat.chat_completion_stream_generator = (
+        chat_completion_stream_generator_with_logging
+    )
+    OpenAIServingChat._codex_stream_logging_compat = True
+
+
+apply_openai_chat_stream_logging_compat()
 
 
 def apply_qwen35_deltanet_decode_debug_compat() -> None:
@@ -1635,6 +1827,56 @@ def set_vllm_sys_argv(args, remaining_sys_argv, default_vllm_args):
     logger.info(f"vLLM command:\n{format_vllm_serve_command(sys.argv)}")
 
 
+def patch_vllm_serving_chat_source() -> None:
+    try:
+        spec = importlib.util.find_spec("vllm.entrypoints.openai.serving_chat")
+    except Exception:
+        spec = None
+
+    if spec is None or not getattr(spec, "origin", None):
+        logging.getLogger(__name__).warning(
+            "Could not locate vllm.entrypoints.openai.serving_chat for source patching"
+        )
+        return
+
+    path = Path(spec.origin)
+    text = path.read_text()
+    marker = "if all(finish_reason_sent):"
+    if marker in text:
+        logging.getLogger(__name__).warning(
+            "vLLM serving_chat source already contains finish_reason_sent early-break patch: %s",
+            path,
+        )
+        return
+
+    old = """                    data = chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
+
+            # once the final token is handled, if stream_options.include_usage"""
+    new = """                    data = chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
+
+                # Some TT/vLLM chat streams never close their underlying result generator
+                # even after all choices emitted finish_reason. Stop waiting here so
+                # usage and the terminal [DONE] chunk can still be sent.
+                if all(finish_reason_sent):
+                    break
+
+            # once the final token is handled, if stream_options.include_usage"""
+    if old not in text:
+        logging.getLogger(__name__).warning(
+            "Could not find the expected serving_chat.py streaming block to patch: %s",
+            path,
+        )
+        return
+
+    path.write_text(text.replace(old, new, 1))
+    logging.getLogger(__name__).warning(
+        "Patched vLLM serving_chat source on disk for early finish_reason break: %s",
+        path,
+    )
+
+
 def main():
     # Step 1: Parse --model argument (if provided)
     args, remaining_sys_argv = parse_args()
@@ -1698,6 +1940,21 @@ def main():
     )
 
     # Step 6: Launch vLLM server
+    patch_vllm_serving_chat_source()
+
+    # Apply chat-stream monkeypatches late as well; early import-time patching can miss
+    # OpenAIServingChat during startup depending on module import order.
+    apply_openai_chat_stream_logging_compat()
+    try:
+        from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+
+        logger.warning(
+            "OpenAIServingChat patched before launch: %s",
+            getattr(OpenAIServingChat, "_codex_stream_logging_compat", False),
+        )
+    except Exception:
+        logger.exception("Failed to verify OpenAIServingChat patch status before launch")
+
     # runpy uses the same process and environment so the registered models are available
     runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__")
 
