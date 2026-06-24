@@ -43,6 +43,26 @@ def short_uuid():
     return str(uuid.uuid4())[:8]
 
 
+def _should_set_unlimited_memlock_ulimit() -> bool:
+    if os.getenv("TT_DOCKER_FORCE_MEMLOCK_ULIMIT") == "1":
+        return True
+    if os.getenv("TT_DOCKER_DISABLE_MEMLOCK_ULIMIT") == "1":
+        return False
+
+    try:
+        container_type = Path("/run/systemd/container").read_text().strip().lower()
+    except OSError:
+        container_type = ""
+
+    if container_type in {"lxc", "lxd"}:
+        logger.warning(
+            "Skipping --ulimit memlock=-1:-1 inside %s because nested docker/runc rejects it on this host. Set TT_DOCKER_FORCE_MEMLOCK_ULIMIT=1 to restore the upstream behavior.",
+            container_type,
+        )
+        return False
+    return True
+
+
 # cpp_server backend opt-in for selected MEDIA models.
 #
 # The tt-media-server image bundles both the Python uvicorn server and the C++
@@ -269,7 +289,7 @@ def generate_docker_run_command(
         # invalid device IOVA -> "Bus error: Non-existent physical address" during weight upload.
         "--privileged",
         "--cap-add", "IPC_LOCK",
-        "--ulimit", "memlock=-1:-1",
+        *(["--ulimit", "memlock=-1:-1"] if _should_set_unlimited_memlock_ulimit() else []),
         *device_map_strs,
         "--mount", "type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G",
     ]

@@ -312,9 +312,21 @@ def main():
         "DEPLOY_URL", "http://127.0.0.1"
     )
 
-    # Automatically control trace capture based on has_builtin_warmup
-    # Only apply automatic logic if user hasn't explicitly set --disable-trace-capture
-    if not disable_trace_capture and hasattr(model_spec, "has_builtin_warmup"):
+    force_client_trace_capture = os.getenv("TT_BENCH_FORCE_TRACE_CAPTURE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    # Automatically control trace capture based on has_builtin_warmup unless explicitly overridden.
+    # Users forcing Llama-like benchmark conditions on builtin-warmup models can opt in via
+    # TT_BENCH_FORCE_TRACE_CAPTURE=1.
+    if force_client_trace_capture:
+        logger.info(
+            "TT_BENCH_FORCE_TRACE_CAPTURE is set; keeping benchmarks workflow client-side trace capture enabled"
+        )
+    elif not disable_trace_capture and hasattr(model_spec, "has_builtin_warmup"):
         if model_spec.has_builtin_warmup:
             # Model has builtin warmup - disable client-side trace capture
             disable_trace_capture = True

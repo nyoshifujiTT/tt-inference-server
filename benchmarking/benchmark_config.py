@@ -539,12 +539,17 @@ for model_id, model_spec in MODEL_SPECS.items():
     perf_reference = model_spec.device_model_spec.perf_reference
 
     # Apply capping to each perf reference entry (including vision tokens for VLM models)
+    # Preserve explicit perf-reference concurrency targets from override files
+    # even when the static model spec advertises a conservative default.
     capped_perf_reference = [
         cap_benchmark_params(
             params,
             max_context,
             max_tokens_all_users,
-            model_max_concurrency,
+            max(
+                model_max_concurrency,
+                int(getattr(params, "max_concurrency", 0) or 0),
+            ),
             model_spec.model_name,
         )
         for params in perf_reference
