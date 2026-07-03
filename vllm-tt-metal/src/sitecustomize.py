@@ -591,7 +591,14 @@ def _force_bge_v1_ttworker_pooling_runner() -> None:
 
         # In bge context, fallback to pooling runner whenever a generation runner
         # was instantiated for an embedding-capable model.
-        if is_embed_model:            logger.warning(
+        if is_embed_model:
+            if not hasattr(TTModelRunnerPooling, "initialize_kv_cache"):
+                logger.warning(
+                    "sitecustomize: TTModelRunnerPooling lacks initialize_kv_cache; keeping original runner for %s",
+                    type(model).__name__,
+                )
+                return result
+            logger.warning(
                 "sitecustomize: replacing v1 TTModelRunner with TTModelRunnerPooling for %s",
                 type(model).__name__,
             )
