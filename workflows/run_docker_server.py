@@ -211,6 +211,10 @@ def generate_docker_run_command(
     # fmt: on
 
     docker_env_vars = {}
+    # Some historical dev images do not bake CACHE_ROOT; pass it explicitly.
+    if setup_config and setup_config.cache_root:
+        docker_env_vars["CACHE_ROOT"] = setup_config.cache_root
+
     if setup_config:
         if (
             setup_config.container_model_weights_path
