@@ -875,16 +875,19 @@ templates:
     - meta-llama/Llama-3.1-8B
     - meta-llama/Llama-3.1-8B-Instruct
   impl: tt_transformers
-  version: "0.10.0"
-  tt_metal_commit: 55fd115
-  vllm_commit: aa4ae1e
+  version: "0.10.1"
+  tt_metal_commit: 555f240
+  vllm_commit: 22be241
   inference_engine: VLLM
   device_model_specs:
     - device: P150X4
       max_concurrency: 128  # 32 * 4
       max_context: 131072  # 128 * 1024
       default_impl: true
+      vllm_args:
+        data_parallel_size: 4
       override_tt_config:
+        data_parallel: 4
         sample_on_device_mode: decode_only
         trace_region_size: 70000000
   status: COMPLETE
