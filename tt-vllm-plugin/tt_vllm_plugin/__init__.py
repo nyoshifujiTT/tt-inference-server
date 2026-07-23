@@ -32,11 +32,11 @@ def register_models():
         print("Registered BGE embedding model")
         ModelRegistry.register_model(
             "XLMRobertaForSequenceClassification",
-            "models.demos.wormhole.bge_m3.demo.generator_vllm:BgeM3ForEmbedding",
+            "models.demos.wormhole.bge_reranker_v2_m3.demo.generator_vllm:BgeRerankerV2M3",
         )
         ModelRegistry.register_model(
             "TTXLMRobertaForSequenceClassification",
-            "models.demos.wormhole.bge_m3.demo.generator_vllm:BgeM3ForEmbedding",
+            "models.demos.wormhole.bge_reranker_v2_m3.demo.generator_vllm:BgeRerankerV2M3",
         )
         print("Registered BGE reranker model")
     except Exception as e:
