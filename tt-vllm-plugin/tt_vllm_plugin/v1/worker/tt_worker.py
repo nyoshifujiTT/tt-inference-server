@@ -174,6 +174,12 @@ class TTWorker(WorkerBase):
         self.cache_config.num_gpu_blocks_override.
         """
 
+        # Pooling/embedding models do not use a KV cache. Returning an empty
+        # spec makes vLLM engine core treat this as attention-free and skip
+        # KV cache allocation (has_kv_cache = any(specs)).
+        if isinstance(self.model_runner, TTModelRunnerPooling):
+            return {}
+
         # TODO: Once we're able to populate a static forward context,
         # generate separate specs per layer (e.g. also sliding window, local
         # attention).
