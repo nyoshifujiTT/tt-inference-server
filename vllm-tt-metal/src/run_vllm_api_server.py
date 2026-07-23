@@ -16,8 +16,16 @@ from typing import Optional
 from huggingface_hub import snapshot_download
 from vllm import ModelRegistry
 
-from utils.cache_monitor import get_container_cache_dir
-from utils.device_utils import get_mesh_device_name
+try:
+    from utils.cache_monitor import get_container_cache_dir
+except Exception:
+    get_container_cache_dir = None
+try:
+    from utils.device_utils import get_mesh_device_name
+except Exception:
+    def get_mesh_device_name(device: str) -> str:
+        # Compatibility fallback for older container images that lack utils.device_utils
+        return str(device)
 from utils.logging_utils import set_vllm_logging_config
 from utils.prompt_client import run_background_trace_capture
 from utils.vllm_run_utils import (
@@ -46,7 +54,7 @@ def parse_args():
     parser.add_argument(
         "--tt-device",
         type=str,
-        required=True,
+        required=False,
         help="Device type (e.g., n300, t3k, galaxy)",
     )
     parser.add_argument(
@@ -327,9 +335,25 @@ def set_cache_paths(model_spec: dict, device_type: str):
         device_type: Canonical device type name (e.g., "N300", "GALAXY")
     """
     mesh_device = get_mesh_device_name(device=device_type)
-    tt_cache_path = get_container_cache_dir(model_spec, device=device_type)
+    if get_container_cache_dir is not None:
+        tt_cache_path = get_container_cache_dir(model_spec, device=device_type)
+    else:
+        cache_root = Path(os.getenv("CACHE_ROOT", "/home/container_app_user/cache_root"))
+        model_name = model_spec.get("model_name", "model")
+        tt_cache_path = cache_root / "tt_metal_cache" / f"cache_{model_name}" / mesh_device
+
     if tt_cache_path is None:
         raise RuntimeError("Could not resolve TT cache path from model spec.")
+
+    # Optional manual override for mesh shape/device name (e.g. "(2,2)").
+    mesh_device_override = os.getenv("TT_MESH_DEVICE_OVERRIDE")
+    if mesh_device_override:
+        logger.warning(
+            "Overriding MESH_DEVICE from %s to %s via TT_MESH_DEVICE_OVERRIDE",
+            mesh_device,
+            mesh_device_override,
+        )
+        mesh_device = mesh_device_override
 
     # Set MESH_DEVICE env var for other components that need it
     os.environ["MESH_DEVICE"] = mesh_device
@@ -367,7 +391,6 @@ def register_tt_models(impl_id=None):
         "TTArceeForCausalLM",
         "models.tt_transformers.tt.generator_vllm:TTArceeForCausalLM",
     )
-
 
 def model_setup(model_spec_json):
     # step 1: validate env vars passed in
@@ -546,6 +569,13 @@ def set_runtime_env_vars(model_spec_json):
             value = str(value)
 
         original_value = os.getenv(key)
+        if key == "MESH_DEVICE" and os.getenv("TT_MESH_DEVICE_OVERRIDE"):
+            logger.warning(
+                "Skipping model-spec override for MESH_DEVICE because "
+                "TT_MESH_DEVICE_OVERRIDE is set (%s)",
+                os.getenv("TT_MESH_DEVICE_OVERRIDE"),
+            )
+            continue
         if original_value is not None:
             logger.warning(
                 f"env var {key} is already set to {original_value}, overriding with {value}"
@@ -660,6 +690,9 @@ def format_vllm_serve_command(argv) -> str:
 def set_vllm_sys_argv(args, remaining_sys_argv, default_vllm_args):
     # runpy uses sys.argv, rebuild it with the merged vLLM args.
     vllm_argv = [sys.argv[0]]
+
+    # Prefer local symlink path when available to avoid online HF metadata lookup.
+    hf_model_local_path = os.getenv("HF_MODEL")
     remaining_default_vllm_args = dict(default_vllm_args)
     default_arg_name_by_normalized_name = {
         _normalize_vllm_arg_name(arg_name): arg_name
@@ -712,6 +745,30 @@ def set_vllm_sys_argv(args, remaining_sys_argv, default_vllm_args):
         cli_arg_name = f"--{key}"
         _append_vllm_arg(vllm_argv, cli_arg_name, value)
 
+    # Force local HF path when model_setup() has prepared it.
+    if hf_model_local_path:
+        replaced_model = False
+        index = 0
+        while index < len(vllm_argv):
+            token = vllm_argv[index]
+            if token == "--model" and index + 1 < len(vllm_argv):
+                vllm_argv[index + 1] = hf_model_local_path
+                replaced_model = True
+                break
+            if token.startswith("--model="):
+                vllm_argv[index] = f"--model={hf_model_local_path}"
+                replaced_model = True
+                break
+            index += 1
+
+        if not replaced_model:
+            vllm_argv.extend(["--model", hf_model_local_path])
+
+        logger.info(
+            "Overriding vLLM --model with HF_MODEL local path: %s",
+            hf_model_local_path,
+        )
+
     # finally set sys.argv to the vllm server args
     sys.argv = vllm_argv
     logger.info(f"vLLM command:\n{format_vllm_serve_command(sys.argv)}")
@@ -755,6 +812,28 @@ def main():
     # Step 4: Set runtime environment variables and vLLM server args
     set_metal_timeout_env_vars()
     set_runtime_env_vars(model_spec)
+
+    # Ensure local src is on PYTHONPATH so sitecustomize/runtime patches apply
+    src_dir = str(Path(__file__).resolve().parent)
+    py_path = os.environ.get("PYTHONPATH", "")
+    if src_dir not in py_path.split(":"):
+        os.environ["PYTHONPATH"] = f"{src_dir}:{py_path}" if py_path else src_dir
+        logger.info("Prepended src dir to PYTHONPATH for runtime patching: %s", src_dir)
+
+    # Final guard: force mesh override right before engine startup.
+    mesh_device_override = os.getenv("TT_MESH_DEVICE_OVERRIDE")
+    if mesh_device_override:
+        os.environ["MESH_DEVICE"] = mesh_device_override
+        logger.warning(
+            "Forcing MESH_DEVICE=%s from TT_MESH_DEVICE_OVERRIDE just before runtime_settings",
+            mesh_device_override,
+        )
+    logger.info(
+        "Final mesh env before runtime_settings: MESH_DEVICE=%s TT_MESH_DEVICE_OVERRIDE=%s",
+        os.getenv("MESH_DEVICE"),
+        os.getenv("TT_MESH_DEVICE_OVERRIDE"),
+    )
+
     runtime_settings(model_spec, no_auth=args.no_auth)
     default_vllm_args = model_spec["device_model_spec"]["vllm_args"]
     set_vllm_sys_argv(args, remaining_sys_argv, default_vllm_args)
