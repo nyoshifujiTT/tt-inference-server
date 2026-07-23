@@ -8,17 +8,30 @@ import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.platforms.interface import Platform, PlatformEnum
-from vllm.sampling_params import SamplingParams
+# moved to lazy import to avoid circular import with fork vllm
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
+    from vllm.sampling_params import SamplingParams
 else:
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
+    SamplingParams = None
 
 logger = init_logger("vllm.tt_vllm_plugin.platform")
+
+
+def _vllm_use_v1() -> bool:
+    """fork vllm(22be241) has no VLLM_USE_V1 env (always v1). Fall back to True.
+    Upstream/pypi vllm exposes envs.VLLM_USE_V1; honor it when present."""
+    _VLLM_USE_V1_COMPAT = True
+    try:
+        return bool(envs.VLLM_USE_V1)
+    except AttributeError:
+        import os
+        return os.environ.get("VLLM_USE_V1", "1") == "1"
 
 
 class TTPlatform(Platform):
@@ -55,8 +68,13 @@ class TTPlatform(Platform):
         ), "TT backend does not support distributed execution"
         assert not vllm_config.lora_config, "LoRA is not supported for TT backend"
 
+        # NOTE(fork-compat): The plugin defaults to its bundled AscendScheduler,
+        # but that scheduler targets pypi vllm and is incompatible with the
+        # tenstorrent fork(22be241) Scheduler signature (e.g. block_size kwarg).
+        # The plugin's own comment below states the default vLLM scheduler works
+        # fine for the TT platform, so use it on the fork.
         vllm_config.scheduler_config.scheduler_cls = (
-            "tt_vllm_plugin.v1.ascend_scheduler.AscendScheduler"
+            "vllm.v1.core.sched.scheduler.Scheduler"
         )
 
         # Set default block_size if not specified by user
@@ -70,7 +88,7 @@ class TTPlatform(Platform):
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
+            if _vllm_use_v1():
                 parallel_config.worker_cls = (
                     "tt_vllm_plugin.v1.worker.tt_worker.TTWorker"
                 )
@@ -120,7 +138,7 @@ class TTPlatform(Platform):
         # or if any of the requests in the batch require it.
         # For now, it is only supported with host-side sampling.
 
-        if envs.VLLM_USE_V1:  # type: ignore[attr-defined]
+        if _vllm_use_v1():  # type: ignore[attr-defined]
             logger.warning(
                 "Disabling compatibility sampling as it's not yet support for "
                 "V1 TT backend."
@@ -136,7 +154,7 @@ class TTPlatform(Platform):
                 "always_compat_sampling must be a boolean"
             )
             if always_compat_sampling:
-                if envs.VLLM_USE_V1:
+                if _vllm_use_v1():
                     raise ValueError(
                         "always_compat_sampling is not yet supported for V1 TT backend."
                     )
@@ -165,7 +183,7 @@ class TTPlatform(Platform):
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on TT is experimental.
         # Allow users to opt in, but give a warning.
-        if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
+        if _vllm_use_v1():
             if model_config.is_encoder_decoder:
                 raise ValueError(
                     "VLLM_USE_V1=1 was set but encoder-decoder models aren't "
@@ -175,7 +193,7 @@ class TTPlatform(Platform):
                 "Enabling V1 since VLLM_USE_V1=1, however V1 is still "
                 "experimental for TT backend."
             )
-            return envs.VLLM_USE_V1
+            return _vllm_use_v1()
         return False
 
     @classmethod
@@ -198,6 +216,7 @@ class TTPlatform(Platform):
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
+        from vllm.sampling_params import SamplingParams
 
         if isinstance(params, SamplingParams):
             if params.n != 1:

@@ -9,7 +9,10 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+try:
+    from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+except ImportError:  # fork vllm(22be241) relocated it
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
