@@ -79,7 +79,7 @@ def _patch_bge_roberta_embedding_shim() -> None:
 
     @classmethod
     def _initialize_vllm_model(cls, *args, **kwargs):
-        from models.demos.wormhole.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
+        from models.demos.bge_reranker_v2_m3.demo.generator_vllm import BgeRerankerV2M3
 
         logger.warning(
             "sitecustomize: redirecting RobertaEmbeddingModel.initialize_vllm_model to BgeRerankerV2M3"
@@ -217,7 +217,7 @@ def _patch_bge_model_registry_registration() -> None:
         try:
             ModelRegistry.register_model(
                 arch_name,
-                "models.demos.wormhole.bge_reranker_v2_m3.demo.generator_vllm:BgeRerankerV2M3",
+                "models.demos.bge_reranker_v2_m3.demo.generator_vllm:BgeRerankerV2M3",
             )
             logger.warning(
                 "sitecustomize: registered BGE-M3 model architecture in subprocess: %s",
