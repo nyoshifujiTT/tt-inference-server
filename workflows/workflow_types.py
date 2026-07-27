@@ -222,6 +222,7 @@ class DeviceTypes(IntEnum):
             (DeviceTypes.N300, 2): DeviceTypes.N150,
             (DeviceTypes.N150, 1): DeviceTypes.N150,
             (DeviceTypes.P150X4, 4): DeviceTypes.P150,
+            (DeviceTypes.P150X8, 2): DeviceTypes.P150X4,
             (DeviceTypes.P150X8, 8): DeviceTypes.P150,
             (DeviceTypes.BLACKHOLE_GALAXY, 1): DeviceTypes.BLACKHOLE_GALAXY,
             (DeviceTypes.BLACKHOLE_GALAXY, 4): DeviceTypes.P150X8,
