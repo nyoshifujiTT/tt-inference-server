@@ -170,11 +170,10 @@ class Qwen3Embedding8BRunner(EmbeddingRunner):
 
     def _load_model(self):
         self.logger.info(f"Device {self.device_id}: Loading model...")
-        # Shared, device/size-agnostic adapter (subclasses the official PR #35941
-        # wrapper). Gives the media runner the same offline/size-agnostic model
-        # resolution and per-request prefill padding as the vLLM pooling path.
+        # Shared adapter (subclasses the upstream PR #35941 wrapper) exposing the
+        # fork pooling contract. Aliased to the name the runner expects.
         from models.demos.qwen3_embedding.tt.generator_vllm import (
-            Qwen3ForEmbedding,
+            Qwen3EmbeddingForPooling as Qwen3ForEmbedding,
         )
 
         self.model = Qwen3ForEmbedding(
