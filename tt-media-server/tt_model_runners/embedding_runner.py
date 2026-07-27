@@ -170,7 +170,10 @@ class Qwen3Embedding8BRunner(EmbeddingRunner):
 
     def _load_model(self):
         self.logger.info(f"Device {self.device_id}: Loading model...")
-        from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm import (
+        # Shared, device/size-agnostic adapter (subclasses the official PR #35941
+        # wrapper). Gives the media runner the same offline/size-agnostic model
+        # resolution and per-request prefill padding as the vLLM pooling path.
+        from models.demos.qwen3_embedding.tt.generator_vllm import (
             Qwen3ForEmbedding,
         )
 

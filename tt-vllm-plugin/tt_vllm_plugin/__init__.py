@@ -45,7 +45,10 @@ def register_models():
     # vLLM/TT stacks may resolve the embedding checkpoint as plain
     # Qwen3ForCausalLM / QwenForCausalLM instead of the embedding class.
     try:
-        qwen_embed_target = "models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm:Qwen3ForEmbedding"
+        # Shared, device/size-agnostic adapter that subclasses the official
+        # PR #35941 Qwen3ForEmbedding and adds the fork pooling contract. The
+        # upstream wormhole/qwen3_embedding_8b file is kept unchanged.
+        qwen_embed_target = "models.demos.qwen3_embedding.tt.generator_vllm:Qwen3ForEmbedding"
         for arch_name in [
             "TTQwen3Model",
             "TTQwen3ForCausalLM",
