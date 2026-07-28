@@ -173,7 +173,7 @@ class Qwen3Embedding8BRunner(EmbeddingRunner):
         # Shared adapter (subclasses the upstream PR #35941 wrapper) exposing the
         # fork pooling contract. Aliased to the name the runner expects.
         from models.demos.qwen3_embedding.tt.generator_vllm import (
-            Qwen3EmbeddingForPooling as Qwen3ForEmbedding,
+            Qwen3EmbeddingForTTvLLM as Qwen3ForEmbedding,
         )
 
         self.model = Qwen3ForEmbedding(

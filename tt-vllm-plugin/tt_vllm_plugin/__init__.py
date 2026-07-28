@@ -49,7 +49,7 @@ def register_models():
         # unchanged) and adds only the fork pooling contract (is_pooling_model,
         # embed_input_ids, positions kw). Distinct class name to avoid shadowing
         # the base class.
-        qwen_embed_target = "models.demos.qwen3_embedding.tt.generator_vllm:Qwen3EmbeddingForPooling"
+        qwen_embed_target = "models.demos.qwen3_embedding.tt.generator_vllm:Qwen3EmbeddingForTTvLLM"
         for arch_name in [
             "TTQwen3Model",
             "TTQwen3ForCausalLM",
