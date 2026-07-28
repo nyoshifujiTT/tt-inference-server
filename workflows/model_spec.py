@@ -3364,12 +3364,22 @@ embedding_templates = [
             DeviceModelSpec(
                 device=DeviceTypes.P150,
                 max_concurrency=32,
-                max_context=64 * 1024,
+                # Single-card P150 (p150x1) caps the embedding context at 8192.
+                # This is not the model's positional limit (Qwen3-Embedding config
+                # max_position_embeddings is 40960 for 8B / 32768 for 0.6B) but the
+                # practical on-device limit: the paged KV cache, RoPE cos/sin and
+                # attention intermediates scale with max_seq_len, and a full 32768
+                # KV allocation exhausts device DRAM on a single p150 (observed
+                # TT_FATAL bank_manager OOM). ~8192 is the measured practical ceiling
+                # (see tt-torch #985). max_model_len / max_num_batched_tokens are
+                # derived from max_context, so this both admits and allocates for
+                # 8192. Raising it requires re-measuring L1/DRAM headroom.
+                max_context=8192,
                 default_impl=True,
                 env_vars={
                     "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
-                    "VLLM__MAX_NUM_BATCHED_TOKENS": "32768",
-                    "VLLM__MAX_MODEL_LENGTH": "32768",
+                    "VLLM__MAX_NUM_BATCHED_TOKENS": "8192",
+                    "VLLM__MAX_MODEL_LENGTH": "8192",
                     "VLLM__MIN_CONTEXT_LENGTH": "32",
                     "VLLM__MAX_NUM_SEQS": "32",
                     "MAX_BATCH_SIZE": "32",
