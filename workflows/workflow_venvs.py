@@ -308,7 +308,56 @@ def setup_evals_audio(
         )
         == 0
     )
+    if setup_succeeded:
+        # Install our OpenAI-compatible ASR eval model (qwen3_asr_openai) into
+        # the freshly-installed lmms-eval package. The upstream fork only ships
+        # the media-server whisper_tt client (base64 JSON to
+        # /audio/transcriptions); ASR models served by the vLLM OpenAI server
+        # need a multipart /v1/audio/transcriptions client. See
+        # evals/lmms_eval_models/qwen3_asr_openai.py.
+        setup_succeeded = _install_qwen3_asr_openai_eval_model(venv_config)
     return setup_succeeded
+
+
+def _install_qwen3_asr_openai_eval_model(venv_config: VenvConfig) -> bool:
+    """Copy the qwen3_asr_openai lmms-eval model into the installed lmms-eval
+    package and register it in the simple-model registry. Idempotent."""
+    import shutil
+    import subprocess
+
+    src = get_repo_root_path() / "evals" / "lmms_eval_models" / "qwen3_asr_openai.py"
+    if not src.exists():
+        logger.error(f"qwen3_asr_openai model source not found: {src}")
+        return False
+    try:
+        pkg_dir = subprocess.check_output(
+            [
+                str(venv_config.venv_python),
+                "-c",
+                "import os, lmms_eval; print(os.path.dirname(lmms_eval.__file__))",
+            ],
+            text=True,
+        ).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Could not locate installed lmms_eval package: {exc}")
+        return False
+    dst = Path(pkg_dir) / "models" / "simple" / "qwen3_asr_openai.py"
+    shutil.copyfile(src, dst)
+    init_path = Path(pkg_dir) / "models" / "__init__.py"
+    init_src = init_path.read_text()
+    if "qwen3_asr_openai" not in init_src:
+        anchor = '    "whisper_tt": "WhisperTT",' + chr(10)
+        entry = '    "qwen3_asr_openai": "Qwen3ASROpenAI",' + chr(10)
+        if anchor in init_src:
+            init_src = init_src.replace(anchor, anchor + entry, 1)
+            init_path.write_text(init_src)
+        else:
+            logger.error(
+                "Could not register qwen3_asr_openai: whisper_tt anchor not found"
+            )
+            return False
+    logger.info("Installed qwen3_asr_openai lmms-eval model into %s", dst)
+    return True
 
 
 def setup_evals_embedding(
