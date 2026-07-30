@@ -38,6 +38,7 @@ from workflows.workflow_config import (
 from workflows.workflow_types import (
     DeviceTypes,
     EvalLimitMode,
+    InferenceEngine,
     ModelType,
     WorkflowVenvType,
 )
@@ -212,10 +213,20 @@ def build_eval_command(
     Build the command for lm_eval by templating command-line arguments using properties
     from the given evaluation task and model configuration.
     """
-    # Audio models use tt-media-server which has endpoints at /audio (not /v1/audio)
-    # Other models use vLLM which has endpoints at /v1
+    # Audio models on tt-media-server expose /audio/transcriptions (no /v1),
+    # while audio models served by the vLLM OpenAI server expose
+    # /v1/audio/transcriptions. Select the base_url by the model's inference
+    # engine (not just the venv type) so a vLLM-served ASR model (e.g. Qwen3-ASR)
+    # is evaluated against /v1.
     if task.workflow_venv_type == WorkflowVenvType.EVALS_AUDIO:
-        base_url = f"http://127.0.0.1:{service_port}"
+        is_vllm_audio = (
+            getattr(model_spec, "inference_engine", None) == InferenceEngine.VLLM.value
+        )
+        base_url = (
+            f"http://127.0.0.1:{service_port}/v1"
+            if is_vllm_audio
+            else f"http://127.0.0.1:{service_port}"
+        )
     else:
         base_url = f"http://127.0.0.1:{service_port}/v1"
     eval_class = task.eval_class
