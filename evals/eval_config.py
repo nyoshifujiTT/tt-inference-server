@@ -2564,7 +2564,7 @@ _eval_config_list = [
         tasks=[
             EvalTask(
                 task_name="librispeech_test_other",
-                eval_class="whisper_tt",
+                eval_class="qwen3_asr_openai",
                 batch_size=1,
                 max_concurrent=1,
                 apply_chat_template=False,
@@ -2596,7 +2596,7 @@ _eval_config_list = [
         tasks=[
             EvalTask(
                 task_name="librispeech_test_other",
-                eval_class="whisper_tt",
+                eval_class="qwen3_asr_openai",
                 batch_size=1,
                 max_concurrent=1,
                 apply_chat_template=False,
