@@ -23,6 +23,9 @@ from domain.diarization_request import DiarizationRequest
 from domain.diarization_response import DiarizationResponse, DiarizationSegment
 from utils.decorators import log_execution_time
 from utils.diarization_backend import DiarizationBackend
+from utils.diarized_asr_coordinator import DiarizedAsrCoordinator
+from utils.asr_http_client import encode_wav_pcm16, transcribe_wav_bytes
+from utils.composite_model_id import parse_model_id
 from utils.ffmpeg_utils import decode_to_wav
 from utils.logger import TTLogger
 
@@ -97,6 +100,83 @@ class DiarizationService:
         service is constructed. Weights load lazily on first diarize call.
         """
         return {"model_ready": True, "runner_in_use": "diarization-cpu"}
+
+    def _wav_bytes_to_waveform(self, wav_bytes):
+        """Decode 16-bit PCM mono WAV bytes to a float32 numpy waveform."""
+        import wave
+
+        import numpy as np
+
+        with wave.open(__import__("io").BytesIO(wav_bytes), "rb") as w:
+            n = w.getnframes()
+            raw = w.readframes(n)
+        arr = np.frombuffer(raw, dtype=np.int16).astype("float32") / 32768.0
+        return arr
+
+    @log_execution_time("Diarized transcription request")
+    async def diarized_transcription(
+        self, request: DiarizationRequest, model: str, language=None, prompt=None
+    ) -> dict:
+        """Diarize + per-turn ASR -> OpenAI diarized_json.
+
+        ``model`` is the composite id "<asr>+<diarization>"; the ASR part is sent
+        to settings.asr_url per turn. Requires settings.asr_url to be configured.
+        """
+        parsed = parse_model_id(model)
+        if not parsed.wants_diarization:
+            raise ValueError(
+                "diarized_json requires a composite model id '<asr>+<diarization>'"
+            )
+        if not settings.asr_url:
+            raise ValueError(
+                "diarized transcription requires ASR_URL (settings.asr_url) to be set"
+            )
+
+        audio_bytes = request.file
+        if isinstance(audio_bytes, str):
+            import base64
+
+            audio_bytes = base64.b64decode(audio_bytes)
+        wav_bytes = decode_to_wav(
+            audio_bytes, sample_rate=settings.default_sample_rate
+        )
+        waveform = self._wav_bytes_to_waveform(wav_bytes)
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                f.write(wav_bytes)
+                tmp_path = f.name
+
+            def transcribe_slice(chunk, sr):
+                wb = encode_wav_pcm16(chunk, sr)
+                return transcribe_wav_bytes(
+                    settings.asr_url,
+                    parsed.asr_model,
+                    wb,
+                    language=language,
+                    prompt=prompt,
+                    timeout=settings.asr_timeout_s,
+                )
+
+            coordinator = DiarizedAsrCoordinator(
+                diarize_fn=self._backend.diarize,
+                transcribe_slice=transcribe_slice,
+                sample_rate=settings.default_sample_rate,
+            )
+            return coordinator.run(
+                tmp_path,
+                waveform,
+                num_speakers=request.num_speakers,
+                min_speakers=request.min_speakers,
+                max_speakers=request.max_speakers,
+            )
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def stop_workers(self):
         """No background workers to stop (CPU backend is in-process)."""
