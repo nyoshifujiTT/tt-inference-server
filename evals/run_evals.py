@@ -139,6 +139,33 @@ def _check_media_server_health(model_spec, device, output_path, service_port):
     return is_healthy, runner_in_use
 
 
+def _check_vllm_server_health(service_port, retries=60, delay=10):
+    """Health check for an audio model served by the vLLM OpenAI server.
+
+    The media health check hits /tt-liveness, which the vLLM OpenAI server does
+    not expose. vLLM exposes /health (200 when ready), so poll that instead.
+    """
+    import time
+    import urllib.request
+
+    url = f"http://127.0.0.1:{service_port}/health"
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                if resp.status == 200:
+                    logger.info(f"✅ vLLM server healthy at {url}")
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"vLLM health check attempt {attempt}/{retries} failed: {exc}"
+            )
+        time.sleep(delay)
+    raise RuntimeError(
+        f"❌ vLLM server not healthy at {url} after {retries} attempts. "
+        "Aborting evaluations."
+    )
+
+
 def _setup_openai_api_key(args, logger):
     """Setup OPENAI_API_KEY environment variable based on JWT secret or API key.
     Args:
@@ -446,13 +473,18 @@ def main():
     elif model_spec.model_type == ModelType.AUDIO:
         logger.info("Running audio evals with lmms-eval ...")
 
-        # Check if media server is healthy before running evals
-        _check_media_server_health(
-            model_spec=model_spec,
-            device=device,
-            output_path=args.output_path,
-            service_port=runtime_config.service_port,
-        )
+        # Check server health before running evals. Audio models served by the
+        # vLLM OpenAI server expose /health; media-served models expose
+        # /tt-liveness. Pick the check per inference engine.
+        if getattr(model_spec, "inference_engine", None) == InferenceEngine.VLLM.value:
+            _check_vllm_server_health(runtime_config.service_port)
+        else:
+            _check_media_server_health(
+                model_spec=model_spec,
+                device=device,
+                output_path=args.output_path,
+                service_port=runtime_config.service_port,
+            )
 
         return_codes = []
         for task in eval_config.tasks:
