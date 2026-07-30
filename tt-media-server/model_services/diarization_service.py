@@ -81,6 +81,23 @@ class DiarizationService:
             ]
         return DiarizationResponse(segments=segments, exclusiveDiarization=exclusive)
 
+    def start_workers(self):
+        """No device workers to start (CPU, in-process backend).
+
+        Part of the service lifecycle contract invoked by the app lifespan. The
+        pyannote pipeline is lazy-loaded on first request (and warmed by the
+        readiness check below), so there is nothing to spin up here.
+        """
+        return None
+
+    def check_is_model_ready(self) -> dict:
+        """Readiness for /health and /tt-liveness.
+
+        The CPU backend has no device to probe; it is ready as soon as the
+        service is constructed. Weights load lazily on first diarize call.
+        """
+        return {"model_ready": True, "runner_in_use": "diarization-cpu"}
+
     def stop_workers(self):
         """No background workers to stop (CPU backend is in-process)."""
         return None
