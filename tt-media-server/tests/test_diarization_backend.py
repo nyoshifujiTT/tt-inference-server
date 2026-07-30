@@ -83,3 +83,37 @@ def test_diarize_omits_exclusive_when_disabled():
     res = b.diarize("audio.wav", exclusive=False)
     assert "exclusiveDiarization" not in res
     assert b._pipeline.calls[0][1] == {}
+
+
+def test_nn_accelerator_hook_applied_at_pipeline_load(monkeypatch):
+    """The optional nn_accelerator hook runs against the loaded pipeline once."""
+    from utils import diarization_backend as db
+
+    applied = []
+
+    class _FakePipeline:
+        def to(self, dev):
+            return self
+
+    monkeypatch.setattr(db, "_install_torch_load_shim", lambda: None)
+
+    # Fake pyannote.audio.Pipeline.from_pretrained
+    import types, sys
+    fake_mod = types.ModuleType("pyannote.audio")
+    fake_mod.Pipeline = types.SimpleNamespace(from_pretrained=lambda p: _FakePipeline())
+    monkeypatch.setitem(sys.modules, "pyannote.audio", fake_mod)
+    # Fake torch.device
+    fake_torch = types.ModuleType("torch")
+    fake_torch.device = lambda d: d
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    def accel(pipe):
+        applied.append(pipe)
+
+    be = db.DiarizationBackend(model_path="/x", device="cpu", nn_accelerator=accel)
+    pipe = be._ensure_pipeline()
+    assert isinstance(pipe, _FakePipeline)
+    assert applied == [pipe]  # hook applied exactly once to the loaded pipeline
+    # second call reuses cached pipeline, hook not re-applied
+    be._ensure_pipeline()
+    assert len(applied) == 1

@@ -80,11 +80,16 @@ def build_pipeline_kwargs(
 class DiarizationBackend:
     """Lazy, thread-safe wrapper around a pyannote.audio 4.x pipeline (CPU)."""
 
-    def __init__(self, model_path: str, device: str = "cpu"):
+    def __init__(self, model_path: str, device: str = "cpu", nn_accelerator=None):
         self._model_path = model_path
         self._device = device
         self._pipeline = None
         self._lock = threading.Lock()
+        # Optional hook (pipeline) -> None to offload the community-1 NNs
+        # (segmentation PyanNet / embedding WeSpeaker) onto an accelerator such
+        # as a Tenstorrent p150 (see tt_port/). When None, everything runs on
+        # the configured torch device (CPU).
+        self._nn_accelerator = nn_accelerator
 
     def _ensure_pipeline(self):
         if self._pipeline is not None:
@@ -97,6 +102,8 @@ class DiarizationBackend:
                 _install_torch_load_shim()
                 pipe = Pipeline.from_pretrained(self._model_path)
                 pipe.to(torch.device(self._device))
+                if self._nn_accelerator is not None:
+                    self._nn_accelerator(pipe)
                 self._pipeline = pipe
         return self._pipeline
 
