@@ -28,6 +28,7 @@ class SupportedModels(Enum):
     DISTIL_WHISPER_LARGE_V3 = "distil-whisper/distil-large-v3"
     OPENAI_WHISPER_LARGE_V3 = "openai/whisper-large-v3"
     PYANNOTE_SPEAKER_DIARIZATION = "pyannote/speaker-diarization-3.0"
+    PYANNOTE_SPEAKER_DIARIZATION_COMMUNITY_1 = "pyannote/speaker-diarization-community-1"
     QWEN_3_EMBEDDING_4B = "Qwen/Qwen3-Embedding-4B"
     QWEN_3_EMBEDDING_8B = "Qwen/Qwen3-Embedding-8B"
     BGE_LARGE_EN_V1_5 = "BAAI/bge-large-en-v1.5"
@@ -154,6 +155,7 @@ class ModelServices(Enum):
     TRAINING = "training"
     TEXT_TO_SPEECH = "text_to_speech"
     EMBEDDING = "embedding"
+    DIARIZATION = "diarization"
 
 
 MODEL_SERVICE_RUNNER_MAP = {
