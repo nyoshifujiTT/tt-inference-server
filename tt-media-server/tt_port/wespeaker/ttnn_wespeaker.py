@@ -36,18 +36,15 @@ class TTNNWeSpeaker:
         w, b = wb
         B, Cin, H, W = x_nchw.shape
         Cout, _, kh, kw = w.shape
-        x_nhwc = x_nchw.permute(0, 2, 3, 1).reshape(1, 1, H * W, Cin)
+        # ttnn conv2d takes NHWC flattened as (1,1,B*H*W,Cin) with batch_size=B
+        x_nhwc = x_nchw.permute(0, 2, 3, 1).reshape(1, 1, B * H * W, Cin)
         tx = ttnn.from_torch(x_nhwc, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device)
         tw = ttnn.from_torch(torch.from_numpy(w).to(torch.bfloat16))
         tb = ttnn.from_torch(torch.from_numpy(b).reshape(1, 1, 1, Cout).to(torch.bfloat16))
-        conv_cfg = ttnn.Conv2dConfig(
-            weights_dtype=ttnn.bfloat16,
-        )
+        conv_cfg = ttnn.Conv2dConfig(weights_dtype=ttnn.bfloat16)
         compute_cfg = ttnn.init_device_compute_kernel_config(
-            self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,
-            fp32_dest_acc_en=True,
-            packer_l1_acc=True,
+            self.device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4,
+            fp32_dest_acc_en=True, packer_l1_acc=True,
         )
         out = ttnn.conv2d(
             input_tensor=tx, weight_tensor=tw, bias_tensor=tb, device=self.device,
