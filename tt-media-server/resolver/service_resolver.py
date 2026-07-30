@@ -35,6 +35,9 @@ _SUPPORTED_MODEL_SERVICES = {
     ModelServices.EMBEDDING: lambda: __import__(
         "model_services.embedding_service", fromlist=["EmbeddingService"]
     ).EmbeddingService(),
+    ModelServices.DIARIZATION: lambda: __import__(
+        "model_services.diarization_service", fromlist=["DiarizationService"]
+    ).DiarizationService(),
 }
 
 # Singleton holders per service type
