@@ -24,6 +24,7 @@ class TTNNWeSpeaker:
 
     def __init__(self, state_dict, device):
         self.device = device
+        self.use_device_elementwise = False
         # reuse the verified bn-folding + layout from the numpy ref
         self._ref = WeSpeakerNumpyRef(state_dict)
         self.folded = self._ref.folded
@@ -64,9 +65,25 @@ class TTNNWeSpeaker:
     def _relu(x):
         return torch.relu(x)
 
+    def _relu_dev(self, x_nchw):
+        """ReLU on device (ttnn.relu), host<->device round-trip on a tiled tensor."""
+        t = ttnn.from_torch(x_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT, device=self.device)
+        t = ttnn.relu(t)
+        return ttnn.to_torch(t).float()
+
+    def _add_dev(self, a_nchw, b_nchw):
+        """Residual add on device (ttnn.add)."""
+        ta = ttnn.from_torch(a_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16,
+                             layout=ttnn.TILE_LAYOUT, device=self.device)
+        tb = ttnn.from_torch(b_nchw.to(torch.bfloat16), dtype=ttnn.bfloat16,
+                             layout=ttnn.TILE_LAYOUT, device=self.device)
+        return ttnn.to_torch(ttnn.add(ta, tb)).float()
+
     def _block(self, x, prefix, stride):
+        relu = self._relu_dev if self.use_device_elementwise else self._relu
         identity = x
-        out = self._relu(self._conv(x, self.folded[f"{prefix}.c1"], stride))
+        out = relu(self._conv(x, self.folded[f"{prefix}.c1"], stride))
         out = self._conv(out, self.folded[f"{prefix}.c2"], 1)
         if f"{prefix}.ds" in self.folded:
             identity = self._conv(x, self.folded[f"{prefix}.ds"], stride, pad=0)
@@ -75,11 +92,14 @@ class TTNNWeSpeaker:
         w = min(out.shape[3], identity.shape[3])
         out = out[:, :, :h, :w]
         identity = identity[:, :, :h, :w]
-        return self._relu(out + identity)
+        if self.use_device_elementwise:
+            return relu(self._add_dev(out, identity))
+        return relu(out + identity)
 
     def forward(self, feats_nchw):
         """feats_nchw: torch (B,1,80,T) -> (B,256) embedding."""
-        x = self._relu(self._conv(feats_nchw, self.folded["conv1"], 1))
+        relu = self._relu_dev if self.use_device_elementwise else self._relu
+        x = relu(self._conv(feats_nchw, self.folded["conv1"], 1))
         for li, nb in enumerate(self.BLOCKS, start=1):
             for bi in range(nb):
                 stride = 2 if (bi == 0 and li > 1) else 1

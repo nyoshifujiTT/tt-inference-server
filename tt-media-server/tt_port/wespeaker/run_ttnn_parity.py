@@ -14,6 +14,7 @@ from ttnn_wespeaker import TTNNWeSpeaker
 dev = ttnn.open_device(device_id=0, l1_small_size=32768)
 try:
     model = TTNNWeSpeaker(state_dict, dev)
+    model.use_device_elementwise = True  # relu/add on device
     emb_tt = model.forward(feats).numpy()
 finally:
     ttnn.close_device(dev)
