@@ -2556,6 +2556,70 @@ _eval_config_list = [
         ],
     ),
     EvalConfig(
+        # Qwen3-ASR on the TT vLLM backend, evaluated with the same LibriSpeech
+        # WER task/harness as the whisper models (lmms-eval EVALS_AUDIO,
+        # whisper_tt model). The transcription request path is OpenAI-standard
+        # /v1/audio/transcriptions served by vLLM.
+        hf_model_repo="Qwen/Qwen3-ASR-1.7B",
+        tasks=[
+            EvalTask(
+                task_name="librispeech_test_other",
+                eval_class="whisper_tt",
+                batch_size=1,
+                max_concurrent=1,
+                apply_chat_template=False,
+                workflow_venv_type=WorkflowVenvType.EVALS_AUDIO,
+                score=EvalTaskScore(
+                    published_score=(100 - 0.0),
+                    published_score_ref="https://huggingface.co/spaces/hf-audio/open_asr_leaderboard",
+                    score_func=score_task_single_key,
+                    score_func_kwargs={
+                        "result_keys": [
+                            "wer,none",
+                        ],
+                        "unit": "WER",
+                    },
+                ),
+                limit_samples_map={
+                    EvalLimitMode.CI_NIGHTLY: 0.20,
+                    EvalLimitMode.SMOKE_TEST: 0.01,
+                },
+            )
+        ],
+    ),
+    EvalConfig(
+        # Qwen3-ASR on the TT vLLM backend, evaluated with the same LibriSpeech
+        # WER task/harness as the whisper models (lmms-eval EVALS_AUDIO,
+        # whisper_tt model). The transcription request path is OpenAI-standard
+        # /v1/audio/transcriptions served by vLLM.
+        hf_model_repo="neosophie/Qwen3-ASR-1.7B-JA",
+        tasks=[
+            EvalTask(
+                task_name="librispeech_test_other",
+                eval_class="whisper_tt",
+                batch_size=1,
+                max_concurrent=1,
+                apply_chat_template=False,
+                workflow_venv_type=WorkflowVenvType.EVALS_AUDIO,
+                score=EvalTaskScore(
+                    published_score=(100 - 0.0),
+                    published_score_ref="https://huggingface.co/spaces/hf-audio/open_asr_leaderboard",
+                    score_func=score_task_single_key,
+                    score_func_kwargs={
+                        "result_keys": [
+                            "wer,none",
+                        ],
+                        "unit": "WER",
+                    },
+                ),
+                limit_samples_map={
+                    EvalLimitMode.CI_NIGHTLY: 0.20,
+                    EvalLimitMode.SMOKE_TEST: 0.01,
+                },
+            )
+        ],
+    ),
+    EvalConfig(
         hf_model_repo="genmo/mochi-1-preview",
         tasks=[
             EvalTask(
