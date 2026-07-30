@@ -3370,23 +3370,26 @@ def add_target_checks_audio(metrics):
     logger.info("Adding target_checks to Audio benchmark release data")
     # tput_check is always 1 for now (no tput target)
     tput_check = 1
+    # Use .get(): an eval-only audio run (WER, no benchmark) has no ttft metrics,
+    # so these keys may be absent. Mirror add_target_checks_tts's defensive style
+    # instead of raising KeyError and failing the whole reports workflow.
     target_checks = {
         "functional": {
-            "ttft": metrics["functional_ttft"],
-            "ttft_ratio": metrics["functional_ttft_ratio"],
-            "ttft_check": metrics["functional_ttft_check"],
+            "ttft": metrics.get("functional_ttft"),
+            "ttft_ratio": metrics.get("functional_ttft_ratio", "Undefined"),
+            "ttft_check": metrics.get("functional_ttft_check", "Undefined"),
             "tput_check": tput_check,
         },
         "complete": {
-            "ttft": metrics["complete_ttft"],
-            "ttft_ratio": metrics["complete_ttft_ratio"],
-            "ttft_check": metrics["complete_ttft_check"],
+            "ttft": metrics.get("complete_ttft"),
+            "ttft_ratio": metrics.get("complete_ttft_ratio", "Undefined"),
+            "ttft_check": metrics.get("complete_ttft_check", "Undefined"),
             "tput_check": tput_check,
         },
         "target": {
-            "ttft": metrics["target_ttft"],
-            "ttft_ratio": metrics["target_ttft_ratio"],
-            "ttft_check": metrics["target_ttft_check"],
+            "ttft": metrics.get("target_ttft"),
+            "ttft_ratio": metrics.get("target_ttft_ratio", "Undefined"),
+            "ttft_check": metrics.get("target_ttft_check", "Undefined"),
             "tput_check": tput_check,
         },
     }
