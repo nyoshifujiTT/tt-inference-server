@@ -3128,6 +3128,33 @@ audio_tts_templates = [
         status=ModelStatusTypes.COMPLETE,
     ),
     ModelSpecTemplate(
+        # Qwen3-ASR served through the TT vLLM backend (tt-vllm-plugin): the
+        # standard OpenAI /v1/audio/transcriptions path, NOT the media server.
+        # The TT model adapter (TTQwen3ASRForConditionalGeneration) is registered
+        # via EXTRA_MODELS_DIR; see models/demos/audio/qwen3_asr in tt-metal.
+        weights=["Qwen/Qwen3-ASR-1.7B", "neosophie/Qwen3-ASR-1.7B-JA"],
+        version="0.1.0",
+        tt_metal_commit="97b36e1",
+        vllm_commit="e1a3825",
+        impl=tt_vllm_plugin_impl,
+        min_disk_gb=15,
+        min_ram_gb=6,
+        model_type=ModelType.AUDIO,
+        inference_engine=InferenceEngine.VLLM.value,
+        device_model_specs=[
+            DeviceModelSpec(
+                device=DeviceTypes.P150,
+                max_concurrency=1,
+                max_context=2048,
+                default_impl=True,
+                env_vars={
+                    "MESH_DEVICE": "P150",
+                },
+            ),
+        ],
+        status=ModelStatusTypes.EXPERIMENTAL,
+    ),
+    ModelSpecTemplate(
         weights=["microsoft/speecht5_tts"],
         version="0.10.0",
         tt_metal_commit="2508216",
