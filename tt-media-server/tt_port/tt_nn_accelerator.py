@@ -72,14 +72,15 @@ def make_tt_accelerator(device):
             seg_model = pipeline._segmentation.model
             sinc = seg_model.sincnet.conv1d[0].filterbank.filters().detach().numpy()
             tt_seg = TTNNPyanNet(seg_model.state_dict(), sinc, device)
-            tt_seg.use_device_sincnet = True
 
             def seg_forward(waveforms):
-                outs = []
-                for i in range(waveforms.shape[0]):
-                    logits = tt_seg.forward(waveforms[i:i + 1].detach().numpy())
-                    outs.append(torch.from_numpy(logits[0]).float())
-                return F.log_softmax(torch.stack(outs, 0), dim=-1)
+                # Batch every sliding window through one device-resident BiLSTM
+                # pass (weights/state stay on device, no per-timestep transfer).
+                wav_batch = waveforms.detach().cpu().numpy()
+                if wav_batch.ndim == 2:
+                    wav_batch = wav_batch[:, None, :]
+                logits = tt_seg.forward_batch(wav_batch)      # (B,T,7)
+                return F.log_softmax(torch.from_numpy(logits).float(), dim=-1)
 
             seg_model.forward = seg_forward
 
