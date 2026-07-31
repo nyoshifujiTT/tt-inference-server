@@ -41,7 +41,42 @@ class DiarizationService:
             or SupportedModels.PYANNOTE_SPEAKER_DIARIZATION_COMMUNITY_1.value
         )
         self.logger.info(f"DiarizationService using model: {model_path}")
-        self._backend = DiarizationBackend(model_path=model_path, device="cpu")
+        nn_accelerator = self._maybe_build_tt_accelerator()
+        self._backend = DiarizationBackend(
+            model_path=model_path, device="cpu", nn_accelerator=nn_accelerator
+        )
+
+    def _maybe_build_tt_accelerator(self):
+        """Build a Tenstorrent NN accelerator hook when DIARIZATION_TT_DEVICE_ID is set.
+
+        Offloads community-1's segmentation (PyanNet) and embedding (WeSpeaker)
+        NNs onto a p150 via ttnn (see tt_port/tt_nn_accelerator). When the env var
+        is unset, returns None and the service runs pure-CPU.
+        """
+        import os
+
+        dev_id = os.getenv("DIARIZATION_TT_DEVICE_ID")
+        if dev_id is None or dev_id == "":
+            return None
+        try:
+            import ttnn
+            import sys
+
+            sys.path.insert(
+                0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "tt_port")
+            )
+            from tt_nn_accelerator import make_tt_accelerator
+
+            l1 = int(os.getenv("DIARIZATION_TT_L1_SMALL", "32768"))
+            device = ttnn.open_device(device_id=int(dev_id), l1_small_size=l1)
+            self._tt_device = device
+            self.logger.info(f"DiarizationService: TT NN acceleration on device {dev_id}")
+            return make_tt_accelerator(device)
+        except Exception as e:  # noqa: BLE001 - fall back to CPU on any TT error
+            self.logger.warning(
+                f"TT NN acceleration requested but unavailable ({e}); using CPU"
+            )
+            return None
 
     @log_execution_time("Diarization request")
     async def process_request(

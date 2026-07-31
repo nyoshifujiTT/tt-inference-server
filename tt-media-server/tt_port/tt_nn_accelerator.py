@@ -38,6 +38,7 @@ def make_tt_accelerator(device):
         seg_model = pipeline._segmentation.model
         sinc = seg_model.sincnet.conv1d[0].filterbank.filters().detach().numpy()
         tt_seg = TTNNPyanNet(seg_model.state_dict(), sinc, device)
+        tt_seg.use_device_sincnet = True  # SincNet conv1d+maxpool on device
 
         def seg_forward(waveforms):
             outs = []
@@ -53,6 +54,7 @@ def make_tt_accelerator(device):
         resnet = wespeaker.resnet
         tt_emb = TTNNWeSpeaker(wespeaker.state_dict(), device)
         tt_emb.use_device_elementwise = True
+        tt_emb.use_device_pool = True  # TSTP+linear on device
 
         def _bb_one(feats1):
             x = tt_emb._relu_dev(tt_emb._conv(feats1, tt_emb.folded["conv1"], 1))
