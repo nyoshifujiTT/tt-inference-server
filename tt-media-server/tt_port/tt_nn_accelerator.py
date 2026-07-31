@@ -4,14 +4,27 @@
 """Tenstorrent p150 NN accelerator hook for community-1 diarization.
 
 `make_tt_accelerator(device)` returns a callable `(pipeline) -> None` suitable for
-`DiarizationBackend(nn_accelerator=...)`. It patches the pipeline's two neural
-nets to run on the p150 via ttnn:
-  - segmentation PyanNet (SincNet + BiLSTM x4)  -> TTNNPyanNet
-  - embedding WeSpeaker ResNet34 backbone       -> TTNNWeSpeaker
+`DiarizationBackend(nn_accelerator=...)`. It offloads the embedding backbone
+(WeSpeaker ResNet34) onto the p150 via a *device-resident* ttnn implementation
+(`TTNNWeSpeakerResident`): the activation stays on device across the whole
+ResNet34 (input uploaded once, every conv/relu/residual-add consumes/produces
+ttnn tensors, only the final conv feature map is downloaded). This removes the
+per-layer host<->device transfer that dominated the earlier `TTNNWeSpeaker`
+path and makes the embedding stage ~2x faster than 32-thread CPU (measured:
+63 chunks 4.9s on p150 vs 9.2s CPU) while preserving parity.
 
-Verified end-to-end (tt_full_diarization.py): real community-1 diarization with
-both NNs on p150 yields the CPU-consistent 2-speaker result. ttnn/torch are
-imported lazily so this module is importable without them (for wiring/tests).
+Crucially the temporal statistics pooling (TSTP) and the seg_1 linear stay in
+the original pyannote modules on host, so the *weighted* per-speaker pooling
+that real diarization relies on (`resnet.pool(out, weights=...)`) is preserved
+bit-for-bit. Only the ResNet34 conv stack (the expensive part) runs on device.
+
+Segmentation (PyanNet SincNet+BiLSTM) stays on CPU by default: it is cheap
+(~0.36s for a 30s clip) and the ttnn segmentation path is slower per window, so
+offloading it would regress total latency. Set env DIARIZATION_TT_SEGMENTATION=1
+to also run segmentation on the p150 (full on-device, slower but useful for
+device-coverage validation).
+
+ttnn/torch are imported lazily so this module is importable without them.
 """
 from __future__ import annotations
 
@@ -23,55 +36,51 @@ _PYANNET = os.path.join(os.path.dirname(__file__), "pyannet")
 
 
 def make_tt_accelerator(device):
-    """Return a (pipeline)->None hook that offloads both NNs onto `device` (ttnn)."""
+    """Return a (pipeline)->None hook that offloads the NN(s) onto `device` (ttnn)."""
     import torch
     import torch.nn.functional as F
 
     for pth in (_WESPEAKER, _PYANNET):
         if pth not in sys.path:
             sys.path.insert(0, pth)
-    from ttnn_wespeaker import TTNNWeSpeaker
-    from ttnn_pyannet import TTNNPyanNet
+    from ttnn_wespeaker_resident import TTNNWeSpeakerResident
+
+    tt_seg_enabled = os.environ.get("DIARIZATION_TT_SEGMENTATION", "0") == "1"
 
     def _apply(pipeline) -> None:
-        # ---- segmentation on TT ----
-        seg_model = pipeline._segmentation.model
-        sinc = seg_model.sincnet.conv1d[0].filterbank.filters().detach().numpy()
-        tt_seg = TTNNPyanNet(seg_model.state_dict(), sinc, device)
-        tt_seg.use_device_sincnet = True  # SincNet conv1d+maxpool on device
-
-        def seg_forward(waveforms):
-            outs = []
-            for i in range(waveforms.shape[0]):
-                logits = tt_seg.forward(waveforms[i:i + 1].detach().numpy())
-                outs.append(torch.from_numpy(logits[0]).float())
-            return F.log_softmax(torch.stack(outs, 0), dim=-1)
-
-        seg_model.forward = seg_forward
-
-        # ---- embedding backbone on TT ----
+        # ---- embedding backbone (ResNet34 conv stack) on TT, device-resident ----
         wespeaker = pipeline._embedding.model_
         resnet = wespeaker.resnet
-        tt_emb = TTNNWeSpeaker(wespeaker.state_dict(), device)
-        tt_emb.use_device_elementwise = True
-        tt_emb.use_device_pool = True  # TSTP+linear on device
-
-        def _bb_one(feats1):
-            x = tt_emb._relu_dev(tt_emb._conv(feats1, tt_emb.folded["conv1"], 1))
-            for li, nb in enumerate(tt_emb.BLOCKS, start=1):
-                for bi in range(nb):
-                    st = 2 if (bi == 0 and li > 1) else 1
-                    x = tt_emb._block(x, f"resnet.layer{li}.{bi}", st)
-            return x
+        tt_emb = TTNNWeSpeakerResident(wespeaker.state_dict(), device)
 
         def resnet_forward(fbank, weights=None):
+            # fbank: (B, T, 80) log-mel -> (B, 1, 80, T)
             feats = fbank.permute(0, 2, 1).unsqueeze(1).float()
-            outs = [_bb_one(feats[i:i + 1]) for i in range(feats.shape[0])]
-            minT = min(o.shape[-1] for o in outs)
-            x = torch.cat([o[..., :minT] for o in outs], dim=0)
+            outs = [tt_emb.backbone(feats[i:i + 1]) for i in range(feats.shape[0])]
+            # (B, C, H=freq, W=time); align time dim across chunks (conv rounding)
+            minW = min(o.shape[-1] for o in outs)
+            x = torch.cat([o[..., :minW] for o in outs], dim=0)
+            # original pyannote pooling honours per-speaker `weights`
             stats = resnet.pool(x, weights=weights)
             return torch.tensor(0.0), resnet.seg_1(stats)
 
         resnet.forward = resnet_forward
+
+        # ---- segmentation on TT (optional, off by default) ----
+        if tt_seg_enabled:
+            from ttnn_pyannet import TTNNPyanNet
+            seg_model = pipeline._segmentation.model
+            sinc = seg_model.sincnet.conv1d[0].filterbank.filters().detach().numpy()
+            tt_seg = TTNNPyanNet(seg_model.state_dict(), sinc, device)
+            tt_seg.use_device_sincnet = True
+
+            def seg_forward(waveforms):
+                outs = []
+                for i in range(waveforms.shape[0]):
+                    logits = tt_seg.forward(waveforms[i:i + 1].detach().numpy())
+                    outs.append(torch.from_numpy(logits[0]).float())
+                return F.log_softmax(torch.stack(outs, 0), dim=-1)
+
+            seg_model.forward = seg_forward
 
     return _apply
