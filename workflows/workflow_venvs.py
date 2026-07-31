@@ -5,37 +5,86 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
-
-import yaml
+from typing import TYPE_CHECKING, Callable, Optional, Tuple
 
 from workflows.bootstrap_uv import UV_EXEC
 from workflows.utils import (
-    ensure_readwriteable_dir,
     get_repo_root_path,
     map_configs_by_attr,
     run_command,
 )
 from workflows.workflow_types import ModelType, WorkflowVenvType
 
+if TYPE_CHECKING:
+    from workflows.model_spec import ModelSpec
+
 logger = logging.getLogger("run_log")
 
 
-def default_setup(venv_config: "VenvConfig", model_spec: "ModelSpec") -> bool:  # noqa: F821
-    return True
-
-
+# Parent directory for every workflow venv; `uv venv` creates it on first use.
 default_venv_path = get_repo_root_path() / ".workflow_venvs"
-ensure_readwriteable_dir(default_venv_path)
+
+# Per-venv pip lists live under <repo_root>/requirements/, sharing constraints.txt.
+REQUIREMENTS_DIR = get_repo_root_path() / "requirements"
+
+
+def install_requirements(
+    venv_config: "VenvConfig",  # noqa: F821
+    requirements_file: str,
+    overrides_file: Optional[str] = None,
+) -> bool:
+    """Install pip deps from requirements/<requirements_file> into the venv.
+
+    Always passes ``--index-strategy unsafe-best-match`` so per-file
+    ``--extra-index-url`` directives resolve against all configured indexes
+    (e.g. PyPI + the PyTorch CPU index).
+
+    If ``overrides_file`` is given, it is passed to uv as ``--override`` so we
+    can force a dependency version that conflicts with a package's declared
+    pin (e.g. bumping transformers past vllm's ``transformers<5`` cap so the
+    Gemma-4 tokenizer loads). See https://docs.astral.sh/uv/pip/compile/#overrides.
+    """
+    requirements_path = REQUIREMENTS_DIR / requirements_file
+    if not requirements_path.is_file():
+        raise FileNotFoundError(
+            f"Requirements file not found: {requirements_path}. "
+            f"Expected one of the per-venv files under {REQUIREMENTS_DIR}."
+        )
+    override_arg = ""
+    if overrides_file is not None:
+        overrides_path = REQUIREMENTS_DIR / overrides_file
+        if not overrides_path.is_file():
+            raise FileNotFoundError(
+                f"Overrides file not found: {overrides_path}. "
+                f"Expected one of the per-venv files under {REQUIREMENTS_DIR}."
+            )
+        override_arg = f"--override {overrides_path} "
+    return_code = run_command(
+        f"{UV_EXEC} pip install --managed-python "
+        f"--python {venv_config.venv_python} "
+        f"--index-strategy unsafe-best-match "
+        f"{override_arg}"
+        f"-r {requirements_path}",
+        logger=logger,
+    )
+    return return_code == 0
 
 
 @dataclass(frozen=True)
 class VenvConfig:
+    """Declarative description of a workflow virtual environment.
+
+    ``setup()`` runs in fixed order: ``uv venv`` → mkdir ``extra_dirs`` →
+    ``install_requirements(requirements_file)`` → ``setup_function`` hook.
+    """
+
     venv_type: WorkflowVenvType
-    setup_function: Callable[["VenvConfig"], None] = default_setup  # noqa: F821
+    requirements_file: Optional[str] = None
+    overrides_file: Optional[str] = None
+    extra_dirs: Tuple[str, ...] = field(default_factory=tuple)
+    setup_function: Optional[Callable[["VenvConfig", "ModelSpec"], bool]] = None
     name: Optional[str] = None
     python_version: Optional[str] = "3.10"
     venv_path: Optional[Path] = None
@@ -64,65 +113,130 @@ class VenvConfig:
         if self.venv_pip is None:
             object.__setattr__(self, "venv_pip", self.venv_path / "bin" / "pip")
 
-    def setup(self, model_spec: "ModelSpec") -> bool:  # noqa: F821
-        """Run the setup using the instance's provided setup_function."""
-        # setup venv using uv if not exists
+    def setup(self, model_spec: "ModelSpec") -> bool:
+        """Create the venv (if missing) and install/configure it.
+
+        Raises ``RuntimeError`` if any step fails.
+        """
         if not self.venv_path.exists():
-            # uv venv: https://docs.astral.sh/uv/reference/cli/#uv-venv
-            # --python: set the python interpreter version in venv
-            # --allow-existing: if venv exists, check if it has correct package versions
-            # --seed: Install seed packages (one or more of: pip, setuptools, and wheel)
-            # --managed-python: explicitly use uv managed python versions
+            # https://docs.astral.sh/uv/reference/cli/#uv-venv
             run_command(
                 f"{str(UV_EXEC)} venv --managed-python --python={self.python_version} {self.venv_path} --allow-existing",
                 logger=logger,
                 check=True,
             )
-        # uv will verify deps if venv exists
-        venv_setup_succeeded = self.setup_function(self, model_spec=model_spec)
-        if not venv_setup_succeeded:
-            raise RuntimeError(f"Failed to setup venv: {self.venv_type.name}")
-        return venv_setup_succeeded
+
+        for sub_dir in self.extra_dirs:
+            target = self.venv_path / sub_dir
+            if target.exists():
+                logger.info(f"sub-dir already exists for {self.name}: {target}")
+            else:
+                logger.info(f"creating sub-dir for {self.name}: {target}")
+                target.mkdir(parents=True, exist_ok=True)
+
+        if self.requirements_file is not None:
+            if not install_requirements(
+                self, self.requirements_file, self.overrides_file
+            ):
+                raise RuntimeError(
+                    f"Failed to install requirements for venv {self.venv_type.name} "
+                    f"from {self.requirements_file}"
+                )
+
+        if self.setup_function is not None:
+            if not self.setup_function(self, model_spec=model_spec):
+                raise RuntimeError(f"Failed to setup venv: {self.venv_type.name}")
+
+        return True
 
 
-def setup_evals_common(
+def setup_evals_agentic(
     venv_config: VenvConfig,
     model_spec: "ModelSpec",  # noqa: F821
 ) -> bool:
-    logger.warning("this might take 5 to 15+ minutes to install on first run ...")
+    """Hook for EVALS_AGENTIC: clone + editable-install SWE-agent and Harbor.
+
+    Other deps (mini-swe-agent, epoch SWE-bench) are in requirements/evals-agentic.txt.
+
+    Harbor is cloned and installed editable so its top-level ``adapters/`` directory
+    is available on disk. The adapters are not part of the Harbor wheel and live
+    outside ``src/``, so a ``.pth`` file exposes the repo root to Python imports.
+    """
+    sweagent_dir = venv_config.venv_path / "SWE-agent"
+    if not sweagent_dir.exists():
+        clone_return_code = run_command(
+            f"git clone https://github.com/SWE-agent/SWE-agent.git {sweagent_dir}",
+            logger=logger,
+        )
+        if clone_return_code != 0:
+            return False
+
     return_code = run_command(
         f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} "
-        "--index-strategy unsafe-best-match "
-        "--extra-index-url https://download.pytorch.org/whl/cpu "
-        "git+https://github.com/tstescoTT/lm-evaluation-harness.git@evals-common#egg=lm-eval[api,ifeval,math,sentencepiece,r1_evals,ruler,longbench,hf] "
-        "protobuf pillow==11.1 pyjwt==2.7.0 datasets==3.1.0",
+        f"-e {sweagent_dir}",
         logger=logger,
     )
-    setup_succeeded = return_code == 0
-    return setup_succeeded
+    if return_code != 0:
+        return False
+
+    harbor_dir = venv_config.venv_path / "harbor"
+    harbor_tag = "v0.6.5"
+    if not harbor_dir.exists():
+        clone_return_code = run_command(
+            "git clone --depth 1 --branch "
+            f"{harbor_tag} https://github.com/harbor-framework/harbor.git {harbor_dir}",
+            logger=logger,
+        )
+        if clone_return_code != 0:
+            return False
+
+    return_code = run_command(
+        f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} "
+        f"-e {harbor_dir}",
+        logger=logger,
+    )
+    if return_code != 0:
+        return False
+
+    return _write_harbor_adapters_pth(venv_config, harbor_dir)
 
 
-def setup_venv(venv_config: VenvConfig) -> bool:
-    """Setup a generic virtual environment.
-    Args:
-        venv_config: Virtual environment configuration
+def _write_harbor_adapters_pth(
+    venv_config: VenvConfig,
+    harbor_dir: Path,
+) -> bool:
+    site_packages = next(
+        (venv_config.venv_path / "lib").glob("python*/site-packages"), None
+    )
+    if site_packages is None:
+        logger.error(
+            "Could not locate site-packages under %s to write harbor-adapters.pth",
+            venv_config.venv_path,
+        )
+        return False
+    pth_file = site_packages / "harbor-adapters.pth"
+    pth_file.write_text(f"{harbor_dir}\n")
+    logger.info("Wrote %s pointing to %s", pth_file, harbor_dir)
+    return True
 
-    Returns:
-        True if setup was successful
-    """
-    work_dir = venv_config.venv_path / "work_dir"
-    if not work_dir.exists():
-        logger.info(f"Creating work_dir for generic server testing: {work_dir}")
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        logger.info(f"work_dir already exists for generic server testing: {work_dir}")
+
+def check_docker_available(
+    venv_config: VenvConfig,
+    model_spec: "ModelSpec",
+) -> bool:
+    """Hook for BENCHMARKS_GENAI_PERF: assert ``docker --version`` succeeds."""
+    run_command("docker --version", logger=logger, check=True)
     return True
 
 
 def setup_evals_meta(
     venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
+    model_spec: "ModelSpec",
 ) -> bool:
+    """Hook for EVALS_META: clone llama-cookbook (LLM only) and prep datasets.
+
+    Non-LLM model types reuse this venv only for ``work_dir`` placement.
+    """
     if (
         model_spec.model_type == ModelType.AUDIO
         or model_spec.model_type == ModelType.CNN
@@ -130,9 +244,8 @@ def setup_evals_meta(
         or model_spec.model_type == ModelType.EMBEDDING
         or model_spec.model_type == ModelType.TEXT_TO_SPEECH
     ):
-        return setup_venv(venv_config)
+        return True
 
-    # Default: Llama-specific setup
     setup_succeeded = True
     cookbook_dir = venv_config.venv_path / "llama-cookbook"
     original_dir = os.getcwd()
@@ -140,12 +253,11 @@ def setup_evals_meta(
         logger.info(f"The directory {cookbook_dir} exists.")
     else:
         logger.info(f"The directory {cookbook_dir} does not exist. Setting up ...")
-        # Clone the repository
         clone_cmd = (
             f"git clone https://github.com/meta-llama/llama-cookbook.git {cookbook_dir}"
         )
         setup_succeeded = run_command(clone_cmd, logger=logger) == 0 and setup_succeeded
-        # Upgrade pip and setuptools
+        # cookbook editable install needs modern setuptools
         setup_succeeded = (
             run_command(
                 f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} -U pip setuptools",
@@ -154,7 +266,7 @@ def setup_evals_meta(
             == 0
             and setup_succeeded
         )
-        # Install the package in editable mode
+        # editable install is cwd-dependent, so it can't live in a requirements file
         os.chdir(cookbook_dir)
         setup_succeeded = (
             run_command(
@@ -164,26 +276,9 @@ def setup_evals_meta(
             == 0
             and setup_succeeded
         )
-        # Install specific dependencies
-        setup_succeeded = (
-            run_command(
-                f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} -U antlr4_python3_runtime==4.11",
-                logger=logger,
-            )
-            == 0
-            and setup_succeeded
-        )
         logger.warning("this might take 5 to 15+ minutes to install on first run ...")
         setup_succeeded = (
-            run_command(
-                f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} "
-                "--index-strategy unsafe-best-match "
-                "--extra-index-url https://download.pytorch.org/whl/cpu "
-                "lm-eval[math,ifeval,sentencepiece,vllm]==0.4.3 pyjwt==2.7.0 pillow==11.1 datasets==3.1.0",
-                logger=logger,
-            )
-            == 0
-            and setup_succeeded
+            install_requirements(venv_config, "evals-meta.txt") and setup_succeeded
         )
     meta_eval_dir = (
         cookbook_dir
@@ -194,15 +289,17 @@ def setup_evals_meta(
     )
     meta_eval_data_dir = meta_eval_dir / f"work_dir_{model_spec.model_name}"
     if not meta_eval_data_dir.exists():
+        # PyYAML is only needed by this meta-eval setup hook, not by every
+        # caller of ``workflow_venvs``.
+        import yaml
+
         logger.info(f"preparing meta eval datasets for: {meta_eval_data_dir}")
-        # Change directory to meta_eval and run the preparation script
         os.chdir(meta_eval_dir)
-        # need to edit yaml file
         yaml_path = meta_eval_dir / "eval_config.yaml"
         with open(yaml_path, "r") as f:
             config = yaml.safe_load(f)
 
-        # handle 3.3 having the same evals as 3.1
+        # 3.3 reuses 3.1 evals; vision variants fall back to 3.2-3B
         _model_name = model_spec.hf_model_repo
         if _model_name == "meta-llama/Llama-3.2-11B-Vision-Instruct":
             _model_name = _model_name.replace("-3.2-11B-Vision-", "-3.2-3B-")
@@ -215,11 +312,10 @@ def setup_evals_meta(
         config["model_name"] = _model_name
         config["evals_dataset"] = f"{_model_name}-evals"
 
-        # Write the updated configuration back to the YAML file.
         with open(yaml_path, "w") as f:
             yaml.safe_dump(config, f)
 
-        # this requires HF AUTH
+        # requires HF AUTH
         return_code = run_command(
             f"{venv_config.venv_python} prepare_meta_eval.py --config_path ./eval_config.yaml",
             logger=logger,
@@ -228,466 +324,420 @@ def setup_evals_meta(
             logger.warning(
                 f"Failed to prepare meta eval datasets for: {meta_eval_data_dir}, continuing..."
             )
-    # Note: likely a bug, some evals, e.g. IFEval always look for the default ./work_dir
-    # to deal with this and make downstream simpler, hotswap dirs
-    work_dir = venv_config.venv_path / "work_dir"
-    logger.info(f"moving {str(meta_eval_data_dir)} to {str(work_dir)}")
-    if os.path.exists(work_dir):
-        shutil.rmtree(work_dir)
-    shutil.copytree(meta_eval_data_dir, work_dir)
+    # The model-specific data lives at meta_eval_data_dir (work_dir_<model_name>/).
+    # IFEval (and likely others) hard-code ./work_dir relative to lm-eval's cwd,
+    # so run_evals.py creates a per-PID staging dir with a 'work_dir' symlink
+    # pointing here at command-build time. We do NOT write to a shared
+    # .venv_evals_meta/work_dir/ here — that previously raced across parallel
+    # model invocations and produced spurious FileNotFoundError for tasks (e.g.
+    # meta_ifeval) when a sibling model's data overwrote the shared dir.
     os.chdir(original_dir)
     return setup_succeeded
 
 
-def setup_benchmarks_vllm(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
+# Pinned vLLM tags for the benchmark client venvs. Each must match the vllm==
+# pin in its requirements file (structured-output scripts are fetched from
+# vllm-project/vllm@v<pin>/benchmarks at setup time):
+#   VLLM_PIN_VERSION       <-> requirements/benchmarks-vllm.txt
+#   FORGE_VLLM_PIN_VERSION <-> requirements/benchmarks-vllm-forge.txt
+VLLM_PIN_VERSION = "0.13.0"
+FORGE_VLLM_PIN_VERSION = "0.19.1"
+
+
+def _vllm_benchmarks_raw_base(pin_version: str) -> str:
+    return (
+        f"https://raw.githubusercontent.com/vllm-project/vllm/v{pin_version}/benchmarks"
+    )
+
+
+# (relative_path_in_vllm_repo, relative_path_in_work_dir)
+STRUCTURED_OUTPUT_FETCH_FILES = (
+    (
+        "benchmark_serving_structured_output.py",
+        "benchmark_serving_structured_output.py",
+    ),
+    ("backend_request_func.py", "backend_request_func.py"),
+    (
+        "structured_schemas/structured_schema_1.json",
+        "structured_schemas/structured_schema_1.json",
+    ),
+)
+
+# Filename of the structured-output benchmark script downloaded into the
+# BENCHMARKS_VLLM venv work_dir by fetch_structured_output_scripts().
+# Used to locate the structured-output benchmark script at run time.
+STRUCTURED_OUTPUT_SCRIPT_NAME = "benchmark_serving_structured_output.py"
+
+
+def _force_identity_encoding(client_path: Path) -> None:
+    """Add Accept-Encoding: identity to the vendored benchmark client.
+
+    The downloaded backend_request_func.py sends aiohttp's default headers,
+    which advertise gzip. Gateways (e.g. console.tenstorrent.com) compress SSE
+    for gzip-accepting clients and buffer each response until generation
+    completes, so every chunk arrives at once and TTFT/TPOT/ITL are garbage.
+    The script has no --header passthrough, so patch the headers dict instead.
+    """
+    text = client_path.read_text()
+    if '"Accept-Encoding"' in text:
+        return
+    anchor = '"Content-Type": "application/json",'
+    patched = text.replace(
+        anchor, anchor + '\n            "Accept-Encoding": "identity",'
+    )
+    if patched == text:
+        logger.warning(
+            f"could not patch Accept-Encoding into {client_path}; "
+            "streaming metrics may be invalid behind compressing gateways"
+        )
+        return
+    client_path.write_text(patched)
+
+
+def _fetch_structured_output_scripts(
+    venv_config: "VenvConfig",
+    pin_version: str,
 ) -> bool:
-    logger.info("running setup_benchmarks_vllm() ...")
+    """Fetch the structured-output benchmark driver scripts for ``pin_version``.
+
+    They aren't published on PyPI, so they're pulled from the matching vLLM
+    source tag at venv setup time rather than vendored into this repo.
+    """
     work_dir = venv_config.venv_path / "work_dir"
-    if not work_dir.exists():
-        logger.info(f"Creating work_dir for generic server testing: {work_dir}")
-        work_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        logger.info(f"work_dir already exists for generic server testing: {work_dir}")
-    # pin vllm==0.13.0 for reproducibility and potential regressions
-    setup_succeeded = (
-        run_command(
-            f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} -U pip vllm==0.13.0 torch",
+    raw_base = _vllm_benchmarks_raw_base(pin_version)
+    for src_rel, dst_rel in STRUCTURED_OUTPUT_FETCH_FILES:
+        dst = work_dir / dst_rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        url = f"{raw_base}/{src_rel}"
+        return_code = run_command(
+            f"curl -fSL --retry 3 --retry-delay 5 --retry-connrefused {url} -o {dst}",
             logger=logger,
         )
-        == 0
-    )
-
-    return setup_succeeded
-
-
-def setup_benchmarks_video(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    """Setup video benchmarking environment."""
-    logger.info("running setup_benchmarks_video() ...")
-    return setup_venv(venv_config)
-
-
-def setup_evals_vision(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    # use https://github.com/tstescoTT/lm-evaluation-harness/tree/tstesco/add-local-multimodal
-    # for local-mm-completions model
-    logger.warning("this might take 5 to 15+ minutes to install on first run ...")
-    setup_succeeded = (
-        run_command(
-            f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@v0.4.1 pyjwt==2.7.0 pillow==11.1 qwen_vl_utils",
-            logger=logger,
-        )
-        == 0
-    )
-    return setup_succeeded
-
-
-def setup_evals_audio(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    """
-    Setup audio evaluation environment on HOST using lmms-eval.
-    Uses TT-specific fork with whisper_tt model support.
-    """
-    logger.warning(
-        "Installing lmms-eval for audio - this might take 5 to 15+ minutes on first run ..."
-    )
-    setup_succeeded = (
-        run_command(
-            f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} "
-            f"'git+https://github.com/bgoelTT/lmms-eval.git@ben/samt/whisper-tt#egg=lmms-eval[audio]' "
-            f"pyjwt==2.7.0 pillow==11.1",
-            logger=logger,
-        )
-        == 0
-    )
-    return setup_succeeded
-
-
-def setup_evals_embedding(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    logger.info("running setup_evals_embedding() ...")
-    setup_succeeded = (
-        run_command(
-            f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} 'mteb>=2.6.6' openai",
-            logger=logger,
-        )
-        == 0
-    )
-    return setup_succeeded
-
-
-def setup_evals_video(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    """
-    Setup video evaluation environment on HOST.
-    Video models need dependencies for CLIP scoring, video frame extraction, and server interaction.
-    """
-    logger.info("Installing dependencies for video evaluation...")
-    setup_venv(venv_config)
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} --index-url https://download.pytorch.org/whl/cpu torch torchvision",
-            logger=logger,
-        )
-        == 0
-    )
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} requests datasets open-clip-torch==2.26.1 pyjwt==2.7.0 pillow==11.1 imageio imageio-ffmpeg",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-    return setup_succeeded
-
-
-def setup_stress_tests_run_script(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    logger.info("running setup_stress_tests_run_script() ...")
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --python {venv_config.venv_python} --index-url https://download.pytorch.org/whl/cpu torch numpy",
-            logger=logger,
-        )
-        == 0
-    )
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --python {venv_config.venv_python} requests transformers datasets pyjwt==2.7.0 pillow==11.1 aiohttp",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-    # Remove the redundant download section since we now use stress_tests/stress_tests_benchmarking_script.py
-    # The old benchmark_serving.py downloads are no longer needed
-    return setup_succeeded
-
-
-def setup_evals_run_script(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:  # noqa: F821
-    logger.info("running setup_evals_run_script() ...")
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} numpy scipy",
-            logger=logger,
-        )
-        == 0
-    )
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} --index-url https://download.pytorch.org/whl/cpu torch torchvision",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} requests transformers protobuf sentencepiece datasets open-clip-torch==2.26.1 pyjwt==2.7.0 pillow==11.1 imageio imageio-ffmpeg",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-    setup_succeeded = (
-        run_command(
-            f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} "
-            f"--extra-index-url https://download.pytorch.org/whl/cpu "
-            f"'mteb[openai]>=2.6.6' tiktoken openai",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-    return setup_succeeded
-
-
-def setup_benchmarks_run_script(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    logger.info("running setup_benchmarks_run_script() ...")
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} numpy scipy",
-            logger=logger,
-        )
-        == 0
-    )
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} --index-url https://download.pytorch.org/whl/cpu torch torchvision",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} requests sentencepiece protobuf transformers datasets open-clip-torch==2.26.1 pyjwt==2.7.0 pillow==11.1",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-    return setup_succeeded
-
-
-def setup_reports_run_script(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    logger.info("running setup_reports_run_script() ...")
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} requests numpy",
-            logger=logger,
-        )
-        == 0
-    )
-    return setup_succeeded
-
-
-def setup_hf_setup(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    logger.info("running setup_hf_setup() ...")
-    # Install a modern version that provides the 'hf' CLI entrypoint
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} 'huggingface_hub>=1.0.0'",
-            logger=logger,
-        )
-        == 0
-    )
-    return setup_succeeded
-
-
-def setup_benchmarks_genai_perf(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    """Setup for genai-perf benchmarks (Docker-based, minimal local setup)."""
-    logger.info("running setup_benchmarks_genai_perf() ...")
-    # Ensure Docker is available
-    run_command("docker --version", logger=logger, check=True)
-    # Create artifacts directory
-    artifacts_dir = venv_config.venv_path / "artifacts"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
+        if return_code != 0:
+            return False
+        if dst_rel == "backend_request_func.py":
+            _force_identity_encoding(dst)
     return True
 
 
-def setup_benchmarks_aiperf(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    """Setup for aiperf benchmarks (pip-based installation).
+# Sentinel marker appended to lm_eval's api_models.py so the streaming patch is
+# applied at most once per venv (idempotent across repeated setup runs).
+_LM_EVAL_CHAT_STREAM_SENTINEL = "# === TT patch: chat-completions SSE streaming ==="
 
-    AIPerf is a comprehensive benchmarking tool for generative AI models.
-    Repository: https://github.com/ai-dynamo/aiperf
+# Monkeypatch appended to the END of lm_eval/models/api_models.py (after
+# TemplateAPI is defined). Stock _consume_sse_stream only handled text-completion
+# chunks (choice["text"]) and emitted {"index","text"}. Chat-completions stream
+# tokens in choice["delta"]["content"] and the chat parser reads
+# choice["message"]["content"], so streamed chat responses raised
+# KeyError: 'message'. This makes streaming handle both shapes, and teaches the
+# synchronous model_call() path to consume SSE (stock sync path had none).
+_LM_EVAL_CHAT_STREAM_PATCH = """
+
+# === TT patch: chat-completions SSE streaming ===
+# Applied post-install by workflows.workflow_venvs.patch_evals_common_chat_streaming.
+def _tt_stream_chunk_text(choice: dict):
+    delta = choice.get("delta") or {}
+    if "content" in delta:
+        return delta.get("content") or "", True
+    return choice.get("text", ""), False
+
+
+def _tt_format_sse_response(accumulated_text: dict, uses_chat_chunks: bool) -> dict:
+    choices = []
+    for index, text in sorted(accumulated_text.items()):
+        if uses_chat_chunks:
+            choices.append({"index": index, "message": {"content": text}})
+        else:
+            choices.append({"index": index, "text": text})
+    return {"choices": choices}
+
+
+async def _tt_consume_sse_stream(self, response) -> dict:
+    accumulated_text = {}
+    uses_chat_chunks = False
+    try:
+        while True:
+            line_bytes = await response.content.readline()
+            if not line_bytes:
+                break
+            line = line_bytes.decode("utf-8").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            for choice in chunk.get("choices", []):
+                index = choice.get("index", 0)
+                text, is_chat_chunk = _tt_stream_chunk_text(choice)
+                uses_chat_chunks = uses_chat_chunks or is_chat_chunk
+                accumulated_text[index] = accumulated_text.get(index, "") + text
+    except BaseException as exc:
+        if not accumulated_text:
+            raise
+        prefix = "__PARTIAL_OUTPUT__ (" + repr(exc) + "): "
+        accumulated_text = {i: prefix + t for i, t in accumulated_text.items()}
+    return _tt_format_sse_response(accumulated_text, uses_chat_chunks)
+
+
+def _tt_consume_requests_sse_stream(response) -> dict:
+    accumulated_text = {}
+    uses_chat_chunks = False
+    try:
+        for line in response.iter_lines(decode_unicode=True):
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
+            line = str(line or "").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            for choice in chunk.get("choices", []):
+                index = choice.get("index", 0)
+                text, is_chat_chunk = _tt_stream_chunk_text(choice)
+                uses_chat_chunks = uses_chat_chunks or is_chat_chunk
+                accumulated_text[index] = accumulated_text.get(index, "") + text
+    except BaseException as exc:
+        if not accumulated_text:
+            raise
+        prefix = "__PARTIAL_OUTPUT__ (" + repr(exc) + "): "
+        accumulated_text = {i: prefix + t for i, t in accumulated_text.items()}
+    return _tt_format_sse_response(accumulated_text, uses_chat_chunks)
+
+
+def _tt_model_call(self, messages, *, generate: bool = True, gen_kwargs: dict = None, **kwargs):
+    gen_kwargs = copy.deepcopy(gen_kwargs)
+    payload = self._create_payload(
+        self.create_message(messages),
+        generate=generate,
+        gen_kwargs=gen_kwargs,
+        seed=self._seed,
+        eos=self.eos_string,
+        **kwargs,
+    )
+    is_streaming = generate and str(payload.get("stream", False)).lower() == "true"
+    try:
+        response = requests.post(
+            self.base_url,
+            json=payload,
+            headers=self.header,
+            verify=self.verify_certificate,
+            stream=is_streaming,
+        )
+        if not response.ok:
+            eval_logger.warning(
+                "API request failed with error message: " + response.text + ". Retrying..."
+            )
+        response.raise_for_status()
+        if is_streaming:
+            return _tt_consume_requests_sse_stream(response)
+        return response.json()
+    except RetryError:
+        eval_logger.error(
+            "API request failed after multiple retries. Please check the API status."
+        )
+        return None
+
+
+TemplateAPI._consume_sse_stream = _tt_consume_sse_stream
+TemplateAPI.model_call = _tt_model_call
+# === end TT patch ===
+"""
+
+
+def patch_evals_common_chat_streaming(
+    venv_config: VenvConfig,
+    model_spec: "ModelSpec",
+) -> bool:
+    """Hook for EVALS_COMMON: fix lm-eval chat-completions SSE streaming.
+
+    lm-eval's streaming path was written for the text-completions API and breaks
+    chat-completions streaming (KeyError: 'message'). Streaming is required
+    against the remote console to avoid 504s on long reasoning generations, so we
+    patch the installed package in place rather than disabling streaming. The
+    patch is appended once (guarded by a sentinel) to the module so it survives as
+    long as the venv exists; venv rebuilds re-apply it.
     """
-    logger.info("running setup_benchmarks_aiperf() ...")
-
-    # Install torch CPU for dependencies that require it (like prompt_client)
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} 'torch==2.4.0+cpu' --index-url https://download.pytorch.org/whl/cpu",
-            logger=logger,
+    matches = sorted(
+        venv_config.venv_path.glob(
+            "lib/python*/site-packages/lm_eval/models/api_models.py"
         )
-        == 0
     )
-
-    # Install aiperf from PyPI
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} aiperf",
-            logger=logger,
+    if not matches:
+        logger.warning(
+            "Could not locate lm_eval/models/api_models.py under "
+            f"{venv_config.venv_path}; chat-completions streaming patch not "
+            "applied. Streaming evals may fail to parse generations."
         )
-        == 0
-        and setup_succeeded
-    )
-
-    # Install additional dependencies for tokenization and prompt client
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} transformers pyjwt requests datasets",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-
-    # Create artifacts directory for benchmark outputs
-    artifacts_dir = venv_config.venv_path / "artifacts"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-    return setup_succeeded
+        return True
+    api_models_path = matches[0]
+    text = api_models_path.read_text()
+    if _LM_EVAL_CHAT_STREAM_SENTINEL in text:
+        logger.info(f"chat-streaming patch already present in {api_models_path}")
+        return True
+    api_models_path.write_text(text + _LM_EVAL_CHAT_STREAM_PATCH)
+    logger.info(f"applied chat-streaming patch to {api_models_path}")
+    return True
 
 
-def setup_system_software_validation(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
+def fetch_structured_output_scripts(
+    venv_config: "VenvConfig",
+    model_spec: "ModelSpec",
 ) -> bool:
-    logger.info("running setup_system_software_validation() ...")
-
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} packaging==25.0 PyYAML",
-            logger=logger,
-        )
-        == 0
-    )
-    return setup_succeeded
+    """Hook for BENCHMARKS_VLLM: fetch scripts pinned to VLLM_PIN_VERSION."""
+    logger.info("running fetch_structured_output_scripts() ...")
+    return _fetch_structured_output_scripts(venv_config, VLLM_PIN_VERSION)
 
 
-def setup_tt_smi(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
+def fetch_structured_output_scripts_forge(
+    venv_config: "VenvConfig",
+    model_spec: "ModelSpec",
 ) -> bool:
-    logger.info("running setup_tt_smi() ...")
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} tt-smi==3.0.39",
-            logger=logger,
-        )
-        == 0
-    )
-    return setup_succeeded
-
-
-def setup_tt_topology(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    logger.info("running setup_tt_topology() ...")
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} tt-topology==1.2.16",
-            logger=logger,
-        )
-        == 0
-    )
-    return setup_succeeded
-
-
-def setup_tests_run_script(
-    venv_config: VenvConfig,
-    model_spec: "ModelSpec",  # noqa: F821
-) -> bool:
-    logger.info("running setup_tests_run_script() ...")
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} --index-url https://download.pytorch.org/whl/cpu torch torchvision",
-            logger=logger,
-        )
-        == 0
-    )
-    setup_succeeded = (
-        run_command(
-            command=f"{UV_EXEC} pip install --managed-python --python {venv_config.venv_python} datasets transformers==4.57.1 pyyaml==6.0.3 pytest==8.3.5 pytest-asyncio==1.3.0 requests==2.32.5 pyjwt==2.7.0",
-            logger=logger,
-        )
-        == 0
-        and setup_succeeded
-    )
-    return setup_succeeded
+    """Hook for BENCHMARKS_VLLM_FORGE: fetch scripts pinned to FORGE_VLLM_PIN_VERSION."""
+    logger.info("running fetch_structured_output_scripts_forge() ...")
+    return _fetch_structured_output_scripts(venv_config, FORGE_VLLM_PIN_VERSION)
 
 
 _venv_config_list = [
+    # Pure pip install
     VenvConfig(
         venv_type=WorkflowVenvType.EVALS_RUN_SCRIPT,
-        setup_function=setup_evals_run_script,
+        requirements_file="evals-run-script.txt",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.STRESS_TESTS_RUN_SCRIPT,
-        setup_function=setup_stress_tests_run_script,
+        requirements_file="stress-tests-run-script.txt",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.STRESS_TESTS,
-        setup_function=setup_stress_tests_run_script,
+        requirements_file="stress-tests-run-script.txt",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.BENCHMARKS_RUN_SCRIPT,
-        setup_function=setup_benchmarks_run_script,
+        requirements_file="benchmarks-run-script.txt",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.TESTS_RUN_SCRIPT,
-        setup_function=setup_tests_run_script,
+        requirements_file="tests-run-script.txt",
     ),
     VenvConfig(
-        venv_type=WorkflowVenvType.EVALS_COMMON, setup_function=setup_evals_common
-    ),
-    VenvConfig(venv_type=WorkflowVenvType.EVALS_META, setup_function=setup_evals_meta),
-    VenvConfig(
-        venv_type=WorkflowVenvType.EVALS_VISION, setup_function=setup_evals_vision
+        venv_type=WorkflowVenvType.EVALS_COMMON,
+        requirements_file="evals-common.txt",
+        setup_function=patch_evals_common_chat_streaming,
     ),
     VenvConfig(
-        venv_type=WorkflowVenvType.EVALS_AUDIO, setup_function=setup_evals_audio
+        venv_type=WorkflowVenvType.EVALS_VISION,
+        requirements_file="evals-vision.txt",
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.EVALS_AUDIO,
+        requirements_file="evals-audio.txt",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.EVALS_EMBEDDING,
-        setup_function=setup_evals_embedding,
-    ),
-    VenvConfig(
-        venv_type=WorkflowVenvType.EVALS_VIDEO, setup_function=setup_evals_video
-    ),
-    VenvConfig(
-        venv_type=WorkflowVenvType.BENCHMARKS_VLLM,
-        setup_function=setup_benchmarks_vllm,
-        python_version="3.11",
-    ),
-    VenvConfig(
-        venv_type=WorkflowVenvType.BENCHMARKS_AIPERF,
-        setup_function=setup_benchmarks_aiperf,
-        python_version="3.11",
-    ),
-    VenvConfig(
-        venv_type=WorkflowVenvType.BENCHMARKS_VIDEO,
-        setup_function=setup_benchmarks_video,
+        requirements_file="evals-embedding.txt",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.REPORTS_RUN_SCRIPT,
-        setup_function=setup_reports_run_script,
+        requirements_file="reports-run-script.txt",
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.EVALS_AGENTIC,
+        requirements_file="evals-agentic.txt",
+        python_version="3.12",
+        setup_function=setup_evals_agentic,
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.WORKFLOW_RUN_SCRIPT,
+        requirements_file="workflow-run-script.txt",
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.PREFIX_CACHE,
+        requirements_file="prefix-cache.txt",
+        extra_dirs=("artifacts",),
+        python_version="3.11",
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.LLM_VLLM,
+        requirements_file="llm-vllm.txt",
+        # Force transformers 5.x past vllm==0.13.0's `transformers<5` cap so the
+        # gemma-4 tokenizer loads; keeps vllm (and the bench-serve client) at
+        # 0.13.0 for every other model. See llm-vllm-overrides.txt.
+        overrides_file="llm-vllm-overrides.txt",
+        extra_dirs=("artifacts",),
+        python_version="3.11",
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.LLM_GUIDELLM,
+        requirements_file="llm-guidellm.txt",
+        extra_dirs=("artifacts",),
+        python_version="3.11",
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.LLM_AIPERF,
+        requirements_file="llm-aiperf.txt",
+        extra_dirs=("artifacts",),
+        python_version="3.11",
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.SPEC_DECODE,
+        requirements_file="spec-decode.txt",
+        extra_dirs=("artifacts",),
+        python_version="3.11",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.HF_SETUP,
-        setup_function=setup_hf_setup,
-    ),
-    VenvConfig(
-        venv_type=WorkflowVenvType.BENCHMARKS_GENAI_PERF,
-        setup_function=setup_benchmarks_genai_perf,
+        requirements_file="hf-setup.txt",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.SYSTEM_SOFTWARE_VALIDATION,
-        setup_function=setup_system_software_validation,
+        requirements_file="system-software-validation.txt",
         python_version="3.11",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.TT_SMI,
-        setup_function=setup_tt_smi,
+        requirements_file="tt-smi.txt",
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.TT_TOPOLOGY,
-        setup_function=setup_tt_topology,
+        requirements_file="tt-topology.txt",
+    ),
+    # Pip install + sub-directory
+    VenvConfig(
+        venv_type=WorkflowVenvType.BENCHMARKS_VLLM,
+        requirements_file="benchmarks-vllm.txt",
+        extra_dirs=("work_dir",),
+        python_version="3.11",
+        setup_function=fetch_structured_output_scripts,
+    ),
+    # Forge-only benchmark client on newer vllm/transformers so forge tokenizers
+    # load. benchmark_config.py routes forge-engine models here.
+    VenvConfig(
+        venv_type=WorkflowVenvType.BENCHMARKS_VLLM_FORGE,
+        requirements_file="benchmarks-vllm-forge.txt",
+        extra_dirs=("work_dir",),
+        python_version="3.11",
+        setup_function=fetch_structured_output_scripts_forge,
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.BENCHMARKS_GENAI_PERF,
+        extra_dirs=("artifacts",),
+        setup_function=check_docker_available,
+    ),
+    # Custom Python work; pip handled inside the hook (model-type dependent).
+    # No extra_dirs — `run_evals.py` materializes a per-invocation staging
+    # dir at command-build time (see EVALS_META branch in build_eval_command).
+    VenvConfig(
+        venv_type=WorkflowVenvType.EVALS_META,
+        setup_function=setup_evals_meta,
     ),
 ]
 

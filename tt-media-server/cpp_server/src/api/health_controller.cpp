@@ -51,7 +51,11 @@ void HealthController::health(
   bool socketHealthy = true;
   if (socket_) {
     response["socket_status"] = socket_->getStatus();
-    socketHealthy = socket_->isConnected();
+    // Under Dynamo routing, ZMQ is only for slot reservation and may connect
+    // after this process is already serving Dynamo traffic. Treat an enabled
+    // socket as healthy rather than requiring a live peer.
+    socketHealthy = tt::config::dynamoRoutingEnabled() ? socket_->isEnabled()
+                                                       : socket_->isConnected();
   }
 
   if (hasReadyWorkers && hasAliveWorkers && socketHealthy) {
@@ -104,23 +108,31 @@ void HealthController::ready(
     response["model_ready"] = status.modelReady;
     response["queue_size"] = static_cast<Json::UInt64>(status.queueSize);
     response["max_queue_size"] = static_cast<Json::UInt64>(status.maxQueueSize);
+    const std::string runnerInUse = service_->runnerInUse();
+    if (!runnerInUse.empty()) {
+      response["runner_in_use"] = runnerInUse;
+    }
 
     if (socket_) {
       response["socket_status"] = socket_->getStatus();
     }
 
-    Json::Value workers(Json::arrayValue);
+    Json::Value workerInfo(Json::objectValue);
     for (const auto& w : status.workerInfo) {
       Json::Value wj;
       wj["worker_id"] = w.worker_id;
       wj["is_ready"] = w.is_ready;
       wj["is_alive"] = w.is_alive;
       wj["pid"] = static_cast<Json::Int64>(w.pid);
-      workers.append(wj);
+      workerInfo[w.worker_id] = wj;
     }
-    response["workers"] = workers;
+    response["worker_info"] = workerInfo;
 
-    callback(drogon::HttpResponse::newHttpJsonResponse(response));
+    auto resp = drogon::HttpResponse::newHttpJsonResponse(response);
+    if (!status.modelReady) {
+      resp->setStatusCode(drogon::k503ServiceUnavailable);
+    }
+    callback(resp);
   } catch (const std::exception& e) {
     Json::Value response;
     response["status"] = "alive";
@@ -165,7 +177,8 @@ void HealthController::setMaxSessionCount(
     }
 
     const auto& countValue = (*json)["max_session_count"];
-    if (!countValue.isUInt64() && !countValue.isInt64()) {
+    if ((!countValue.isUInt64() && !countValue.isInt64()) ||
+        (countValue.isInt64() && countValue.asInt64() < 0)) {
       Json::Value response;
       response["error"] = "max_session_count must be a non-negative integer";
       auto resp = drogon::HttpResponse::newHttpJsonResponse(response);

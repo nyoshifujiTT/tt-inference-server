@@ -12,13 +12,18 @@ class DeepseekTokenizer final : public Tokenizer {
   using Tokenizer::Tokenizer;
 
   std::string modelName() const { return "deepseek-ai/DeepSeek-R1-0528"; }
-  std::vector<int64_t> stopTokenIds() const { return {1}; }
+  std::vector<uint32_t> stopTokenIds() const { return {1}; }
+
+  // `<｜Assistant｜>` is a single special token (id 128804) and ends every
+  // assistant generation prompt in DeepSeek's chat template.
+  std::vector<uint32_t> assistantHeaderSequence() const override {
+    return {128804};
+  }
 
   std::string applyChatTemplate(
-      const std::vector<tt::domain::ChatMessage>& messages,
-      bool addGenerationPrompt,
-      const std::optional<std::vector<tt::domain::tool_calls::Tool>>& tools =
-          std::nullopt) const;
+      const std::vector<tt::domain::llm::ChatMessage>& messages,
+      bool addGenerationPrompt, bool enableReasoning = true,
+      bool skipApplyChatTemplate = false) const;
 };
 
 }  // namespace tt::utils::tokenizers

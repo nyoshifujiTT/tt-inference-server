@@ -15,8 +15,8 @@ _BH_DEVICE_MESH_DESCRIPTORS = {
     "p150": "p150_mesh_graph_descriptor.textproto",
     "p150x4": "p150x4_mesh_graph_descriptor.textproto",
     "p150x8": "p150x8_mesh_graph_descriptor.textproto",
-    "p300": "p300_mesh_graph_descriptor.textproto",
-    "p300x2": "p300_x2_mesh_graph_descriptor.textproto",
+    "p300": "p150_mesh_graph_descriptor.textproto",
+    "p300x2": "p150_mesh_graph_descriptor.textproto",
     "p100": "p100_mesh_graph_descriptor.textproto",
 }
 
@@ -52,6 +52,11 @@ def setup_runner_environment(
     _RUNNERS_REQUIRING_MESH_DESCRIPTOR = {
         ModelRunners.TT_WHISPER.value,
         ModelRunners.TT_SPEECHT5_TTS.value,
+        # Training runners init a tt-metal device directly (via torch-xla). On a
+        # single Blackhole chip of a P300 board, tt-metal otherwise selects the
+        # CUSTOM cluster type and asserts that a fabric mesh graph descriptor
+        # path is set. Providing the BH mesh descriptor avoids that.
+        ModelRunners.TRAINING_LORA.value,
     }
     if settings.model_runner in _RUNNERS_REQUIRING_MESH_DESCRIPTOR:
         if settings.is_galaxy:

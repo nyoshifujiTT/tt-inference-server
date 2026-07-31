@@ -29,6 +29,10 @@
       "description": "OpenAI-compatible text embedding endpoints"
     },
     {
+      "name": "Images",
+      "description": "OpenAI-compatible image generation, image-to-image, and edit endpoints. Only the route matching the active runner_type is registered at runtime."
+    },
+    {
       "name": "Sessions",
       "description": "Session management for slot assignments"
     },
@@ -146,46 +150,48 @@
         }
       }
     },
-    "/v1/sessions": {
+    "/v1/images/generations": {
       "post": {
-        "tags": ["Sessions"],
-        "summary": "Create a new session",
-        "description": "Create a new session with optional slot assignment",
-        "operationId": "createSession",
+        "tags": ["Images"],
+        "summary": "Create image (text-to-image)",
+        "description": "Creates one or more images from a text prompt. Only registered when the active image runner_type is a text-to-image variant.",
+        "operationId": "createImageGeneration",
         "security": [{ "BearerAuth": [] }],
         "requestBody": {
-          "description": "Optional slot ID to assign",
+          "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "slot_id": {
-                    "type": "integer",
-                    "description": "Slot ID to assign (-1 means unassigned)"
-                  }
-                }
-              }
+              "schema": { "$ref": "#/components/schemas/ImageGenerateRequest" }
             }
           }
         },
         "responses": {
-          "201": {
-            "description": "Session created successfully",
+          "200": {
+            "description": "Image(s) generated successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "session_id": { "type": "string", "format": "uuid" },
-                    "slot_id": { "type": "integer" }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/ImageResponse" }
               }
             }
           },
-          "500": {
-            "description": "Internal server error",
+          "400": {
+            "description": "Invalid request (e.g. missing required field)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authentication token",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "503": {
+            "description": "Model not ready",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Error" }
@@ -195,39 +201,48 @@
         }
       }
     },
-    "/v1/sessions/{session_id}": {
-      "delete": {
-        "tags": ["Sessions"],
-        "summary": "Close a session",
-        "description": "Close an existing session by ID",
-        "operationId": "closeSession",
+    "/v1/images/image-to-image": {
+      "post": {
+        "tags": ["Images"],
+        "summary": "Image-to-image",
+        "description": "Generates a new image from a prompt and an input image. Only registered when the active image runner_type is an image-to-image variant.",
+        "operationId": "createImageToImage",
         "security": [{ "BearerAuth": [] }],
-        "parameters": [
-          {
-            "name": "session_id",
-            "in": "path",
-            "required": true,
-            "description": "The session ID to close",
-            "schema": { "type": "string", "format": "uuid" }
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ImageGenerateRequest" }
+            }
           }
-        ],
+        },
         "responses": {
           "200": {
-            "description": "Session closed successfully",
+            "description": "Image(s) generated successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean" },
-                    "message": { "type": "string" }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/ImageResponse" }
               }
             }
           },
-          "404": {
-            "description": "Session not found",
+          "400": {
+            "description": "Invalid request (missing prompt or image)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid authentication token",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "503": {
+            "description": "Model not ready",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Error" }
@@ -237,93 +252,51 @@
         }
       }
     },
-    "/v1/sessions/{session_id}/slot": {
-      "get": {
-        "tags": ["Sessions"],
-        "summary": "Get slot ID for a session",
-        "description": "Retrieve the slot ID assigned to a session (-1 if unassigned)",
-        "operationId": "getSlotId",
+    "/v1/images/edits": {
+      "post": {
+        "tags": ["Images"],
+        "summary": "Edit / inpaint image",
+        "description": "Edits an input image using a prompt and a mask (inpainting). Only registered when the active image runner_type is an edit/inpaint variant.",
+        "operationId": "createImageEdit",
         "security": [{ "BearerAuth": [] }],
-        "parameters": [
-          {
-            "name": "session_id",
-            "in": "path",
-            "required": true,
-            "description": "The session ID",
-            "schema": { "type": "string", "format": "uuid" }
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ImageGenerateRequest" }
+            }
           }
-        ],
+        },
         "responses": {
           "200": {
-            "description": "Slot ID retrieved successfully",
+            "description": "Image(s) edited successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "session_id": { "type": "string", "format": "uuid" },
-                    "slot_id": {
-                      "type": "integer",
-                      "description": "Slot ID (-1 if unassigned)"
-                    }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/ImageResponse" }
               }
             }
           },
-          "404": {
-            "description": "Session not found",
+          "400": {
+            "description": "Invalid request (missing prompt, image, or mask)",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Error" }
               }
             }
-          }
-        }
-      }
-    },
-    "/v1/models": {
-      "get": {
-        "tags": ["Models"],
-        "summary": "List models",
-        "description": "Lists the currently available models. Returns model IDs that can be used in the `model` field of chat completion requests.",
-        "operationId": "listModels",
-        "security": [{ "BearerAuth": [] }],
-        "responses": {
-          "200": {
-            "description": "List of available models",
+          },
+          "401": {
+            "description": "Missing or invalid authentication token",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "object": {
-                      "type": "string",
-                      "enum": ["list"]
-                    },
-                    "data": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "id": {
-                            "type": "string",
-                            "description": "Model identifier",
-                            "example": "deepseek-ai/DeepSeek-R1-0528"
-                          },
-                          "object": {
-                            "type": "string",
-                            "enum": ["model"]
-                          },
-                          "owned_by": {
-                            "type": "string",
-                            "example": "tenstorrent"
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "503": {
+            "description": "Model not ready",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
               }
             }
           }
@@ -457,6 +430,25 @@
           }
         }
       }
+    },
+    "/info": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Build identity",
+        "description": "Returns the build identity of the running server: tt-inference-server version and commit, tt-blaze commit, and tt-metal commit. Missing values appear as the literal string \"unknown\". No authentication required.",
+        "operationId": "getInfo",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Build identity",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InfoResponse" }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -528,6 +520,11 @@
           "user": { "type": "string" },
           "response_format": {
             "$ref": "#/components/schemas/ResponseFormat"
+          },
+          "enable_reasoning": {
+            "type": "boolean",
+            "default": true,
+            "description": "When false, reasoning models (e.g. DeepSeek-R1) skip chain-of-thought and respond directly. Has no effect on non-reasoning models."
           }
         }
       },
@@ -681,9 +678,14 @@
             "type": "string",
             "description": "Device type"
           },
-          "workers": {
-            "type": "array",
-            "items": { "$ref": "#/components/schemas/WorkerInfo" }
+          "worker_info": {
+            "type": "object",
+            "description": "Worker status keyed by worker ID (Python-server-compatible format)",
+            "additionalProperties": { "$ref": "#/components/schemas/WorkerInfo" }
+          },
+          "runner_in_use": {
+            "type": "string",
+            "description": "Active runner identifier (image services only). Mirrors the Python ModelRunners enum (e.g. 'tt-sdxl-trace', 'tt-sdxl-image-to-image', 'tt-sdxl-edit'). Omitted when the active service does not expose a runner."
           }
         }
       },
@@ -697,6 +699,55 @@
           "is_ready": {
             "type": "boolean",
             "description": "Whether worker is ready"
+          },
+          "is_alive": {
+            "type": "boolean",
+            "description": "Whether worker process is alive"
+          },
+          "pid": {
+            "type": "integer",
+            "description": "Worker process ID (-1 for in-process runners)"
+          }
+        }
+      },
+      "InfoResponse": {
+        "type": "object",
+        "required": ["tt_inference_server", "tt_blaze", "tt_metal"],
+        "properties": {
+          "tt_inference_server": { "$ref": "#/components/schemas/ServerVersionInfo" },
+          "tt_blaze": { "$ref": "#/components/schemas/CommitInfo" },
+          "tt_metal": { "$ref": "#/components/schemas/CommitInfo" }
+        },
+        "example": {
+          "tt_inference_server": { "version": "0.13.0", "commit": "b0f8adfc1234567890abcdef1234567890abcdef" },
+          "tt_blaze": { "commit": "abc123def456abc123def456abc123def4567890" },
+          "tt_metal": { "commit": "915d9e67ad572b97fbaf5339bd3e518db6dc05e3" }
+        }
+      },
+      "ServerVersionInfo": {
+        "type": "object",
+        "required": ["version", "commit"],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "Release version from the top-level VERSION file. \"unknown\" if the file was not found at build time.",
+            "example": "0.13.0"
+          },
+          "commit": {
+            "type": "string",
+            "description": "Full git SHA of the inference-server tree at build time. \"unknown\" if .git was not available.",
+            "example": "b0f8adfc1234567890abcdef1234567890abcdef"
+          }
+        }
+      },
+      "CommitInfo": {
+        "type": "object",
+        "required": ["commit"],
+        "properties": {
+          "commit": {
+            "type": "string",
+            "description": "Full git SHA of the dependency at build time. \"unknown\" if the dependency's working tree was not present.",
+            "example": "915d9e67ad572b97fbaf5339bd3e518db6dc05e3"
           }
         }
       },
@@ -792,6 +843,125 @@
               "prompt_tokens": { "type": "integer" },
               "total_tokens": { "type": "integer" }
             }
+          }
+        }
+      },
+      "ImageGenerateRequest": {
+        "type": "object",
+        "required": ["prompt"],
+        "description": "Superset of fields for /v1/images/generations, /v1/images/image-to-image, and /v1/images/edits. The active route enforces its own subset (image-to-image requires `image`; edits also requires `mask`).",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "Text prompt describing the desired output image"
+          },
+          "prompt_2": {
+            "type": "string",
+            "description": "Optional secondary prompt routed to the second text encoder (SDXL)"
+          },
+          "negative_prompt": {
+            "type": "string",
+            "description": "Negative prompt describing what to avoid"
+          },
+          "negative_prompt_2": {
+            "type": "string",
+            "description": "Optional secondary negative prompt for the second text encoder"
+          },
+          "num_inference_steps": {
+            "type": "integer",
+            "default": 20,
+            "minimum": 1,
+            "description": "Number of denoising steps"
+          },
+          "guidance_scale": {
+            "type": "number",
+            "default": 5.0,
+            "description": "Classifier-free guidance scale"
+          },
+          "guidance_rescale": {
+            "type": "number",
+            "default": 0.0,
+            "description": "Guidance rescale factor (mitigates over-saturation at high guidance)"
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Random seed for reproducible sampling"
+          },
+          "number_of_images": {
+            "type": "integer",
+            "default": 1,
+            "minimum": 1,
+            "description": "Number of images to generate per request"
+          },
+          "crop_coords_top_left": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "minItems": 2,
+            "maxItems": 2,
+            "default": [0, 0],
+            "description": "SDXL crop conditioning [top, left]"
+          },
+          "timesteps": {
+            "type": "array",
+            "items": { "type": "number" },
+            "description": "Optional explicit list of timesteps for the scheduler"
+          },
+          "sigmas": {
+            "type": "array",
+            "items": { "type": "number" },
+            "description": "Optional explicit list of sigmas for the scheduler"
+          },
+          "lora_path": {
+            "type": "string",
+            "description": "Path to a LoRA weights file to load before generation"
+          },
+          "lora_scale": {
+            "type": "number",
+            "default": 0.5,
+            "description": "Scale applied to the LoRA"
+          },
+          "image_return_format": {
+            "type": "string",
+            "enum": ["JPEG", "PNG"],
+            "default": "JPEG",
+            "description": "Encoding format for the returned base64 image bytes"
+          },
+          "image_quality": {
+            "type": "integer",
+            "default": 85,
+            "minimum": 50,
+            "maximum": 100,
+            "description": "Quality factor for JPEG encoding (ignored for PNG). Bounds match the Python service's Pydantic constraint (ge=50, le=100)."
+          },
+          "image": {
+            "type": "string",
+            "description": "Base64-encoded input image. Required for image-to-image and edits."
+          },
+          "mask": {
+            "type": "string",
+            "description": "Base64-encoded mask image. Required for edits/inpainting."
+          },
+          "strength": {
+            "type": "number",
+            "description": "Image-to-image strength (0..1); higher values diverge further from the input image."
+          }
+        }
+      },
+      "ImageResponse": {
+        "type": "object",
+        "required": ["images"],
+        "properties": {
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Base64-encoded image bytes in the requested image_return_format"
+            },
+            "description": "Generated images, base64-encoded"
+          },
+          "generation_time": {
+            "type": "number",
+            "description": "Wall-clock generation time in seconds (omitted when zero)"
           }
         }
       },

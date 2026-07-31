@@ -35,6 +35,17 @@ class ConcurrentMap {
     return std::nullopt;
   }
 
+  template <typename Func>
+  bool withValue(const Key& key, Func&& func) const {
+    std::lock_guard lock(mutex);
+    auto it = map_.find(key);
+    if (it == map_.end()) {
+      return false;
+    }
+    func(it->second);
+    return true;
+  }
+
   void erase(const Key& key) {
     std::lock_guard lock(mutex);
     map_.erase(key);
@@ -88,6 +99,14 @@ class ConcurrentMap {
     if (it == map_.end()) return false;
     func(it->second);
     return true;
+  }
+
+  // Get a pointer to the value in the map
+  Value* getPtr(const Key& key) {
+    std::lock_guard lock(mutex);
+    auto it = map_.find(key);
+    if (it == map_.end()) return nullptr;
+    return &it->second;
   }
 
   template <typename Func>

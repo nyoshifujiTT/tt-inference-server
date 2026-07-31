@@ -29,6 +29,7 @@ from workflows.device_utils import _get_tt_smi_board_type_counts, infer_default_
 from workflows.model_spec import get_runtime_model_spec
 from workflows.run_docker_server import (
     generate_docker_run_command,
+    get_media_server_docker_env_vars,
 )
 from workflows.runtime_config import RuntimeConfig
 from workflows.workflow_types import DeviceTypes
@@ -189,6 +190,30 @@ class TestArgumentParsing:
                     or "error" in stderr_output.lower()
                 )
 
+    @pytest.mark.parametrize(
+        "invalid_value",
+        [
+            "not-a-real-tool",
+            "VLLM",  # case-sensitive: uppercase variant should be rejected
+            "guidellm ",  # trailing whitespace should be rejected
+            "",  # empty string
+        ],
+    )
+    def test_invalid_tools_choice(self, base_args, invalid_value):
+        """--tools must be restricted to the documented choice set."""
+        full_args = base_args + ["--tools", invalid_value]
+        with patch("sys.argv", ["run.py"] + full_args):
+            with patch("sys.stderr") as mock_stderr:
+                with pytest.raises(SystemExit) as exc_info:
+                    parse_arguments()
+
+                assert exc_info.value.code == 2
+
+                stderr_calls = [str(call) for call in mock_stderr.write.call_args_list]
+                stderr_output = "".join(stderr_calls).lower()
+                assert "--tools" in stderr_output
+                assert "invalid choice" in stderr_output
+
 
 class TestModelSpecCliArgsCompatibility:
     def test_populate_model_spec_cli_args_uses_runtime_config_values(self):
@@ -318,6 +343,8 @@ class TestModelSpecCliArgsCompatibility:
             "/opt/tt-metal",
             "--vllm-dir",
             "/opt/vllm",
+            "--tools",
+            "guidellm",
         ]
         with patch("sys.argv", ["run.py"] + full_args):
             args = parse_arguments()
@@ -338,6 +365,7 @@ class TestModelSpecCliArgsCompatibility:
         assert args.concurrency_sweeps is True
         assert args.tt_metal_home == "/opt/tt-metal"
         assert args.vllm_dir == "/opt/vllm"
+        assert args.tools == "guidellm"
 
         # Test defaults
         with patch("sys.argv", ["run.py"] + base_args):
@@ -627,25 +655,26 @@ class TestRuntimeValidation:
         [
             ("benchmarks", True),
             ("evals", True),  # Mistral-7B-Instruct-v0.3 is in EVAL_CONFIGS
-            ("reports", True),
+            ("agentic", True),
             ("release", True),  # Mistral-7B-Instruct-v0.3 is in both configs
             ("stress_tests", True),
         ],
     )
-    def test_workflow_validation(
-        self, mock_model_spec, mock_runtime_config, workflow, should_pass
-    ):
+    def test_workflow_validation(self, mock_runtime_config, workflow, should_pass):
         """Test validation for different workflows."""
         mock_runtime_config.workflow = workflow
+        model_spec, _, _ = get_runtime_model_spec(
+            model="Mistral-7B-Instruct-v0.3", device="n150"
+        )
         with patch.dict(
             "workflows.validate_setup.MODEL_SPECS",
-            {mock_model_spec.model_id: mock_model_spec},
+            {model_spec.model_id: model_spec},
         ):
             if should_pass:
-                validate_runtime_args(mock_model_spec, mock_runtime_config)
+                validate_runtime_args(model_spec, mock_runtime_config)
             else:
                 with pytest.raises(AssertionError):
-                    validate_runtime_args(mock_model_spec, mock_runtime_config)
+                    validate_runtime_args(model_spec, mock_runtime_config)
 
     def test_server_workflow_validation(self, mock_model_spec, mock_runtime_config):
         """Test server workflow specific validation."""
@@ -683,6 +712,17 @@ class TestRuntimeValidation:
                 AssertionError, match="Cannot run --docker-server and --local-server"
             ):
                 validate_runtime_args(mock_model_spec, mock_runtime_config)
+
+    def test_external_runtime_model_spec_skips_catalog_membership(
+        self, mock_model_spec, mock_runtime_config
+    ):
+        """A supplied runtime spec is the source of truth for model/device support."""
+        mock_model_spec.model_id = "id_autoport_Mistral-7B-Instruct-v0.3_n150"
+        mock_runtime_config.workflow = "agentic"
+        mock_runtime_config.runtime_model_spec_json = "/tmp/custom-runtime-spec.json"
+
+        with patch.dict("workflows.validate_setup.MODEL_SPECS", {}):
+            validate_runtime_args(mock_model_spec, mock_runtime_config)
 
 
 class TestOverrideArgsIntegration:
@@ -1005,6 +1045,48 @@ class TestOverrideArgsIntegration:
                     assert not env_setting.startswith("RUNTIME_MODEL_SPEC_JSON_PATH=")
 
 
+class TestMediaServerDockerEnvVars:
+    def test_single_runner_sdxl_uses_cpp_server(self):
+        model_spec, _, _ = get_runtime_model_spec(
+            model="stable-diffusion-xl-base-1.0",
+            device="n150",
+        )
+
+        env_vars = get_media_server_docker_env_vars(model_spec)
+
+        assert env_vars["SERVER_MODE"] == "cpp"
+        assert env_vars["MODEL_SERVICE"] == "image"
+        assert env_vars["MODEL_RUNNER_TYPE"] == "tt_sdxl_generate"
+        assert env_vars["DEVICE_IDS"] == "(0)"
+
+    @pytest.mark.parametrize("device", ["galaxy"])
+    def test_multi_runner_sdxl_uses_cpp_server(self, device):
+        model_spec, _, _ = get_runtime_model_spec(
+            model="stable-diffusion-xl-base-1.0",
+            device=device,
+        )
+
+        env_vars = get_media_server_docker_env_vars(model_spec)
+
+        assert env_vars["SERVER_MODE"] == "cpp"
+        assert env_vars["MODEL_SERVICE"] == "image"
+        assert env_vars["MODEL_RUNNER_TYPE"] == "tt_sdxl_generate"
+        assert env_vars["DEVICE_IDS"].replace(" ", "").count("(") > 1
+
+    def test_non_cpp_media_persists_hf_cache_on_cache_root(self):
+        """Whisper (uvicorn media server) must place HF_HOME on the cache_root
+        volume so weights survive container restarts."""
+        model_spec, _, _ = get_runtime_model_spec(
+            model="whisper-large-v3",
+            device="n150",
+        )
+
+        env_vars = get_media_server_docker_env_vars(model_spec)
+
+        assert env_vars.get("SERVER_MODE") != "cpp"
+        assert env_vars["HF_HOME"] == "/home/container_app_user/cache_root/huggingface"
+
+
 class TestSecretsHandling:
     """Tests for secrets handling functionality."""
 
@@ -1018,7 +1100,7 @@ class TestSecretsHandling:
             ("server", True, True, False, False, False),  # Interactive mode
             ("server", True, False, True, False, True),  # Server with docker + no-auth
             ("release", False, False, False, False, True),  # Non-client workflow
-            ("reports", False, False, False, False, True),  # Non-client workflow
+            ("agentic", False, False, False, False, True),  # Non-client workflow
         ],
     )
     def test_secrets_requirements(

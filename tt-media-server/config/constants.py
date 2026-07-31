@@ -2,7 +2,9 @@
 #
 # SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
 
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import NamedTuple, Tuple
 
 
 class SupportedModels(Enum):
@@ -18,6 +20,11 @@ class SupportedModels(Enum):
     QWEN_IMAGE_2512 = "Qwen/Qwen-Image-2512"
     MOCHI_1 = "genmo/mochi-1-preview"
     WAN_2_2 = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+    WAN_2_2_I2V = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+    WAN_2_2_I2V_PRODIA = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+    WAN_2_2_I2V_ANISORA = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+    WAN_2_2_I2V_DISTILL = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+    WAN_2_2_I2V_LORA = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
     DISTIL_WHISPER_LARGE_V3 = "distil-whisper/distil-large-v3"
     OPENAI_WHISPER_LARGE_V3 = "openai/whisper-large-v3"
     PYANNOTE_SPEAKER_DIARIZATION = "pyannote/speaker-diarization-3.0"
@@ -32,11 +39,16 @@ class SupportedModels(Enum):
     LLAMA_3_1_70B = "meta-llama/Llama-3.1-70B"
     QWEN_3_4B = "Qwen/Qwen3-4B"
     QWEN_3_8B = "Qwen/Qwen3-8B"
+    QWEN_3_32B = "Qwen/Qwen3-32B"
     SPEECHT5_TTS = "microsoft/speecht5_tts"
     GEMMA_1_1_2B_IT = "google/gemma-1.1-2b-it"
     GEMMA_4_31B_IT = "google/gemma-4-31B-it"
+    MISTRAL_SMALL_3_1_24B_INSTRUCT_2503 = (
+        "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+    )
     FALCON3_7B_INSTRUCT = "tiiuae/Falcon3-7B-Instruct"
     Z_IMAGE_TURBO = "Tongyi-MAI/Z-Image-Turbo"
+    YOLOX_NANO = "Megvii-BaseDetection/YOLOX-Nano"
 
 
 # MODEL environment variable
@@ -54,6 +66,11 @@ class ModelNames(Enum):
     QWEN_IMAGE_2512 = "Qwen-Image-2512"
     MOCHI_1 = "mochi-1-preview"
     WAN_2_2 = "Wan2.2-T2V-A14B-Diffusers"
+    WAN_2_2_I2V = "Wan2.2-I2V-A14B-Diffusers"
+    WAN_2_2_I2V_PRODIA = "Wan2.2-I2V-A14B-Prodia"
+    WAN_2_2_I2V_ANISORA = "Wan2.2-I2V-AniSora-V3.2"
+    WAN_2_2_I2V_DISTILL = "Wan2.2-I2V-Distill-LightX2V"
+    WAN_2_2_I2V_LORA = "Wan2.2-I2V-LoRA"
     DISTIL_WHISPER_LARGE_V3 = "distil-large-v3"
     OPENAI_WHISPER_LARGE_V3 = "whisper-large-v3"
     MICROSOFT_RESNET_50 = "resnet-50"
@@ -75,10 +92,13 @@ class ModelNames(Enum):
     LLAMA_3_1_70B = "Llama-3.1-70B"
     QWEN_3_4B = "Qwen3-4B"
     QWEN_3_8B = "Qwen3-8B"
+    QWEN_3_32B = "Qwen3-32B"
     SPEECHT5_TTS = "speecht5_tts"
     GEMMA_1_1_2B_IT = "gemma-1.1-2b-it"
     GEMMA_4_31B_IT = "gemma-4-31b-it"
+    MISTRAL_SMALL_3_1_24B_INSTRUCT_2503 = "Mistral-Small-3.1-24B-Instruct-2503"
     FALCON3_7B_INSTRUCT = "Falcon3-7B-Instruct"
+    YOLOX_NANO = "yolox_nano"
     Z_IMAGE_TURBO = "Z-Image-Turbo"
 
 
@@ -94,12 +114,19 @@ class ModelRunners(Enum):
     TT_QWEN_IMAGE_2512 = "tt-qwen-image-2512"
     TT_MOCHI_1 = "tt-mochi-1"
     TT_WAN_2_2 = "tt-wan2.2"
+    TT_WAN_2_2_I2V = "tt-wan2.2-i2v"
+    TT_WAN_2_2_I2V_PRODIA = "tt-wan2.2-i2v-prodia"
+    TT_WAN_2_2_I2V_ANISORA = "tt-wan2.2-i2v-anisora"
+    TT_WAN_2_2_I2V_DISTILL = "tt-wan2.2-i2v-distill"
+    TT_WAN_2_2_I2V_LORA = "tt-wan2.2-i2v-lora"
     TT_WHISPER = "tt-whisper"
     VLLMForge = "vllm_forge"
     TT_YOLOV4 = "tt-yolov4"
     VLLMForge_QWEN_EMBEDDING = "vllmforge_qwen_embedding"
     VLLMForge_LLAMA_70B = "vllm_forge_llama_70b"
     VLLMForge_GEMMA4_31B = "vllm_forge_gemma4_31b"
+    VLLMForge_QWEN_32B = "vllm_forge_qwen_32b"
+    VLLMForge_MISTRAL_SMALL_31_24B = "vllm_forge_mistral_small_31_24b"
     QWEN_EMBEDDING_8B = "qwen_embedding_8b"
     BGELargeEN_V1_5 = "bge_large_en_v1_5"
     BGEM3 = "bge-m3"
@@ -110,7 +137,8 @@ class ModelRunners(Enum):
     TT_XLA_SEGFORMER = "tt-xla-segformer"
     TT_XLA_UNET = "tt-xla-unet"
     TT_XLA_VIT = "tt-xla-vit"
-    TRAINING_LLAMA_LORA = "training-llama-lora"
+    TT_XLA_YOLOX_NANO = "tt-xla-yolox-nano"
+    TRAINING_LORA = "training-lora"
     TRAINING_GEMMA_LORA = "training-gemma-lora"
     LORA_SINGLE_CHIP = "lora-single-chip"
     MOCK = "mock"
@@ -151,6 +179,8 @@ MODEL_SERVICE_RUNNER_MAP = {
         ModelRunners.VLLMForge,
         ModelRunners.VLLMForge_LLAMA_70B,
         ModelRunners.VLLMForge_GEMMA4_31B,
+        ModelRunners.VLLMForge_QWEN_32B,
+        ModelRunners.VLLMForge_MISTRAL_SMALL_31_24B,
         ModelRunners.LLM_TEST,
         ModelRunners.LLAMA_RUNNER,
         ModelRunners.LORA_SINGLE_CHIP,
@@ -170,6 +200,7 @@ MODEL_SERVICE_RUNNER_MAP = {
         ModelRunners.TT_XLA_UNET,
         ModelRunners.TT_XLA_VIT,
         ModelRunners.TT_YOLOV4,
+        ModelRunners.TT_XLA_YOLOX_NANO,
     },
     ModelServices.AUDIO: {
         ModelRunners.TT_WHISPER,
@@ -177,11 +208,16 @@ MODEL_SERVICE_RUNNER_MAP = {
     ModelServices.VIDEO: {
         ModelRunners.TT_MOCHI_1,
         ModelRunners.TT_WAN_2_2,
+        ModelRunners.TT_WAN_2_2_I2V,
+        ModelRunners.TT_WAN_2_2_I2V_PRODIA,
+        ModelRunners.TT_WAN_2_2_I2V_ANISORA,
+        ModelRunners.TT_WAN_2_2_I2V_DISTILL,
+        ModelRunners.TT_WAN_2_2_I2V_LORA,
         ModelRunners.SP_RUNNER,
     },
     ModelServices.TRAINING: {
         ModelRunners.TRAINING_GEMMA_LORA,
-        ModelRunners.TRAINING_LLAMA_LORA,
+        ModelRunners.TRAINING_LORA,
     },
     ModelServices.TEXT_TO_SPEECH: {
         ModelRunners.TT_SPEECHT5_TTS,
@@ -189,7 +225,30 @@ MODEL_SERVICE_RUNNER_MAP = {
 }
 
 
-MODEL_RUNNER_TO_MODEL_NAMES_MAP = {
+# Wan2.2 I2V-only deployments: used by the video API to reject text-only
+# ``POST /generations`` before the work reaches the device worker.
+I2V_MODEL_RUNNERS = frozenset(
+    {
+        ModelRunners.TT_WAN_2_2_I2V,
+        ModelRunners.TT_WAN_2_2_I2V_PRODIA,
+        ModelRunners.TT_WAN_2_2_I2V_ANISORA,
+        ModelRunners.TT_WAN_2_2_I2V_DISTILL,
+        ModelRunners.TT_WAN_2_2_I2V_LORA,
+    }
+)
+# SP_RUNNER proxies to a multihost peer and serves either T2V or I2V weights,
+# so the runner alone cannot identify it — fall back to the model name.
+I2V_MODEL_NAMES = frozenset(
+    {
+        ModelNames.WAN_2_2_I2V,
+        ModelNames.WAN_2_2_I2V_PRODIA,
+        ModelNames.WAN_2_2_I2V_ANISORA,
+        ModelNames.WAN_2_2_I2V_DISTILL,
+        ModelNames.WAN_2_2_I2V_LORA,
+    }
+)
+
+INFERENCE_MODEL_RUNNER_TO_MODEL_NAMES_MAP = {
     ModelRunners.TT_SDXL_EDIT: {ModelNames.STABLE_DIFFUSION_XL_INPAINTING},
     ModelRunners.TT_SDXL_IMAGE_TO_IMAGE: {ModelNames.STABLE_DIFFUSION_XL_IMG2IMG},
     ModelRunners.TT_SDXL_TRACE: {ModelNames.STABLE_DIFFUSION_XL_BASE},
@@ -201,7 +260,17 @@ MODEL_RUNNER_TO_MODEL_NAMES_MAP = {
     ModelRunners.TT_QWEN_IMAGE_2512: {ModelNames.QWEN_IMAGE_2512},
     ModelRunners.TT_MOCHI_1: {ModelNames.MOCHI_1},
     ModelRunners.TT_WAN_2_2: {ModelNames.WAN_2_2},
-    ModelRunners.SP_RUNNER: {ModelNames.WAN_2_2, ModelNames.MOCHI_1},
+    ModelRunners.TT_WAN_2_2_I2V: {ModelNames.WAN_2_2_I2V},
+    ModelRunners.TT_WAN_2_2_I2V_PRODIA: {ModelNames.WAN_2_2_I2V_PRODIA},
+    ModelRunners.TT_WAN_2_2_I2V_ANISORA: {ModelNames.WAN_2_2_I2V_ANISORA},
+    ModelRunners.TT_WAN_2_2_I2V_DISTILL: {ModelNames.WAN_2_2_I2V_DISTILL},
+    ModelRunners.TT_WAN_2_2_I2V_LORA: {ModelNames.WAN_2_2_I2V_LORA},
+    ModelRunners.SP_RUNNER: {
+        ModelNames.WAN_2_2,
+        ModelNames.WAN_2_2_I2V,
+        ModelNames.WAN_2_2_I2V_PRODIA,
+        ModelNames.MOCHI_1,
+    },
     ModelRunners.TT_WHISPER: {
         ModelNames.OPENAI_WHISPER_LARGE_V3,
         ModelNames.DISTIL_WHISPER_LARGE_V3,
@@ -213,9 +282,14 @@ MODEL_RUNNER_TO_MODEL_NAMES_MAP = {
     ModelRunners.TT_XLA_SEGFORMER: {ModelNames.SEGFORMER},
     ModelRunners.TT_XLA_UNET: {ModelNames.UNET},
     ModelRunners.TT_XLA_VIT: {ModelNames.VIT},
+    ModelRunners.TT_XLA_YOLOX_NANO: {ModelNames.YOLOX_NANO},
     ModelRunners.VLLMForge_QWEN_EMBEDDING: {ModelNames.QWEN_3_EMBEDDING_4B},
     ModelRunners.VLLMForge_LLAMA_70B: {ModelNames.LLAMA_3_1_70B},
     ModelRunners.VLLMForge_GEMMA4_31B: {ModelNames.GEMMA_4_31B_IT},
+    ModelRunners.VLLMForge_QWEN_32B: {ModelNames.QWEN_3_32B},
+    ModelRunners.VLLMForge_MISTRAL_SMALL_31_24B: {
+        ModelNames.MISTRAL_SMALL_3_1_24B_INSTRUCT_2503
+    },
     ModelRunners.QWEN_EMBEDDING_8B: {ModelNames.QWEN_3_EMBEDDING_8B},
     ModelRunners.BGELargeEN_V1_5: {ModelNames.BGE_LARGE_EN_V1_5},
     ModelRunners.BGEM3: {ModelNames.BGE_M3},
@@ -228,14 +302,12 @@ MODEL_RUNNER_TO_MODEL_NAMES_MAP = {
         ModelNames.FALCON3_7B_INSTRUCT,
     },
     ModelRunners.TT_SPEECHT5_TTS: {ModelNames.SPEECHT5_TTS},
-    ModelRunners.TRAINING_GEMMA_LORA: {ModelNames.GEMMA_1_1_2B_IT},
-    ModelRunners.TRAINING_LLAMA_LORA: {ModelNames.LLAMA_3_1_8B},
-    ModelRunners.LORA_SINGLE_CHIP: {ModelNames.GEMMA_1_1_2B_IT},
     ModelRunners.TT_XLA_SDXL: {
         ModelNames.STABLE_DIFFUSION_XL_BASE,
         ModelNames.STABLE_DIFFUSION_XL_512,
     },
     ModelRunners.TT_Z_IMAGE_TURBO: {ModelNames.Z_IMAGE_TURBO},
+    ModelRunners.LORA_SINGLE_CHIP: {ModelNames.GEMMA_1_1_2B_IT},
 }
 
 
@@ -296,6 +368,46 @@ class AudioResponseFormat(Enum):
 
 
 SDXL_VALID_IMAGE_RESOLUTIONS = frozenset({(1024, 1024), (512, 512)})
+
+
+class Resolution(NamedTuple):
+    """
+    Image / video frame resolution, in pixels.
+    """
+
+    height: int
+    width: int
+
+
+# --- Wan2.2 (T2V / I2V) inference shape policy --------------------------------
+# Galaxy-class meshes (e.g. WH GLX (4, 8) = 32 chips, BH GLX (4, 32) = 128
+# chips) are treated as "large" for both DiT resolution and fabric config
+# selection; T3K (2, 4), P150X4 (1, 4), P300X2 (2, 2), N300/N150 are "small".
+LARGE_MESH_SIZE_THRESHOLD = 32
+
+
+def is_large_mesh(mesh_shape: Tuple[int, int]) -> bool:
+    """Return True if a (rows, cols) mesh is Galaxy-class.
+
+    The "large mesh" predicate drives several pipeline-time decisions
+    (target resolution, fabric topology, trace region size) that would
+    otherwise drift apart if duplicated as inline ``mesh_size >= 32`` checks.
+    """
+    return (mesh_shape[0] * mesh_shape[1]) >= LARGE_MESH_SIZE_THRESHOLD
+
+
+WAN22_NUM_FRAMES = 81
+WAN22_RESOLUTION_LARGE_MESH = Resolution(height=720, width=1280)
+WAN22_RESOLUTION_SMALL_MESH = Resolution(height=480, width=832)
+
+
+def wan22_target_resolution(mesh_shape: Tuple[int, int]) -> Resolution:
+    """Resolve Wan2.2 target resolution from a (rows, cols) mesh shape."""
+    if is_large_mesh(mesh_shape):
+        return WAN22_RESOLUTION_LARGE_MESH
+    return WAN22_RESOLUTION_SMALL_MESH
+
+
 AUDIO_RESPONSE_FORMATS = frozenset(e.value for e in AudioResponseFormat)
 
 # TTS formats that require ffmpeg for encoding (WAV does not)
@@ -327,6 +439,7 @@ class TrainingTrainers(Enum):
 class ModelDisplayNames(Enum):
     GEMMA_1_1_2B_IT = "Gemma 1.1 2B Instruct"
     LLAMA_3_1_8B = "Llama 3.1 8B"
+    QWEN_3_8B = "Qwen 3 8B"
 
 
 class TrainingOptimizers(Enum):
@@ -590,6 +703,7 @@ ModelConfigs = {
         "device_ids": DeviceIds.DEVICE_IDS_2_GROUP.value,
         "max_batch_size": 1,
         "request_processing_timeout_seconds": 2000,
+        "trace_region_size": 51000000,
     },
     (ModelRunners.TT_FLUX_1_DEV, DeviceTypes.P300X2): {
         "device_mesh_shape": (2, 2),
@@ -597,6 +711,7 @@ ModelConfigs = {
         "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
         "max_batch_size": 1,
         "request_processing_timeout_seconds": 2000,
+        "trace_region_size": 51000000,
     },
     (ModelRunners.TT_FLUX_1_SCHNELL, DeviceTypes.T3K): {
         "device_mesh_shape": (2, 4),
@@ -632,6 +747,7 @@ ModelConfigs = {
         "device_ids": DeviceIds.DEVICE_IDS_2_GROUP.value,
         "max_batch_size": 1,
         "request_processing_timeout_seconds": 2000,
+        "trace_region_size": 51000000,
     },
     (ModelRunners.TT_FLUX_1_SCHNELL, DeviceTypes.P300X2): {
         "device_mesh_shape": (2, 2),
@@ -639,6 +755,7 @@ ModelConfigs = {
         "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
         "max_batch_size": 1,
         "request_processing_timeout_seconds": 2000,
+        "trace_region_size": 51000000,
     },
     (ModelRunners.TT_MOTIF_IMAGE_6B_PREVIEW, DeviceTypes.T3K): {
         "device_mesh_shape": (2, 4),
@@ -763,6 +880,74 @@ ModelConfigs = {
         "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
         "max_batch_size": 1,
         "download_weights_from_service": False,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V, DeviceTypes.T3K): {
+        "device_mesh_shape": (2, 4),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
+        "max_batch_size": 1,
+        "download_weights_from_service": False,
+        "request_processing_timeout_seconds": 5000,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V, DeviceTypes.GALAXY): {
+        "device_mesh_shape": (4, 8),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_32_GROUP.value,
+        "max_batch_size": 1,
+        "request_processing_timeout_seconds": 5000,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V, DeviceTypes.P150X4): {
+        "device_mesh_shape": (1, 4),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
+        "max_batch_size": 1,
+        "download_weights_from_service": False,
+        "request_processing_timeout_seconds": 5000,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V, DeviceTypes.P150X8): {
+        "device_mesh_shape": (2, 4),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_8_GROUP.value,
+        "max_batch_size": 1,
+        "download_weights_from_service": False,
+        "request_processing_timeout_seconds": 5000,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V, DeviceTypes.P300X2): {
+        "device_mesh_shape": (2, 2),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
+        "max_batch_size": 1,
+        "download_weights_from_service": False,
+        "request_processing_timeout_seconds": 5000,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V_PRODIA, DeviceTypes.GALAXY): {
+        "device_mesh_shape": (4, 8),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_32_GROUP.value,
+        "max_batch_size": 1,
+        "request_processing_timeout_seconds": 5000,
+        "num_inference_steps": 3,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V_ANISORA, DeviceTypes.BLACKHOLE_GALAXY): {
+        "device_mesh_shape": (4, 8),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_32_GROUP.value,
+        "max_batch_size": 1,
+        "request_processing_timeout_seconds": 5000,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V_DISTILL, DeviceTypes.BLACKHOLE_GALAXY): {
+        "device_mesh_shape": (4, 8),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_32_GROUP.value,
+        "max_batch_size": 1,
+        "request_processing_timeout_seconds": 5000,
+    },
+    (ModelRunners.TT_WAN_2_2_I2V_LORA, DeviceTypes.BLACKHOLE_GALAXY): {
+        "device_mesh_shape": (4, 8),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_32_GROUP.value,
+        "max_batch_size": 1,
+        "request_processing_timeout_seconds": 5000,
     },
     (ModelRunners.SP_RUNNER, DeviceTypes.N150): {
         "device_mesh_shape": (1, 1),
@@ -934,16 +1119,30 @@ ModelConfigs = {
         "device_mesh_shape": (1, 4),
         "is_galaxy": False,
         "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
+        # Dims are env-driven via dev/cnn.yaml env_vars (mimics the single-chip
+        # forge LLMs): VLLMSettings reads MAX_MODEL_LENGTH / MAX_NUM_SEQS /
+        # GPU_MEMORY_UTILIZATION from env and auto-computes max_num_batched_tokens
+        # = max_model_length * max_num_seqs. model is set from the MODEL env
+        # (settings.py); max_batch_size auto-raises to max_num_seqs. This entry
+        # only carries the TP mesh topology (batch-16/4K lives in cnn.yaml).
         "max_batch_size": 1,
-        "vllm": {
-            "model": SupportedModels.GEMMA_4_31B_IT.value,
-            "max_model_length": 512,
-            # Gemma-4 multimodal requires max_num_batched_tokens >= 2560
-            # (video: _VIDEO_MAX_FRAMES=32 * 78 tokens = 2496).
-            "max_num_batched_tokens": 2560,
-            "min_context_length": 32,
-            "max_num_seqs": 1,
-        },
+        "queue_for_multiprocessing": QueueType.FasterFifo.value,
+    },
+    (ModelRunners.VLLMForge_QWEN_32B, DeviceTypes.P300X2): {
+        "device_mesh_shape": (1, 4),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
+        # Dims env-driven via dev/cnn.yaml env_vars (see gemma entry above).
+        "max_batch_size": 1,
+        "queue_for_multiprocessing": QueueType.FasterFifo.value,
+    },
+    (ModelRunners.VLLMForge_MISTRAL_SMALL_31_24B, DeviceTypes.BLACKHOLE_GALAXY): {
+        "device_mesh_shape": (8, 4),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_32_GROUP.value,
+        # Dims env-driven via dev/llm.yaml env_vars (see gemma entry above); this
+        # entry only carries the TP mesh topology.
+        "max_batch_size": 1,
         "queue_for_multiprocessing": QueueType.FasterFifo.value,
     },
     (ModelRunners.QWEN_EMBEDDING_8B, DeviceTypes.N150): {
@@ -1182,6 +1381,7 @@ ModelConfigs = {
         "is_galaxy": False,
         "device_ids": DeviceIds.DEVICE_IDS_1.value,
         "max_batch_size": 1,
+        "request_processing_timeout_seconds": 3000,
     },
     (ModelRunners.VLLMForge, DeviceTypes.P300): {
         "device_mesh_shape": (1, 1),
@@ -1195,6 +1395,13 @@ ModelConfigs = {
         "device_ids": DeviceIds.DEVICE_IDS_4.value,
         "max_batch_size": 1,
     },
+    (ModelRunners.TT_XLA_SDXL, DeviceTypes.N150): {
+        "device_mesh_shape": (1, 1),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_1.value,
+        "max_batch_size": 1,
+        "request_processing_timeout_seconds": 3000,
+    },
     (ModelRunners.TT_XLA_SDXL, DeviceTypes.P150X4): {
         "device_mesh_shape": (1, 1),
         "is_galaxy": False,
@@ -1207,10 +1414,23 @@ ModelConfigs = {
         "device_ids": DeviceIds.DEVICE_IDS_2X2_GROUP.value,
         "max_batch_size": 1,
     },
-    (ModelRunners.TT_Z_IMAGE_TURBO, DeviceTypes.P150X4): {
+    (ModelRunners.TT_Z_IMAGE_TURBO, DeviceTypes.P300X2): {
         "device_mesh_shape": (1, 4),
         "is_galaxy": False,
         "device_ids": DeviceIds.DEVICE_IDS_4_GROUP.value,
+        "max_batch_size": 1,
+        "request_processing_timeout_seconds": 1500,
+    },
+    (ModelRunners.TRAINING_LORA, DeviceTypes.P150): {
+        "device_mesh_shape": (1, 1),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_1.value,
+        "max_batch_size": 1,
+    },
+    (ModelRunners.TRAINING_LORA, DeviceTypes.P300): {
+        "device_mesh_shape": (1, 1),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_2.value,
         "max_batch_size": 1,
     },
 }
@@ -1235,11 +1455,28 @@ for runner in [
         "device_ids": DeviceIds.DEVICE_IDS_1.value,
     }
 
+for runner in [
+    ModelRunners.TT_XLA_YOLOX_NANO,
+]:
+    ModelConfigs[(runner, DeviceTypes.N150)] = {
+        "is_galaxy": False,
+        "device_mesh_shape": (1, 1),
+        "device_ids": DeviceIds.DEVICE_IDS_1.value,
+        "download_weights_from_service": False,
+    }
+    ModelConfigs[(runner, DeviceTypes.P150)] = {
+        "is_galaxy": False,
+        "device_mesh_shape": (1, 1),
+        "device_ids": DeviceIds.DEVICE_IDS_1.value,
+        "download_weights_from_service": False,
+    }
+
 
 # Per-model overrides applied after device config (keyed by ModelNames enum value)
 MODEL_NAME_OVERRIDES = {
     ModelNames.QWEN_3_4B: {"chat_template_kwargs": {"enable_thinking": False}},
     ModelNames.QWEN_3_8B: {"chat_template_kwargs": {"enable_thinking": False}},
+    ModelNames.MISTRAL_SMALL_3_1_24B_INSTRUCT_2503: {"tokenizer_type": "mistral"},
 }
 
 
@@ -1267,3 +1504,25 @@ _DEFAULT_SAMPLING_PARAMS = {
 
 # Sentinel object for worker shutdown signaling
 SHUTDOWN_SIGNAL = {"__shutdown__": True}
+
+
+# Reserved task_ids for canary-monitor probes (see health_monitoring/).
+# Must not contain "_chunk_", must be <= 36 bytes, and must not collide with UUID4 task_ids.
+CANARY_TASK_ID = "__canary__"  # shallow: bare host-collective probe
+CANARY_DEEP_TASK_ID = (
+    "__canary_deep__"  # deep: replays compiled warmup forward to certify silicon
+)
+CANARY_TASK_IDS = frozenset({CANARY_TASK_ID, CANARY_DEEP_TASK_ID})
+
+
+@dataclass(frozen=True)
+class CanaryProbeRequest:
+    """Sentinel put on the scheduler task_queue by the canary monitor.
+
+    Workers route it to ``runner.health_check()`` instead of ``runner.run()``.
+    Frozen dataclass so it pickles cleanly across the multiprocessing queue.
+    """
+
+    _task_id: str = field(default=CANARY_TASK_ID)
+    stream: bool = field(default=False)
+    deep: bool = field(default=False)
