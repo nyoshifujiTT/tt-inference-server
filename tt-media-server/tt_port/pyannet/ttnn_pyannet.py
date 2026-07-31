@@ -72,6 +72,13 @@ class _DevBiLSTM:
         self.whhr = dv(sd[f"lstm.weight_hh_l{li}_reverse"].T)
         self.bihr = dv(sd[f"lstm.bias_ih_l{li}_reverse"].reshape(1, -1))
         self.bhhr = dv(sd[f"lstm.bias_hh_l{li}_reverse"].reshape(1, -1))
+        h = hidden
+        # 3D (direction-batched) recurrent weights/bias for the fused loop:
+        #   dir 0 = forward, dir 1 = reverse
+        self.whh3 = dv(np.stack([sd[f"lstm.weight_hh_l{li}"].T,
+                                 sd[f"lstm.weight_hh_l{li}_reverse"].T], axis=0))     # (2,h,4h)
+        self.bhh3 = dv(np.stack([sd[f"lstm.bias_hh_l{li}"],
+                                 sd[f"lstm.bias_hh_l{li}_reverse"]], axis=0).reshape(2, 1, 4 * h))
 
     def _dir(self, GXtb, B, T, whh, bhh):
         """Recurrence, fully device-resident. GXtb: device (T*B,4h) time-major
@@ -98,23 +105,55 @@ class _DevBiLSTM:
         return ttnn.to_torch(stacked).float().reshape(T, B, h)
 
     def forward(self, X):
-        """X: np (B,T,in) -> np (B,T,2h). Time-major device recurrence per dir."""
+        """X: np (B,T,in) -> np (B,T,2h).
+
+        Both directions run in a SINGLE device recurrence: the (h,c) state has
+        2*B rows (rows [0:B]=forward, [B:2B]=reverse-time), so each timestep is
+        one recurrent 3D batched matmul (2,B,h)@(2,h,4h) plus lean gate ops.
+        The input projection is done up front (one matmul per direction), stacked
+        time-major, and sliced per step from device. Only the final output is
+        downloaded once."""
         B, T, _ = X.shape
-        Xtb = np.ascontiguousarray(np.transpose(X, (1, 0, 2)).reshape(T * B, -1))
-        Xtb_d = ttnn.from_torch(torch.from_numpy(Xtb).to(torch.bfloat16),
-                                layout=ttnn.TILE_LAYOUT, device=self.dev)
-        GXf = ttnn.linear(Xtb_d, self.wih, bias=self.bih)     # (T*B,4h) one matmul
-        fwd = self._dir(GXf, B, T, self.whh, self.bhh)        # (T,B,h)
-        fwd = np.transpose(fwd.numpy(), (1, 0, 2))            # (B,T,h)
-        Xr = np.ascontiguousarray(X[:, ::-1, :])
-        Xrtb = np.ascontiguousarray(np.transpose(Xr, (1, 0, 2)).reshape(T * B, -1))
-        Xrtb_d = ttnn.from_torch(torch.from_numpy(Xrtb).to(torch.bfloat16),
-                                 layout=ttnn.TILE_LAYOUT, device=self.dev)
-        GXr = ttnn.linear(Xrtb_d, self.wihr, bias=self.bihr)
-        rev = self._dir(GXr, B, T, self.whhr, self.bhhr)      # (T,B,h) reversed time
-        rev = np.transpose(rev.numpy(), (1, 0, 2))[:, ::-1, :]
-        rev = np.ascontiguousarray(rev)
-        return np.concatenate([fwd, rev], axis=2)             # (B,T,2h)
+        h = self.h
+        # forward-time and reverse-time input sequences, time-major (T,B,in)
+        Xf = np.ascontiguousarray(np.transpose(X, (1, 0, 2)).reshape(T * B, -1))
+        Xr = np.ascontiguousarray(np.transpose(X[:, ::-1, :], (1, 0, 2)).reshape(T * B, -1))
+        Xf_d = ttnn.from_torch(torch.from_numpy(Xf).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
+        Xr_d = ttnn.from_torch(torch.from_numpy(Xr).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
+        GXf = ttnn.linear(Xf_d, self.wih, bias=self.bih)      # (T*B,4h)
+        GXr = ttnn.linear(Xr_d, self.wihr, bias=self.bihr)    # (T*B,4h)
+        GXf = ttnn.to_torch(GXf).float().reshape(T, B, 4 * h)
+        GXr = ttnn.to_torch(GXr).float().reshape(T, B, 4 * h)
+        # interleave to (T,2,B,4h) -> (T*2*B, 4h): block order per t = [fwd(B), rev(B)]
+        GX = np.concatenate([GXf[:, None], GXr[:, None]], axis=1).reshape(T * 2 * B, 4 * h)
+        GX_d = ttnn.from_torch(torch.from_numpy(np.ascontiguousarray(GX)).to(torch.bfloat16),
+                               layout=ttnn.TILE_LAYOUT, device=self.dev)
+        ht = ttnn.from_torch(torch.zeros(2, B, h, dtype=torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
+        ct = ttnn.from_torch(torch.zeros(2, B, h, dtype=torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.dev)
+        outs = []
+        for t in range(T):
+            gx = ttnn.slice(GX_d, [t * 2 * B, 0], [t * 2 * B + 2 * B, 4 * h])  # (2B,4h)
+            gh = ttnn.matmul(ht, self.whh3)                   # (2,B,4h) recurrent, per-direction
+            gh = ttnn.add(gh, self.bhh3)
+            gh = ttnn.reshape(gh, (2 * B, 4 * h))             # back to 2D for lean gate slicing
+            g = ttnn.add(gx, gh)                              # (2B,4h)
+            R = 2 * B
+            sg = ttnn.sigmoid(g)                              # i,f,o in slots 0,1,3
+            tg = ttnn.tanh(ttnn.slice(g, [0, 2 * h], [R, 3 * h]))   # gg
+            i = ttnn.slice(sg, [0, 0 * h], [R, 1 * h])
+            f = ttnn.slice(sg, [0, 1 * h], [R, 2 * h])
+            o = ttnn.slice(sg, [0, 3 * h], [R, 4 * h])
+            ct2 = ttnn.reshape(ct, (2 * B, h))
+            ct2 = ttnn.add(ttnn.multiply(f, ct2), ttnn.multiply(i, tg))
+            ht2 = ttnn.multiply(o, ttnn.tanh(ct2))           # (2B,h)
+            ct = ttnn.reshape(ct2, (2, B, h))
+            ht = ttnn.reshape(ht2, (2, B, h))
+            outs.append(ttnn.reshape(ht2, (1, 2 * B, h)))
+        stacked = ttnn.concat(outs, dim=0)                    # (T,2B,h)
+        y = ttnn.to_torch(stacked).float().numpy().reshape(T, 2, B, h)
+        fwd = np.transpose(y[:, 0], (1, 0, 2))                # (B,T,h)
+        rev = np.transpose(y[:, 1], (1, 0, 2))[:, ::-1, :]    # (B,T,h) restore order
+        return np.concatenate([np.ascontiguousarray(fwd), np.ascontiguousarray(rev)], axis=2)
 
 
 class TTNNPyanNet:
