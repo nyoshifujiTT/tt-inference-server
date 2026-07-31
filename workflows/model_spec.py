@@ -3154,15 +3154,19 @@ audio_tts_templates = [
                     # text-decoder checkpoint (HF_MODEL) plus the full Qwen3-ASR
                     # snapshot for the audio tower (QWEN3ASR_AUDIO_SNAPSHOT).
                     "EXTRA_MODELS_DIR": "/data/vllm_tt/extra_models",
-                    "HF_MODEL": "/data/qwen3_asr_text_decoder_neo",
-                    "QWEN3ASR_AUDIO_SNAPSHOT": "/data/qwen3asr_hf/hub/models--neosophie--Qwen3-ASR-1.7B-JA/snapshots/987bda160f2dabfa6757550bcff7cdda2ba0648c",
+                    # HF_MODEL is set by the entrypoint to the served Qwen3-ASR
+                    # snapshot; the adapter auto-extracts the Qwen3 text decoder
+                    # from it (no pre-extracted checkpoint needed).
                     "HF_HUB_OFFLINE": "1",
                     "TRANSFORMERS_OFFLINE": "1",
                     # Stability: the tt-metal decode ND-hang is aggravated by the
                     # decode trace; disable tracing for this adapter (see worklog).
                     "TT_METAL_TRACE_REGION_SIZE": "0",
                 },
-                override_tt_config={"trace_mode": "none"},
+                # Disable the decode trace via vLLM additional-config (the plugin
+                # reads tt.trace_mode from --additional-config). trace_mode=none
+                # avoids the tt-metal decode ND-hang being aggravated by tracing.
+                vllm_args={"additional-config": '{"tt": {"trace_mode": "none"}}'},
             ),
         ],
         status=ModelStatusTypes.EXPERIMENTAL,
