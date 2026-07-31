@@ -1,0 +1,18 @@
+[Unit]
+Description=Qwen3-ASR TT p150 server supervisor (auto-recovers tt-metal decode ND-hang)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+# Give the device a moment after boot (post power-cycle) before launching.
+ExecStartPre=/bin/sleep 20
+ExecStart=/data/vllm_tt/asr_supervisor.sh 8101
+Restart=always
+RestartSec=15
+# Long-running; no timeout.
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
