@@ -151,6 +151,21 @@ templates:
         VLLM__MAX_MODEL_LENGTH: "4096"
         VLLM__MIN_CONTEXT_LENGTH: "32"
         VLLM__MAX_NUM_SEQS: "2"
+    # Single-card P150 (p150x1): device-memory-capped embedding context of 8192
+    # (not the model's 40960 positional limit). Full 32768/40960 KV allocation
+    # OOMs a single p150; ~8192 is the measured practical ceiling (tt-torch #985).
+    - device: P150
+      max_concurrency: 32
+      max_context: 8192
+      default_impl: true
+      env_vars:
+        TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+        VLLM__MAX_NUM_BATCHED_TOKENS: "8192"
+        VLLM__MAX_MODEL_LENGTH: "8192"
+        VLLM__MIN_CONTEXT_LENGTH: "32"
+        VLLM__MAX_NUM_SEQS: "32"
+        MAX_BATCH_SIZE: "32"
+        DEFAULT_THROTTLE_LEVEL: "0"
     - device: GALAXY
       max_concurrency: 32
       max_context: 65536  # 64 * 1024
