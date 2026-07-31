@@ -3149,7 +3149,20 @@ audio_tts_templates = [
                 default_impl=True,
                 env_vars={
                     "MESH_DEVICE": "P150",
+                    # The TT adapter (TTQwen3ASRForConditionalGeneration) is
+                    # registered from a bundle dir, and needs the extracted Qwen3
+                    # text-decoder checkpoint (HF_MODEL) plus the full Qwen3-ASR
+                    # snapshot for the audio tower (QWEN3ASR_AUDIO_SNAPSHOT).
+                    "EXTRA_MODELS_DIR": "/data/vllm_tt/extra_models",
+                    "HF_MODEL": "/data/qwen3_asr_text_decoder_neo",
+                    "QWEN3ASR_AUDIO_SNAPSHOT": "/data/qwen3asr_hf/hub/models--neosophie--Qwen3-ASR-1.7B-JA/snapshots/987bda160f2dabfa6757550bcff7cdda2ba0648c",
+                    "HF_HUB_OFFLINE": "1",
+                    "TRANSFORMERS_OFFLINE": "1",
+                    # Stability: the tt-metal decode ND-hang is aggravated by the
+                    # decode trace; disable tracing for this adapter (see worklog).
+                    "TT_METAL_TRACE_REGION_SIZE": "0",
                 },
+                override_tt_config={"trace_mode": "none"},
             ),
         ],
         status=ModelStatusTypes.EXPERIMENTAL,
