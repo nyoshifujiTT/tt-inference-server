@@ -120,13 +120,56 @@ class DiarizationService:
         return DiarizationResponse(segments=segments, exclusiveDiarization=exclusive)
 
     def start_workers(self):
-        """No device workers to start (CPU, in-process backend).
+        """Warm up the pipeline (and compile ttnn kernels) at service start.
 
-        Part of the service lifecycle contract invoked by the app lifespan. The
-        pyannote pipeline is lazy-loaded on first request (and warmed by the
-        readiness check below), so there is nothing to spin up here.
+        Part of the service lifecycle contract invoked by the app lifespan.
+        The pyannote pipeline weights are lazy-loaded and, when TT acceleration
+        is enabled, every ttnn kernel is JIT/auto-shard compiled on first use.
+        Doing that on the first real request would make it slow and emit
+        one-off device log noise. So we run a single short dummy diarization
+        here to pay the load + compile cost up front; failures are non-fatal
+        (the first real request will simply compile lazily as before).
         """
+        try:
+            self.warmup()
+        except Exception as e:  # noqa: BLE001 - warmup is best-effort
+            self.logger.warning(f"Diarization warmup skipped ({e})")
         return None
+
+    def warmup(self, seconds: float = 12.0) -> None:
+        """Run one dummy diarization to load weights and compile ttnn kernels.
+
+        Uses a short synthetic 16 kHz mono WAV. seconds is chosen long
+        to exercise the real segmentation window (10 s) so its kernels compile
+        during warmup rather than on the first user request.
+        """
+        import io
+        import wave
+        import numpy as np
+
+        sr = int(settings.default_sample_rate)
+        n = int(seconds * sr)
+        # low-amplitude noise so VAD/segmentation produce a non-trivial graph
+        rng = np.random.RandomState(0)
+        pcm = (rng.randn(n) * 0.02 * 32768.0).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.writeframes(pcm.tobytes())
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fobj:
+                fobj.write(buf.getvalue())
+                tmp_path = fobj.name
+            self.logger.info("DiarizationService: warming up pipeline...")
+            self._backend.diarize(tmp_path, exclusive=True)
+            self.logger.info("DiarizationService: warmup complete")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def check_is_model_ready(self) -> dict:
         """Readiness for /health and /tt-liveness.
