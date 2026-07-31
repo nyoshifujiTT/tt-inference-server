@@ -45,8 +45,8 @@ def register_models():
     # vLLM/TT stacks may resolve the embedding checkpoint as plain
     # Qwen3ForCausalLM / QwenForCausalLM instead of the embedding class.
     try:
-        # Shared adapter that subclasses the upstream PR #35941 wrapper (kept
-        # unchanged) and adds only the fork pooling contract (is_pooling_model,
+        # Shared adapter that subclasses the upstream PR #35941 wrapper and adds
+        # only the TT vLLM plugin pooling contract (is_pooling_model,
         # embed_input_ids, positions kw). Distinct class name to avoid shadowing
         # the base class.
         qwen_embed_target = "models.demos.qwen3_embedding.tt.generator_vllm:Qwen3EmbeddingForTTvLLM"
