@@ -5,18 +5,20 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import vllm.envs as envs
-from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.platforms.interface import Platform, PlatformEnum
 # moved to lazy import to avoid circular import with fork vllm
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
 else:
     ModelConfig = None
     VllmConfig = None
+    ProcessorInputs = None
+    PromptType = None
     PoolingParams = None
     SamplingParams = None
 
