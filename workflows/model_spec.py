@@ -3163,9 +3163,13 @@ audio_tts_templates = [
                     # decode trace; disable tracing for this adapter (see worklog).
                     "TT_METAL_TRACE_REGION_SIZE": "0",
                 },
-                # Disable the decode trace via vLLM additional-config (the plugin
-                # reads tt.trace_mode from --additional-config). trace_mode=none
-                # avoids the tt-metal decode ND-hang being aggravated by tracing.
+                # Belt-and-suspenders trace disable. The adapter itself now
+                # defaults to UNTRACED decode (see generator_vllm.py: DECODE_TRACE,
+                # env QWEN3ASR_DECODE_TRACE, default off) so decode never traces
+                # even under the plugin's default trace_mode='all'. We still pass
+                # trace_mode=none here so the plugin skips prefill/decode trace
+                # capture entirely, matching the upstream standalone server that
+                # deliberately runs the long-lived service without a decode trace.
                 vllm_args={"additional-config": '{"tt": {"trace_mode": "none"}}'},
             ),
         ],
