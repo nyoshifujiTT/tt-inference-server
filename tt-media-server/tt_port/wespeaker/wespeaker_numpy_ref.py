@@ -82,6 +82,19 @@ class WeSpeakerNumpyRef:
         out = out + identity
         return np.maximum(out, 0.0)
 
+    def backbone_numpy(self, feats):
+        """feats: (B,1,80,T) -> conv feature map (B,C,H,W) (pre-pool).
+
+        Mirrors TTNNWeSpeakerResident.backbone so tiny-width chunks (which
+        trip ttnn conv2d auto-shard asserts) can be produced on host with an
+        identical result."""
+        x = np.maximum(self._conv(feats, self.folded["conv1"], stride=1), 0.0)
+        for li, nblocks in enumerate(self.BLOCKS, start=1):
+            for bi in range(nblocks):
+                stride = 2 if (bi == 0 and li > 1) else 1
+                x = self._block(x, f"resnet.layer{li}.{bi}", stride)
+        return x.astype(np.float32)
+
     def forward(self, feats):
         """feats: (batch, 1, n_mels=80, time) float32 -> (batch, 256)."""
         x = np.maximum(self._conv(feats, self.folded["conv1"], stride=1), 0.0)

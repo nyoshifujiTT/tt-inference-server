@@ -24,6 +24,7 @@ from wespeaker_numpy_ref import WeSpeakerNumpyRef
 
 class TTNNWeSpeakerResident:
     BLOCKS = [3, 4, 6, 3]
+    MIN_DEVICE_W = 8  # run tiny-time chunks on host to avoid conv2d auto-shard assert
 
     def __init__(self, state_dict, device):
         self.device = device
@@ -67,6 +68,16 @@ class TTNNWeSpeakerResident:
         pyannote pooling (including per-speaker `weights`) is preserved on host.
         """
         B, _, H, W = feats_nchw.shape
+        # Degenerate short chunks (tiny time width) make ttnn conv2d auto-shard
+        # estimate a reader-index page that trips a TT_FATAL and forces an
+        # internal fallback. Those chunks are a negligible fraction of runtime,
+        # so run them on host (numpy, bn-folded) for an identical result with no
+        # device assert. Threshold is one tile of time (32) after the first two
+        # stride-2 stages have to still leave >=1 column.
+        if W < self.MIN_DEVICE_W:
+            import numpy as _np
+            xt = self._ref.backbone_numpy(feats_nchw.detach().cpu().numpy())
+            return torch.from_numpy(_np.ascontiguousarray(xt)).float()
         x_nhwc = feats_nchw.permute(0, 2, 3, 1).reshape(1, 1, B * H * W, 1)
         x = ttnn.from_torch(x_nhwc.to(torch.bfloat16), layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device)
         x, H, W, C = self._conv_dev(x, self.folded["conv1"], "conv1", B, H, W, 1, 1)
