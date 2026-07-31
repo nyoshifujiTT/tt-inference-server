@@ -708,6 +708,44 @@ def set_vllm_sys_argv(args, remaining_sys_argv, default_vllm_args):
 
         index += 1
 
+    # ``override_tt_config`` is TT-plugin config, not a vLLM CLI flag: the base
+    # ModelSpec always serializes it into vllm_args (even as an empty "{}"),
+    # which vLLM's arg parser rejects as an unrecognized ``--override_tt_config``.
+    # Fold any non-empty override into the ``additional-config`` tt namespace
+    # (which the TT plugin reads) and drop the standalone key. An empty override
+    # is simply dropped.
+    override_tt_config_raw = remaining_default_vllm_args.pop("override_tt_config", None)
+    if override_tt_config_raw:
+        try:
+            override_tt_config = json.loads(override_tt_config_raw)
+        except (TypeError, ValueError):
+            override_tt_config = {}
+        if override_tt_config:
+            existing_ac = _extract_cli_arg_value(vllm_argv, "--additional-config")
+            if existing_ac is None:
+                existing_ac = remaining_default_vllm_args.pop("additional-config", None)
+            try:
+                additional_config = json.loads(existing_ac) if existing_ac else {}
+            except (TypeError, ValueError):
+                additional_config = {}
+            tt_ns = dict(additional_config.get("tt", {}))
+            tt_ns.update(override_tt_config)
+            additional_config["tt"] = tt_ns
+            merged_ac = json.dumps(additional_config)
+            # Replace an already-emitted --additional-config, else emit fresh.
+            replaced = False
+            for i, tok in enumerate(vllm_argv):
+                if tok == "--additional-config" and i + 1 < len(vllm_argv):
+                    vllm_argv[i + 1] = merged_ac
+                    replaced = True
+                    break
+                if tok.startswith("--additional-config="):
+                    vllm_argv[i] = f"--additional-config={merged_ac}"
+                    replaced = True
+                    break
+            if not replaced:
+                _append_vllm_arg(vllm_argv, "--additional-config", merged_ac)
+
     for key, value in remaining_default_vllm_args.items():
         cli_arg_name = f"--{key}"
         _append_vllm_arg(vllm_argv, cli_arg_name, value)
