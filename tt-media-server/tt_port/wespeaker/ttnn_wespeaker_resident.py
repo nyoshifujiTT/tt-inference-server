@@ -24,7 +24,13 @@ from wespeaker_numpy_ref import WeSpeakerNumpyRef
 
 class TTNNWeSpeakerResident:
     BLOCKS = [3, 4, 6, 3]
-    MIN_DEVICE_W = 8  # run tiny-time chunks on host to avoid conv2d auto-shard assert
+    # Minimum conv input time-width that the default conv2d config handles. Below
+    # this, ttnn's conv2d auto-shard estimate trips a reader-index CB assert
+    # (a known ttnn bug, tt-metal #35207 / #43193). We zero-pad the time axis up
+    # to SAFE_W on device, run the conv, and crop the output back to the width
+    # the unpadded conv would produce -- numerically identical (verified cos 1.0
+    # per shape) and still fully on the p150.
+    SAFE_W = 16
 
     def __init__(self, state_dict, device):
         self.device = device
@@ -50,14 +56,40 @@ class TTNNWeSpeakerResident:
         Cout, Cin, kh, kw = w.shape
         tw = self._w(key + ".w", w)
         tb = self._w(key + ".b", b.reshape(1, 1, 1, Cout))
-        out, (Hout, Wout) = ttnn.conv2d(
-            input_tensor=tx, weight_tensor=tw, bias_tensor=tb, device=self.device,
+        if W >= self.SAFE_W:
+            out, (Hout, Wout) = ttnn.conv2d(
+                input_tensor=tx, weight_tensor=tw, bias_tensor=tb, device=self.device,
+                in_channels=Cin, out_channels=Cout, batch_size=B,
+                input_height=H, input_width=W, kernel_size=(kh, kw),
+                stride=(stride, stride), padding=(pad, pad),
+                conv_config=self.conv_cfg, compute_config=self.compute_cfg,
+                return_output_dim=True)
+            return out, Hout, Wout, Cout
+        # --- narrow-width path: zero-pad time axis to SAFE_W, conv, crop back ---
+        # true output dims the unpadded conv would produce
+        Hout = (H + 2 * pad - kh) // stride + 1
+        Wout = (W + 2 * pad - kw) // stride + 1
+        Wp = self.SAFE_W
+        # tx is NHWC-flattened (1,1,B*H*W,Cin). Rebuild an NHWC tensor padded on W.
+        x_bhwc = ttnn.to_torch(tx).float().reshape(B, H, W, Cin)
+        x_pad = torch.zeros(B, H, Wp, Cin, dtype=x_bhwc.dtype)
+        x_pad[:, :, :W, :] = x_bhwc
+        x_nhwc = x_pad.reshape(1, 1, B * H * Wp, Cin)
+        txp = ttnn.from_torch(x_nhwc.to(torch.bfloat16), layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device)
+        out, (Hpo, Wpo) = ttnn.conv2d(
+            input_tensor=txp, weight_tensor=tw, bias_tensor=tb, device=self.device,
             in_channels=Cin, out_channels=Cout, batch_size=B,
-            input_height=H, input_width=W, kernel_size=(kh, kw),
+            input_height=H, input_width=Wp, kernel_size=(kh, kw),
             stride=(stride, stride), padding=(pad, pad),
             conv_config=self.conv_cfg, compute_config=self.compute_cfg,
             return_output_dim=True)
-        return out, Hout, Wout, Cout
+        # crop the padded conv output (NHWC-flattened) back to Wout columns
+        o_bhwc = ttnn.to_torch(out).float().reshape(B, Hpo, Wpo, Cout)[:, :, :Wout, :]
+        o_nhwc = o_bhwc.reshape(1, 1, B * Hout * Wout, Cout).contiguous()
+        # Return the same tile layout the standard conv2d path produces so the
+        # downstream relu / residual-add / next conv see a consistent tensor.
+        out_c = ttnn.from_torch(o_nhwc.to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
+        return out_c, Hout, Wout, Cout
 
     def backbone(self, feats_nchw):
         """feats_nchw: torch (B,1,80,T) -> conv feature map torch (B,C,H,W).
@@ -68,16 +100,10 @@ class TTNNWeSpeakerResident:
         pyannote pooling (including per-speaker `weights`) is preserved on host.
         """
         B, _, H, W = feats_nchw.shape
-        # Degenerate short chunks (tiny time width) make ttnn conv2d auto-shard
-        # estimate a reader-index page that trips a TT_FATAL and forces an
-        # internal fallback. Those chunks are a negligible fraction of runtime,
-        # so run them on host (numpy, bn-folded) for an identical result with no
-        # device assert. Threshold is one tile of time (32) after the first two
-        # stride-2 stages have to still leave >=1 column.
-        if W < self.MIN_DEVICE_W:
-            import numpy as _np
-            xt = self._ref.backbone_numpy(feats_nchw.detach().cpu().numpy())
-            return torch.from_numpy(_np.ascontiguousarray(xt)).float()
+        # Every conv runs on the p150. `_conv_dev` transparently zero-pads the
+        # time axis to SAFE_W for degenerate narrow shapes (and crops the output
+        # back), so even the last single-frame chunks of a recording stay on the
+        # device with numerically identical results.
         x_nhwc = feats_nchw.permute(0, 2, 3, 1).reshape(1, 1, B * H * W, 1)
         x = ttnn.from_torch(x_nhwc.to(torch.bfloat16), layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device)
         x, H, W, C = self._conv_dev(x, self.folded["conv1"], "conv1", B, H, W, 1, 1)
