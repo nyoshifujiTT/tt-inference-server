@@ -25,6 +25,7 @@ class TTNNWeSpeaker:
     def __init__(self, state_dict, device):
         self.device = device
         self.use_device_elementwise = False
+        self.use_device_pool = False
         # reuse the verified bn-folding + layout from the numpy ref
         self._ref = WeSpeakerNumpyRef(state_dict)
         self.folded = self._ref.folded
@@ -103,8 +104,31 @@ class TTNNWeSpeaker:
                 x = self._block(x, f"resnet.layer{li}.{bi}", stride)
         b, c, fdim, t = x.shape
         x2 = x.reshape(b, c * fdim, t)
+        if self.use_device_pool:
+            return self._tstp_seg_dev(x2)
         mean = x2.mean(axis=2)
         std = x2.std(axis=2)
         pooled = torch.cat([mean, std], dim=1)  # (B,5120)
         emb = pooled @ torch.from_numpy(self.seg_w).float().T + torch.from_numpy(self.seg_b).float()
         return emb
+
+    def _tstp_seg_dev(self, x2):
+        """TSTP (mean+std over time) + seg_1 linear on device (ttnn)."""
+        # x2: torch (B, 2560, T). Compute mean/std over last dim on device.
+        tx = ttnn.from_torch(x2.to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
+        mean = ttnn.mean(tx, dim=2)            # (B,2560)
+        # std = sqrt(mean(x^2) - mean^2)  (population std, matches numpy .std())
+        sq = ttnn.multiply(tx, tx)
+        msq = ttnn.mean(sq, dim=2)             # (B,2560)
+        m2 = ttnn.multiply(mean, mean)
+        var = ttnn.subtract(msq, m2)
+        std = ttnn.sqrt(ttnn.relu(var))        # relu guards tiny negatives
+        mean_t = ttnn.to_torch(mean).float().reshape(x2.shape[0], -1)
+        std_t = ttnn.to_torch(std).float().reshape(x2.shape[0], -1)
+        pooled = torch.cat([mean_t, std_t], dim=1)  # (B,5120)
+        # seg_1 linear on device
+        tp = ttnn.from_torch(pooled.to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
+        tw = ttnn.from_torch(torch.from_numpy(self.seg_w.T.copy()).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
+        tb = ttnn.from_torch(torch.from_numpy(self.seg_b.reshape(1, -1).copy()).to(torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=self.device)
+        emb = ttnn.linear(tp, tw, bias=tb)
+        return ttnn.to_torch(emb).float()
