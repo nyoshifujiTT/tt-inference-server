@@ -413,6 +413,8 @@ templates:
       override_tt_config:
         fabric_config: FABRIC_1D
         trace_region_size: 268435456
+        l1_small_size: 24576
+        trace_mode: none
     # p150x8 (8x p150a) hosts run Qwen3.6-27B as 2 data-parallel replicas, each a
     # TP=4 P150x4 (1,4) sub-mesh. qwen36_blackhole cannot tensor-parallelise across
     # 8 chips (num_key_value_heads=4 < 8, so TP=8 would need GQA KV replication that
@@ -427,6 +429,7 @@ templates:
       env_vars:
         TT_QWEN35_TEXT_VER: qwen36_blackhole
         HF_MODEL: Qwen/Qwen3.6-27B
+        MESH_DEVICE: "(2, 4)"
       vllm_args:
         data_parallel_size: 2
         async_scheduling: true
@@ -436,6 +439,8 @@ templates:
       override_tt_config:
         fabric_config: FABRIC_1D
         trace_region_size: 268435456
+        l1_small_size: 24576
+        trace_mode: all
   status: EXPERIMENTAL
   has_builtin_warmup: true
   metadata:
