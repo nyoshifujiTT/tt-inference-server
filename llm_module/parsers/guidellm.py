@@ -380,12 +380,12 @@ def _stability(requests: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     itl = [
         float(r["inter_token_latency_ms"])
         for r in requests
-        if "inter_token_latency_ms" in r
+        if r.get("inter_token_latency_ms") is not None
     ]
     tpot = [
         float(r["time_per_output_token_ms"])
         for r in requests
-        if "time_per_output_token_ms" in r
+        if r.get("time_per_output_token_ms") is not None
     ]
     return {
         "ITL_mean_ms": _r(statistics.mean(itl), 6) if itl else None,
