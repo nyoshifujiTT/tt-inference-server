@@ -24,15 +24,16 @@ offloading it would regress total latency. Set env DIARIZATION_TT_SEGMENTATION=1
 to also run segmentation on the p150 (full on-device, slower but useful for
 device-coverage validation).
 
-ttnn/torch are imported lazily so this module is importable without them.
+The ttnn implementations themselves live in tt-metal under
+``models.demos.audio.pyannote_diarization`` (the community-standard home for a
+model's ttnn code, next to the whisper / qwen3_asr demos); this module is only
+the thin tt-inference-server-side adapter that wires them into pyannote. ttnn /
+torch / the metal package are imported lazily so this module stays importable
+(and unit-testable) without a device or a tt-metal checkout on PYTHONPATH.
 """
 from __future__ import annotations
 
 import os
-import sys
-
-_WESPEAKER = os.path.join(os.path.dirname(__file__), "wespeaker")
-_PYANNET = os.path.join(os.path.dirname(__file__), "pyannet")
 
 
 def make_tt_accelerator(device):
@@ -40,10 +41,9 @@ def make_tt_accelerator(device):
     import torch
     import torch.nn.functional as F
 
-    for pth in (_WESPEAKER, _PYANNET):
-        if pth not in sys.path:
-            sys.path.insert(0, pth)
-    from ttnn_wespeaker_resident import TTNNWeSpeakerResident
+    from models.demos.audio.pyannote_diarization.tt.ttnn_wespeaker_resident import (
+        TTNNWeSpeakerResident,
+    )
 
     tt_seg_enabled = os.environ.get("DIARIZATION_TT_SEGMENTATION", "0") == "1"
 
@@ -68,7 +68,9 @@ def make_tt_accelerator(device):
 
         # ---- segmentation on TT (optional, off by default) ----
         if tt_seg_enabled:
-            from ttnn_pyannet import TTNNPyanNet
+            from models.demos.audio.pyannote_diarization.tt.ttnn_pyannet import (
+                TTNNPyanNet,
+            )
             seg_model = pipeline._segmentation.model
             sinc = seg_model.sincnet.conv1d[0].filterbank.filters().detach().numpy()
             tt_seg = TTNNPyanNet(seg_model.state_dict(), sinc, device)
