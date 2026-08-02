@@ -3144,6 +3144,17 @@ audio_tts_templates = [
         device_model_specs=[
             DeviceModelSpec(
                 device=DeviceTypes.P150,
+                # max_concurrency=1 == max_num_seqs=1. This is NOT a conservative
+                # guess: the TT vLLM plugin currently supports batch-1 serving
+                # only. Setting max_num_seqs>1 makes the plugin decode path fail
+                # inside execute_model (surfacing as an IndexError 'pop from an
+                # empty deque' in sample_tokens, per tenstorrent/vllm PR #446),
+                # crashing EngineCore. Multiple TT vLLM bringups (Llama-3.1-8B,
+                # Granite-4, Gemma-4-12B readiness notes) record the same limit:
+                # 'the adapter rejects larger vLLM batch sizes today'. Real
+                # concurrency would need plugin batch>1 (lane-DP) or multi-device
+                # data-parallel; on a single p150 the engine stays batch-1 and
+                # client-side concurrency is queued and served sequentially.
                 max_concurrency=1,
                 max_context=2048,
                 default_impl=True,
