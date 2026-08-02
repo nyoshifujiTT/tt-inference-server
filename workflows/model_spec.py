@@ -3144,18 +3144,17 @@ audio_tts_templates = [
         device_model_specs=[
             DeviceModelSpec(
                 device=DeviceTypes.P150,
-                # max_concurrency=1 == max_num_seqs=1. This is NOT a conservative
-                # guess: the TT vLLM plugin currently supports batch-1 serving
-                # only. Setting max_num_seqs>1 makes the plugin decode path fail
-                # inside execute_model (surfacing as an IndexError 'pop from an
-                # empty deque' in sample_tokens, per tenstorrent/vllm PR #446),
-                # crashing EngineCore. Multiple TT vLLM bringups (Llama-3.1-8B,
-                # Granite-4, Gemma-4-12B readiness notes) record the same limit:
-                # 'the adapter rejects larger vLLM batch sizes today'. Real
-                # concurrency would need plugin batch>1 (lane-DP) or multi-device
-                # data-parallel; on a single p150 the engine stays batch-1 and
-                # client-side concurrency is queued and served sequentially.
-                max_concurrency=1,
+                # max_concurrency == vLLM max_num_seqs (server-side batch width).
+                # =4 is the measured sweet spot for Qwen3-ASR on a single p150:
+                # throughput scales ~linearly 1->2->4 (2.56 -> 4.59 -> 7.60
+                # audio-s/s, ~3x over batch-1) with all requests healthy and
+                # per-request RTF<1 (~0.72). seq=8 regresses (prefill is run one
+                # user at a time in the adapter, so it becomes the bottleneck:
+                # 3.06 audio-s/s, RTF 2.68). Batched serving requires the
+                # adapter's per-user single-user prefill to address page-table
+                # row 0 (user_id=0) -- see generator_vllm.py; passing the global
+                # user_id crashed EngineCore via paged_fill_cache batch_idx.
+                max_concurrency=4,
                 max_context=2048,
                 default_impl=True,
                 env_vars={
