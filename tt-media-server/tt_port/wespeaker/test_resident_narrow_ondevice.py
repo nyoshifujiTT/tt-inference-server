@@ -12,8 +12,8 @@ device, runs the conv, and crops the output back. This test asserts that path is
 numerically faithful to the numpy reference backbone for degenerate widths and
 that the whole backbone still runs on the p150.
 
-Skipped automatically when ttnn / a Tenstorrent device / the fixtures are
-unavailable, so it is safe in the media-server suite.
+Skipped automatically when ttnn / a Tenstorrent device / the community-1
+embedding weights are unavailable, so it is safe in the media-server suite.
 """
 import os
 
@@ -21,16 +21,28 @@ import pytest
 
 pytest.importorskip("torch")
 pytest.importorskip("ttnn")
+pytest.importorskip("pyannote.audio")
 
-EMB_NPZ = "/home/ubuntu/diar-work/emb_all.npz"
-if not os.path.exists(EMB_NPZ):
-    pytest.skip("resident parity fixtures not present", allow_module_level=True)
+# WeSpeaker ResNet34 weights come straight from the community-1 embedding
+# checkpoint (same state_dict the test used to slice out of the dev emb_all.npz
+# fixture). Override the path with PYANNOTE_COMMUNITY1_WEIGHTS for a non-default
+# install; skip cleanly when the weights are not present.
+WEIGHTS = os.environ.get(
+    "PYANNOTE_COMMUNITY1_WEIGHTS",
+    "/data/pyannote-community-1/weights/embedding/pytorch_model.bin",
+)
+if not os.path.exists(WEIGHTS):
+    pytest.skip(
+        f"community-1 embedding weights not present at {WEIGHTS}",
+        allow_module_level=True,
+    )
 
 import sys  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import ttnn  # noqa: E402
+from pyannote.audio import Model  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(__file__))
 from wespeaker_numpy_ref import WeSpeakerNumpyRef  # noqa: E402
@@ -49,8 +61,9 @@ def device():
 
 @pytest.fixture(scope="module")
 def state_dict():
-    dd = np.load(EMB_NPZ)
-    return {k[4:]: torch.from_numpy(dd[k]) for k in dd.files if k.startswith("sd::")}
+    model = Model.from_pretrained(WEIGHTS)
+    model.eval()
+    return model.state_dict()
 
 
 @pytest.mark.parametrize("W", [1, 2, 4, 8, 12])
