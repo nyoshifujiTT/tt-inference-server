@@ -1,11 +1,15 @@
-"""On-device (p150) parity: TTNN WeSpeaker embedding vs torch reference emb."""
-import sys, numpy as np, torch, ttnn
-sys.path.insert(0, "/home/ubuntu/diar-work/tt-inference-server/tt-media-server/tt_port/wespeaker")
+"""On-device (p150) parity: TTNN WeSpeaker embedding vs torch reference emb.
 
-d = np.load("/home/ubuntu/diar-work/tt_port_wespeaker/parity_input.npz")
+Fixture paths are overridable with PARITY_INPUT_NPZ / STATE_DICT_NPZ; the module
+dir is added to sys.path relatively so this runs from any checkout location.
+"""
+import os, sys, numpy as np, torch, ttnn
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+d = np.load(os.environ.get("PARITY_INPUT_NPZ", "parity_input.npz"))
 feats = torch.from_numpy(d["feats"]).float()
 emb_torch = d["emb_torch"]
-sd_npz = np.load("/home/ubuntu/diar-work/tt_port_wespeaker/state_dict.npz")
+sd_npz = np.load(os.environ.get("STATE_DICT_NPZ", "state_dict.npz"))
 # WeSpeakerNumpyRef expects objects with .numpy(); wrap numpy arrays as torch tensors
 state_dict = {k: torch.from_numpy(sd_npz[k]) for k in sd_npz.files}
 

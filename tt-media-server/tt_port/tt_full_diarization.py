@@ -3,13 +3,14 @@
  - embedding WeSpeaker ResNet34 backbone via TTNNWeSpeaker
 Compares speaker turns to the CPU golden (2 speakers / 13 segments)."""
 import os, sys, numpy as np, torch, torch.nn.functional as F, ttnn
-sys.path.insert(0,"/home/ubuntu/diar-work/tt-inference-server/tt-media-server/tt_port/wespeaker")
-sys.path.insert(0,"/home/ubuntu/diar-work/tt-inference-server/tt-media-server/tt_port/pyannet")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "wespeaker"))
+sys.path.insert(0, os.path.join(_HERE, "pyannet"))
 from ttnn_wespeaker import TTNNWeSpeaker
 from ttnn_pyannet import TTNNPyanNet
 
-MODEL_DIR="/data/pyannote-community-1/weights"
-SAMPLE="/data/pyannote-community-1/samples/pyannote_sample.wav"
+MODEL_DIR=os.environ.get("PYANNOTE_COMMUNITY1_WEIGHTS_DIR","/data/pyannote-community-1/weights")
+SAMPLE=os.environ.get("DIAR_SAMPLE_WAV","/data/pyannote-community-1/samples/pyannote_sample.wav")
 _orig=torch.load
 torch.load=(lambda *a,**k:(k.__setitem__("weights_only",False) or _orig(*a,**k)) if k.get("weights_only") is None else _orig(*a,**k))
 from pyannote.audio import Pipeline

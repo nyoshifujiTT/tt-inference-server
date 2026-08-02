@@ -28,7 +28,8 @@ export TT_METAL_HOME=/data/wt/qwen3asr \
   PYTHONPATH=$SP:/data/wt/qwen3asr:/data/wt/qwen3asr/ttnn:/data/wt/qwen3asr/tools \
   LD_LIBRARY_PATH=/opt/openmpi-v5.0.7-ulfm/lib:/data/wt/qwen3asr/build_Release/lib \
   ARCH_NAME=blackhole
-/home/ubuntu/diar-work/ttnnvenv/bin/python run_ttnn_parity.py
+# run from this directory (tt_port/wespeaker); use your ttnn-enabled python
+python run_ttnn_parity.py
 ```
 
 ## Next (precision/perf)

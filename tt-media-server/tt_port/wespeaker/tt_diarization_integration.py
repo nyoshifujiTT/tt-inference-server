@@ -14,11 +14,11 @@ import torch
 import torch.nn.functional as F
 import ttnn
 
-sys.path.insert(0, "/home/ubuntu/diar-work/tt-inference-server/tt-media-server/tt_port/wespeaker")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ttnn_wespeaker import TTNNWeSpeaker
 
-MODEL_DIR = "/data/pyannote-community-1/weights"
-SAMPLE = "/data/pyannote-community-1/samples/pyannote_sample.wav"
+MODEL_DIR = os.environ.get("PYANNOTE_COMMUNITY1_WEIGHTS_DIR", "/data/pyannote-community-1/weights")
+SAMPLE = os.environ.get("DIAR_SAMPLE_WAV", "/data/pyannote-community-1/samples/pyannote_sample.wav")
 
 # --- torch.load shim for lightning>=2.6 ---
 _orig = torch.load

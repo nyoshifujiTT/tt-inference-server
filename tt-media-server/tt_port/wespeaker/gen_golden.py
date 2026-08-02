@@ -2,11 +2,17 @@
 a future ttnn port. Deterministic fixed inputs -> saved reference embeddings +
 input log-mel features (the ttnn port's boundary is the mel features -> ResNet34).
 """
-import json, numpy as np, torch
+import os, json, numpy as np, torch
 from pyannote.audio import Model
 
-MODEL_BIN = "/data/pyannote-community-1/weights/embedding/pytorch_model.bin"
-OUT = "/home/ubuntu/diar-work/tt_port_wespeaker/golden_embeddings.json"
+MODEL_BIN = os.environ.get(
+    "PYANNOTE_COMMUNITY1_EMB_WEIGHTS",
+    "/data/pyannote-community-1/weights/embedding/pytorch_model.bin",
+)
+OUT = os.environ.get(
+    "GOLDEN_EMBEDDINGS_JSON",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_embeddings.json"),
+)
 
 torch.manual_seed(0)
 m = Model.from_pretrained(MODEL_BIN)
