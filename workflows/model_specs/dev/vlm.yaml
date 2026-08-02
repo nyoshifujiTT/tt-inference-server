@@ -328,6 +328,7 @@ templates:
       env_vars:
         TT_QWEN35_TEXT_VER: qwen36_blackhole
         HF_MODEL: Qwen/Qwen3.6-27B
+        MESH_DEVICE: "(2, 4)"
       vllm_args:
         data_parallel_size: 2
         async_scheduling: true
@@ -340,6 +341,7 @@ templates:
         fabric_config: FABRIC_1D
         l1_small_size: 24576
         trace_region_size: 402653184
+        trace_mode: all
   status: EXPERIMENTAL
   has_builtin_warmup: true
   supported_modalities:
