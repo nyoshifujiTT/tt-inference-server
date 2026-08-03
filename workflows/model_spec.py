@@ -3131,7 +3131,8 @@ audio_tts_templates = [
         # Qwen3-ASR served through the TT vLLM backend (tt-vllm-plugin): the
         # standard OpenAI /v1/audio/transcriptions path, NOT the media server.
         # The TT model adapter (TTQwen3ASRForConditionalGeneration) is registered
-        # via EXTRA_MODELS_DIR; see models/demos/audio/qwen3_asr in tt-metal.
+        # by the standalone vllm-tt-plugin's built-in model map
+        # (register_tt_models); see models/demos/audio/qwen3_asr in tt-metal.
         weights=["Qwen/Qwen3-ASR-1.7B", "neosophie/Qwen3-ASR-1.7B-JA"],
         version="0.1.0",
         tt_metal_commit="97b36e1",
@@ -3159,14 +3160,13 @@ audio_tts_templates = [
                 default_impl=True,
                 env_vars={
                     "MESH_DEVICE": "P150",
-                    # The TT adapter (TTQwen3ASRForConditionalGeneration) is
-                    # registered from a bundle dir, and needs the extracted Qwen3
-                    # text-decoder checkpoint (HF_MODEL) plus the full Qwen3-ASR
-                    # snapshot for the audio tower (QWEN3ASR_AUDIO_SNAPSHOT).
-                    "EXTRA_MODELS_DIR": "/data/vllm_tt/extra_models",
                     # HF_MODEL is set by the entrypoint to the served Qwen3-ASR
                     # snapshot; the adapter auto-extracts the Qwen3 text decoder
-                    # from it (no pre-extracted checkpoint needed).
+                    # from it (no pre-extracted checkpoint needed) and reuses the
+                    # served snapshot for the audio tower (QWEN3ASR_AUDIO_SNAPSHOT
+                    # falls back to HF_MODEL). The adapter arch is now provided by
+                    # the plugin built-in map, so no EXTRA_MODELS_DIR bundle is
+                    # required.
                     "HF_HUB_OFFLINE": "1",
                     "TRANSFORMERS_OFFLINE": "1",
                     # Stability: the tt-metal decode ND-hang is aggravated by the

@@ -602,6 +602,25 @@ class TestModelSpecsStructure:
             assert not hasattr(spec, "device_model_specs")
             assert not hasattr(spec, "weights")
 
+    def test_qwen3_asr_registered_via_plugin_builtin_map(self):
+        """Qwen3-ASR is served by the standalone vllm-tt-plugin whose built-in
+        model map registers the TT adapter, so the spec must no longer depend on
+        the EXTRA_MODELS_DIR bundle hook while keeping the measured p150 batch
+        width (max_num_seqs=4)."""
+        asr_ids = [
+            "id_tt-vllm-plugin_Qwen3-ASR-1.7B_p150",
+            "id_tt-vllm-plugin_Qwen3-ASR-1.7B-JA_p150",
+        ]
+        for model_id in asr_ids:
+            assert model_id in MODEL_SPECS, f"missing spec {model_id}"
+            dms = MODEL_SPECS[model_id].device_model_spec
+            env = dms.env_vars or {}
+            # Adapter arch now comes from the plugin built-in map, not a bundle.
+            assert "EXTRA_MODELS_DIR" not in env
+            # Measured p150 batched-serving sweet spot is preserved.
+            assert dms.max_concurrency == 4
+            assert dms.vllm_args.get("max_num_seqs") == "4"
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
