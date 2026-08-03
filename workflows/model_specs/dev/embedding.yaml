@@ -151,6 +151,26 @@ templates:
         VLLM__MAX_MODEL_LENGTH: "4096"
         VLLM__MIN_CONTEXT_LENGTH: "32"
         VLLM__MAX_NUM_SEQS: "2"
+    # Single-card P150 (p150x1): device-memory-capped embedding context of 8192
+    # (not the model's 40960 positional limit). Full 32768/40960 KV allocation
+    # OOMs a single p150; ~8192 is the measured practical ceiling (tt-torch #985).
+    - device: P150
+      max_concurrency: 32
+      max_context: 8192
+      default_impl: true
+      vllm_args:
+        # HF config.json architectures=["Qwen3ForCausalLM"] makes vLLM
+        # --runner auto pick the generate runner; Qwen3-Embedding must be
+        # served as an embedding (pooling) model, so pin it explicitly.
+        runner: pooling
+      env_vars:
+        TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+        VLLM__MAX_NUM_BATCHED_TOKENS: "8192"
+        VLLM__MAX_MODEL_LENGTH: "8192"
+        VLLM__MIN_CONTEXT_LENGTH: "32"
+        VLLM__MAX_NUM_SEQS: "32"
+        MAX_BATCH_SIZE: "32"
+        DEFAULT_THROTTLE_LEVEL: "0"
     - device: GALAXY
       max_concurrency: 32
       max_context: 65536  # 64 * 1024
@@ -160,6 +180,48 @@ templates:
         VLLM__MAX_MODEL_LENGTH: "1024"
         VLLM__MIN_CONTEXT_LENGTH: "32"
         VLLM__MAX_NUM_SEQS: "1"
+
+- weights:
+    - Qwen/Qwen3-Embedding-0.6B
+  impl: tt_transformers
+  min_disk_gb: 15
+  min_ram_gb: 6
+  model_type: EMBEDDING
+  inference_engine: MEDIA
+  device_model_specs:
+    # Single-card P150 (p150x1) only: 0.6B was brought up and verified on
+    # p150x1, so we intentionally do NOT list other devices we have not
+    # measured (same policy as the 8B P150-only chunk/trace entries). Same
+    # tt_transformers embedding path as the 8B spec above; only the weights
+    # differ. max_context is the device-memory-capped 8192 (not the model's
+    # 40960 positional limit); the KV cache / RoPE tables / attention
+    # intermediates scale with max_seq_len and a full 32768/40960 KV would OOM
+    # a single p150 (see tt-torch #985). max_model_len / max_num_batched_tokens
+    # derive from max_context, so this both admits and allocates for 8192.
+    - device: P150
+      max_concurrency: 32
+      max_context: 8192
+      default_impl: true
+      vllm_args:
+        # HF config.json architectures=["Qwen3ForCausalLM"] makes vLLM
+        # --runner auto pick the generate runner; Qwen3-Embedding must be
+        # served as an embedding (pooling) model, so pin it explicitly.
+        runner: pooling
+      override_tt_config:
+        # Batched (B>=4) embedding prefill on a single p150 builds a mesh trace
+        # larger than tt-metal's 50,000,000 B default (measured: B=4 needs
+        # 53,780,480 B), which otherwise fails with a mesh_trace TT_FATAL
+        # (EngineDead). 2 GiB was swept clean across B=1..32 on p150x1. Flows to
+        # vLLM additional_config.tt.trace_region_size.
+        trace_region_size: 2147483648
+      env_vars:
+        TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+        VLLM__MAX_NUM_BATCHED_TOKENS: "8192"
+        VLLM__MAX_MODEL_LENGTH: "8192"
+        VLLM__MIN_CONTEXT_LENGTH: "32"
+        VLLM__MAX_NUM_SEQS: "32"
+        MAX_BATCH_SIZE: "32"
+        DEFAULT_THROTTLE_LEVEL: "0"
 
 - weights:
     - Qwen/Qwen3-Embedding-4B

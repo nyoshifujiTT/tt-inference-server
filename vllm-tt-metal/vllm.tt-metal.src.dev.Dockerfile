@@ -13,6 +13,11 @@ FROM ${TT_METAL_DOCKERFILE_URL} AS builder
 # Build arguments
 ARG TT_METAL_COMMIT_SHA_OR_TAG
 ARG TT_VLLM_COMMIT_SHA_OR_TAG
+# Source git repositories. Default to the canonical upstream repos so stock
+# builds are unchanged; override (e.g. to a fork) with --build-arg to build
+# a bring-up branch that is not yet merged upstream.
+ARG TT_METAL_REPO_URL=https://github.com/tenstorrent-metal/tt-metal.git
+ARG TT_VLLM_REPO_URL=https://github.com/tenstorrent/vllm.git
 ARG TT_SMI_COMMIT_SHA_OR_TAG=v3.1.1
 ARG CONTAINER_APP_UID=1000
 ARG DEBIAN_FRONTEND=noninteractive
@@ -81,7 +86,7 @@ RUN /bin/bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ENV UV_HTTP_RETRIES=10
 
 # Build tt-metal - clone with minimal history, build, and clean
-RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${TT_METAL_HOME} \
+RUN /bin/bash -c "git clone ${TT_METAL_REPO_URL} ${TT_METAL_HOME} \
     && cd ${TT_METAL_HOME} \
     && git checkout ${TT_METAL_COMMIT_SHA_OR_TAG} \
     && git submodule update --init --recursive \
@@ -94,7 +99,7 @@ RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${
 # Build vllm - clone with minimal history and clean
 # Use uv pip to match tt-metal's package manager (see tt-metal commit 29d59d1)
 # Use --index-strategy unsafe-best-match to allow uv to find packages across all indexes
-RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm.git ${vllm_dir} \
+RUN /bin/bash -c "git clone ${TT_VLLM_REPO_URL} ${vllm_dir} \
     && cd ${vllm_dir} \
     && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
     && source ${PYTHON_ENV_DIR}/bin/activate \

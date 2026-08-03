@@ -10,9 +10,28 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalKwargs
+try:
+    # fork/older vLLM name
+    from vllm.multimodal.inputs import MultiModalKwargs
+except ImportError:
+    # Newer vLLM renamed MultiModalKwargs -> MultiModalKwargsItems. The TT
+    # embedding/generate paths only use it as a type annotation / empty dict, so
+    # aliasing the current type keeps annotations valid without behavior change.
+    from vllm.multimodal.inputs import MultiModalKwargsItems as MultiModalKwargs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import LayerBlockType, cdiv
+try:
+    from vllm.utils import LayerBlockType, cdiv
+except ImportError:
+    # Newer vLLM relocated these out of vllm.utils.
+    try:
+        from vllm.utils.math_utils import cdiv
+    except ImportError:
+        from vllm.utils import cdiv
+    try:
+        from vllm.config.model import LayerBlockType
+    except Exception:
+        class LayerBlockType:  # minimal stand-in; only .attention is used
+            attention = "attention"
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,

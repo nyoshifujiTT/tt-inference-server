@@ -167,7 +167,6 @@ class TTModelRunnerPooling:
                 req_ids=[],
                 req_id_to_index={},
                 sampled_token_ids=[],
-                spec_token_ids=None,
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[],
@@ -195,17 +194,31 @@ class TTModelRunnerPooling:
             attention_mask=attention_mask,
         )
 
+        # Apply pooler normalization to match vLLM's PoolerConfig. The official
+        # Qwen3ForEmbedding.forward returns the raw last-token hidden state (no
+        # normalization); vLLM's pooler config requests L2 normalization
+        # (PoolerConfig.normalize=True, LAST). The bundled TTModelRunnerPooling did
+        # not honor it, so honor it here to match the reference (and the prior
+        # delivered runner which did `F.normalize(p=2, dim=-1)`), preserving numerics.
+        pooler_config = getattr(self.model_config, "pooler_config", None)
+        normalize = bool(getattr(pooler_config, "normalize", False)) if pooler_config else False
+        if normalize:
+            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=-1)
+
         # Convert embeddings to list of tensors format expected by vLLM
         # embeddings shape: [batch_size, embedding_dim]
         # pooler_output should be list[Optional[torch.Tensor]] - one tensor per request
-        pooler_output = [embeddings[i].cpu() for i in range(batch_size)]
+        pooler_output = [embeddings[i].detach().cpu() for i in range(batch_size)]
 
         # Get request IDs in order
         req_ids = [req_data.req_id for req_data in req_data_list]
         req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
 
-        # sampled_token_ids should be list[list[int]] - one list per request (empty for pooling)
-        sampled_token_ids = [[] for _ in range(batch_size)]
+        # For pooling/embedding there are no sampled tokens. fork vllm scheduler
+        # (update_from_output) does `sampled_token_ids[i].tolist() if sampled_token_ids
+        # else []`, so a truthy list-of-lists would break (.tolist on list). Use an
+        # empty list so the scheduler takes the no-token branch.
+        sampled_token_ids = []
 
         # Clean up finished requests
         for req_id in scheduler_output.finished_req_ids:
@@ -215,7 +228,6 @@ class TTModelRunnerPooling:
             req_ids=req_ids,
             req_id_to_index=req_id_to_index,
             sampled_token_ids=sampled_token_ids,  # List of empty lists for pooling models
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,

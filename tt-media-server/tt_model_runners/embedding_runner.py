@@ -170,8 +170,10 @@ class Qwen3Embedding8BRunner(EmbeddingRunner):
 
     def _load_model(self):
         self.logger.info(f"Device {self.device_id}: Loading model...")
-        from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm import (
-            Qwen3ForEmbedding,
+        # Shared adapter (subclasses the upstream PR #35941 wrapper) exposing the
+        # fork pooling contract. Aliased to the name the runner expects.
+        from models.demos.qwen3_embedding.tt.generator_vllm import (
+            Qwen3EmbeddingForTTvLLM as Qwen3ForEmbedding,
         )
 
         self.model = Qwen3ForEmbedding(
