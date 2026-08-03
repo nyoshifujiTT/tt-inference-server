@@ -605,3 +605,36 @@ class TestModelSpecsStructure:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+class TestBgeRerankerCanonicalImpl:
+    """The bge-reranker ships two impls: legacy fork plugin (default) and the
+    canonical standalone vLLM 0.24 plugin (selectable). Both must resolve."""
+
+    def _reranker_specs(self):
+        return {
+            model_id: spec
+            for model_id, spec in MODEL_SPECS.items()
+            if "bge-reranker-v2-m3" in model_id.lower()
+        }
+
+    def test_both_reranker_impls_present(self):
+        ids = set(self._reranker_specs())
+        assert "id_tt-vllm-plugin_bge-reranker-v2-m3_p150" in ids
+        assert "id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150" in ids
+
+    def test_canonical_impl_points_at_standalone_plugin_repo(self):
+        spec = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
+        assert spec.impl.impl_id == "tt_vllm_plugin_canonical"
+        assert spec.impl.repo_url == "https://github.com/tenstorrent/vllm-tt-plugin"
+
+    def test_legacy_impl_remains_default(self):
+        legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
+        canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
+        assert legacy.device_model_spec.default_impl is True
+        assert canonical.device_model_spec.default_impl is False
+
+    def test_both_impls_share_tt_metal_commit(self):
+        legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
+        canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
+        assert legacy.tt_metal_commit == canonical.tt_metal_commit

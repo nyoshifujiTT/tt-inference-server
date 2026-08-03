@@ -262,6 +262,16 @@ tt_vllm_plugin_impl = ImplSpec(
     repo_url="https://github.com/tenstorrent/tt-inference-server/tree/dev/tt-vllm-plugin",
     code_path="tt_vllm_plugin",
 )
+# Canonical path: the standalone Tenstorrent vLLM plugin (upstream vLLM 0.24,
+# tenstorrent/vllm-tt-plugin) rather than the legacy in-tree fork plugin. Images
+# built for this impl use the canonical Dockerfile (upstream vLLM + standalone
+# plugin + EXTRA_MODELS_DIR model registration, no sitecustomize monkey-patch).
+tt_vllm_plugin_canonical_impl = ImplSpec(
+    impl_id="tt_vllm_plugin_canonical",
+    impl_name="tt-vllm-plugin-canonical",
+    repo_url="https://github.com/tenstorrent/vllm-tt-plugin",
+    code_path="src/vllm_tt_plugin",
+)
 
 
 @dataclass(frozen=True)
@@ -3449,6 +3459,44 @@ embedding_templates = [
                 max_concurrency=1,
                 max_context=8 * 1024,
                 default_impl=True,
+                env_vars={
+                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
+                    "VLLM__MAX_NUM_BATCHED_TOKENS": "262144",
+                    "VLLM__MAX_MODEL_LENGTH": "8192",
+                    "VLLM__MIN_CONTEXT_LENGTH": "32",
+                    "VLLM__MAX_NUM_SEQS": "32",
+                    "MAX_BATCH_SIZE": "32",
+                    "DEFAULT_THROTTLE_LEVEL": "0",
+                },
+            ),
+        ],
+    ),
+    ModelSpecTemplate(
+        weights=["BAAI/bge-reranker-v2-m3"],
+        # Canonical path: same tt-metal reranker device model, but served on the
+        # standalone Tenstorrent vLLM plugin (upstream vLLM 0.24) instead of the
+        # legacy in-tree fork plugin. vllm_commit pins the nyoshifujiTT/vllm-tt-plugin
+        # branch (checked out as TT_VLLM_COMMIT_SHA_OR_TAG by the canonical
+        # Dockerfile). Registration is done by the plugin via EXTRA_MODELS_DIR
+        # (vllm-tt-metal/extra_models/bge-reranker-v2-m3), not sitecustomize.
+        tt_metal_commit="ac0e105a61e",
+        vllm_commit="db8b481",
+        impl=tt_vllm_plugin_canonical_impl,
+        min_disk_gb=15,
+        min_ram_gb=6,
+        # docker_image left unset: auto-generated as
+        # vllm-tt-metal-src-{release,dev}-...:{VERSION}-{tt_metal}-{vllm}, matching
+        # what build_docker_images.py produces for this (tt_metal, vllm) pair.
+        model_type=ModelType.LLM,
+        inference_engine=InferenceEngine.VLLM.value,
+        device_model_specs=[
+            DeviceModelSpec(
+                device=DeviceTypes.P150,
+                max_concurrency=1,
+                max_context=8 * 1024,
+                # Keep the legacy (fork) impl as the default; the canonical impl
+                # is selectable with --impl tt-vllm-plugin-canonical.
+                default_impl=False,
                 env_vars={
                     "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
                     "VLLM__MAX_NUM_BATCHED_TOKENS": "262144",
