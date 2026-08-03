@@ -18,8 +18,9 @@ class DiarizationRequest(BaseRequest):
     URL. Unlike the media-server audio transcription request, diarization does
     NOT produce a transcript: the response is speaker turns only.
 
-    Input is provided as an uploaded audio file (multipart) decoded by the
-    router into raw bytes, or a base64-encoded audio string.
+    Input audio is referenced by ``DiarizeRequest.url`` (http(s):// or
+    media://); the router resolves it to raw bytes before constructing this
+    request (``file`` holds those bytes).
     """
 
     # Required: raw audio bytes (from multipart upload) or base64-encoded string.

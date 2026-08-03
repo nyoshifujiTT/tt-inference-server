@@ -6,18 +6,38 @@
 
 Schema aligned with the pyannoteAI cloud diarization API so a client can switch
 base URL only. Unlike /v1/audio/transcriptions this returns speaker turns only
-(no transcript). Accepts multipart file upload (OpenAI-audio style) so existing
-audio clients can post the same way.
+(no transcript). The /diarize input is a pyannoteAI-style JSON body with a
+``url`` (http(s):// or media://); see https://docs.pyannote.ai/openapi.json
+(DiarizeRequest).
 """
 
 from typing import Optional
 
 from domain.diarization_request import DiarizationRequest
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Security, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Security, UploadFile
 from resolver.service_resolver import service_resolver
 from security.api_key_checker import get_api_key
 
 router = APIRouter()
+
+# pyannoteAI DiarizeRequest fields this server implements (accepted in the JSON
+# body) vs. deliberately-unsupported ones. Kept explicit so the schema
+# conformance test can assert the union covers the whole official schema and
+# nothing is silently ignored. See https://docs.pyannote.ai/openapi.json.
+IMPLEMENTED_REQUEST_FIELDS = frozenset(
+    {"url", "model", "numSpeakers", "minSpeakers", "maxSpeakers", "exclusive"}
+)
+# precision-2-only options: accepted by the parser only to reject them with 400.
+UNSUPPORTED_REQUEST_FIELDS = frozenset(
+    {
+        "confidence",
+        "turnLevelConfidence",
+        "transcription",
+        "transcriptionConfig",
+        "webhook",
+        "webhookStatusOnly",
+    }
+)
 
 
 def _validate_served_model(model):
@@ -70,39 +90,52 @@ def _reject_precision2_only_options(**options) -> None:
         )
 
 
-async def parse_diarization_request(
-    file: UploadFile = File(...),
-    model: Optional[str] = Form(None),
-    num_speakers: Optional[int] = Form(None, alias="numSpeakers"),
-    min_speakers: Optional[int] = Form(None, alias="minSpeakers"),
-    max_speakers: Optional[int] = Form(None, alias="maxSpeakers"),
-    exclusive: Optional[bool] = Form(True),
-    confidence: Optional[bool] = Form(None),
-    turn_level_confidence: Optional[bool] = Form(None, alias="turnLevelConfidence"),
-    transcription: Optional[bool] = Form(None),
-    transcription_config: Optional[str] = Form(None, alias="transcriptionConfig"),
-) -> DiarizationRequest:
-    """Parse a diarization request.
+async def parse_diarization_request(request: Request) -> DiarizationRequest:
+    """Parse a pyannoteAI-style diarization JSON body into a DiarizationRequest.
 
-    Speaker-count hints use the pyannoteAI camelCase field names
-    (``numSpeakers`` / ``minSpeakers`` / ``maxSpeakers``); see
-    https://docs.pyannote.ai/openapi.json (DiarizeRequest). ``model`` follows the
-    pyannoteAI enum and is validated against the served model.
+    Body matches the pyannoteAI ``DiarizeRequest`` schema
+    (https://docs.pyannote.ai/openapi.json): required ``url`` (http(s):// or
+    media://), optional ``model`` (validated against the served model),
+    ``numSpeakers`` / ``minSpeakers`` / ``maxSpeakers``, and ``exclusive``. The
+    precision-2-only options are rejected. The referenced audio is fetched here
+    and passed to the service as bytes.
     """
-    _validate_served_model(model)
+    from utils.audio_url_resolver import AudioUrlError, resolve_audio_url
+
+    if "application/json" not in request.headers.get("content-type", "").lower():
+        raise HTTPException(
+            status_code=415,
+            detail="diarize requires application/json with a 'url' field",
+        )
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be a JSON object")
+
+    _validate_served_model(body.get("model"))
     _reject_precision2_only_options(
-        confidence=confidence,
-        turnLevelConfidence=turn_level_confidence,
-        transcription=transcription,
-        transcriptionConfig=transcription_config,
+        confidence=body.get("confidence"),
+        turnLevelConfidence=body.get("turnLevelConfidence"),
+        transcription=body.get("transcription"),
+        transcriptionConfig=body.get("transcriptionConfig"),
     )
-    file_content = await file.read()
+
+    url = body.get("url")
+    if not url:
+        raise HTTPException(
+            status_code=400, detail="'url' is required (http(s):// or media://)"
+        )
+    try:
+        audio_bytes = resolve_audio_url(url)
+    except AudioUrlError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    exclusive = body.get("exclusive")
     return DiarizationRequest(
-        file=file_content,
-        num_speakers=num_speakers,
-        min_speakers=min_speakers,
-        max_speakers=max_speakers,
-        exclusive=exclusive if exclusive is not None else True,
+        file=audio_bytes,
+        num_speakers=body.get("numSpeakers"),
+        min_speakers=body.get("minSpeakers"),
+        max_speakers=body.get("maxSpeakers"),
+        exclusive=True if exclusive is None else exclusive,
     )
 
 
