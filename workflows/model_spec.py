@@ -327,8 +327,17 @@ class DeviceModelSpec:
             "max_num_batched_tokens": str(self.max_context),
             "max-log-len": "32",
             "seed": "9472",
-            "override_tt_config": json.dumps(self.override_tt_config),
         }
+        # Only emit the TT config override when non-empty. Newer vLLM (the tt
+        # plugin build) dropped the fork-only `--override_tt_config` flag in
+        # favour of the standard `--additional-config`, so always emitting an
+        # empty `--override_tt_config '{}'` makes the vLLM server argparse fail
+        # with "unrecognized arguments". An empty override has nothing to pass,
+        # so skip it; a non-empty one is still forwarded for older images.
+        if self.override_tt_config:
+            default_vllm_args["override_tt_config"] = json.dumps(
+                self.override_tt_config
+            )
         merged_vllm_args = {**default_vllm_args, **self.vllm_args}
         object.__setattr__(self, "vllm_args", merged_vllm_args)
 
@@ -3420,11 +3429,18 @@ embedding_templates = [
     ),
     ModelSpecTemplate(
         weights=["BAAI/bge-reranker-v2-m3"],
-        tt_metal_commit="ec28d12",
+        # tt-metal fork carrying the bge-reranker-v2-m3 device model + the flat
+        # pooling contract (nyoshifujiTT/tt-metal @ this commit). Paired with the
+        # tt-metal-tracked vLLM dev branch; the reranker needs no vLLM fork diff
+        # (registration is done at runtime by vllm-tt-metal/src/sitecustomize.py).
+        tt_metal_commit="ac0e105a61e",
+        vllm_commit="50d3f5f",
         impl=tt_vllm_plugin_impl,
         min_disk_gb=15,
         min_ram_gb=6,
-        docker_image="ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.10.0-555f240-22be241",
+        # docker_image left unset: auto-generated as
+        # vllm-tt-metal-src-{release,dev}-...:{VERSION}-{tt_metal}-{vllm}, matching
+        # what build_docker_images.py produces for this (tt_metal, vllm) pair.
         model_type=ModelType.LLM,
         inference_engine=InferenceEngine.VLLM.value,
         device_model_specs=[
