@@ -491,8 +491,18 @@ curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
 
 Available when `MODEL_SERVICE=diarization`. Speaker diarization answers "who
 spoke when": it returns speaker turns only (no transcript). The request/response
-schema is aligned with the pyannoteAI cloud diarization API, so a client can
-switch base URL only. The diarization neural nets
+schema follows the **pyannoteAI cloud diarization API** — request fields match
+[`DiarizeRequest`](https://docs.pyannote.ai/api-reference/diarize) and the
+response matches [`DiarizationJobOutput`](https://docs.pyannote.ai/api-reference/get-job)
+/ `DiarizationSegment` (machine-readable spec:
+https://docs.pyannote.ai/openapi.json) — so a client can switch base URL only.
+The one intentional difference: pyannoteAI is asynchronous and takes the audio
+as a `url` (or `media://`) creating a job you poll via `GET /v1/jobs/{jobId}`,
+whereas this endpoint is synchronous and takes the audio as a `multipart/form-data`
+file upload (OpenAI-audio style), returning the `DiarizationJobOutput` body
+directly. The `tests/test_diarization_pyannoteai_schema_conformance.py` test
+fetches the official OpenAPI spec live on every run and fails if these fields
+drift. The diarization neural nets
 (`pyannote/speaker-diarization-community-1`) run on the Tenstorrent device; set
 `PREPROCESSING_MODEL_WEIGHTS_PATH` to the local community-1 weights and
 `DIARIZATION_TT_DEVICE_ID=0` (optionally `DIARIZATION_TT_SEGMENTATION=1` to run
@@ -505,11 +515,11 @@ both neural nets on device).
 
 | Parameter      | Required | Description |
 |----------------|----------|-------------|
-| `file`         | Yes      | Audio file upload (WAV/MP3, OpenAI-audio style). |
-| `num_speakers` | No       | Exact number of speakers, if known. |
-| `min_speakers` | No       | Lower bound on the number of speakers. |
-| `max_speakers` | No       | Upper bound on the number of speakers. |
-| `exclusive`    | No       | When `true` (default), also return non-overlapping turns as `exclusiveDiarization`. |
+| `file`         | Yes      | Audio file upload (WAV/MP3, OpenAI-audio style). Local synchronous substitute for the pyannoteAI `url`/`media://` input. |
+| `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
+| `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
+| `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |
+| `exclusive`    | No       | When `true` (default), also return non-overlapping turns as `exclusiveDiarization` (pyannoteAI `exclusive`). |
 
 ```bash
 curl -X POST 'http://127.0.0.1:8000/v1/audio/diarize' \
@@ -518,17 +528,17 @@ curl -X POST 'http://127.0.0.1:8000/v1/audio/diarize' \
   -F 'exclusive=true'
 ```
 
-Response (pyannoteAI-shaped; `exclusiveDiarization` present when `exclusive=true`):
+Response (pyannoteAI `DiarizationJobOutput`; `exclusiveDiarization` present when `exclusive=true`):
 
 ```json
 {
-  "segments": [
-    {"start": 0.5, "end": 4.2, "speaker": "SPEAKER_00"},
-    {"start": 4.2, "end": 7.8, "speaker": "SPEAKER_01"}
+  "diarization": [
+    {"speaker": "SPEAKER_00", "start": 0.5, "end": 4.2},
+    {"speaker": "SPEAKER_01", "start": 4.2, "end": 7.8}
   ],
   "exclusiveDiarization": [
-    {"start": 0.5, "end": 4.2, "speaker": "SPEAKER_00"},
-    {"start": 4.2, "end": 7.8, "speaker": "SPEAKER_01"}
+    {"speaker": "SPEAKER_00", "start": 0.5, "end": 4.2},
+    {"speaker": "SPEAKER_01", "start": 4.2, "end": 7.8}
   ]
 }
 ```
@@ -557,9 +567,9 @@ second = diarization model):
 |----------------|----------|-------------|
 | `file`         | Yes      | Audio file upload (WAV/MP3). |
 | `model`        | Yes      | Composite `"<asr_model>+<diarization_model>"` id (see above). |
-| `num_speakers` | No       | Exact number of speakers, if known. |
-| `min_speakers` | No       | Lower bound on the number of speakers. |
-| `max_speakers` | No       | Upper bound on the number of speakers. |
+| `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
+| `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
+| `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |
 | `language`     | No       | ASR language hint passed through to the ASR endpoint. |
 | `prompt`       | No       | ASR prompt passed through to the ASR endpoint. |
 
