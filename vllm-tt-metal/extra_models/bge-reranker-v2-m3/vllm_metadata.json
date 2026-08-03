@@ -1,0 +1,4 @@
+{
+  "arch": "XLMRobertaForSequenceClassification",
+  "main_class": "models.demos.bge_reranker_v2_m3.demo.generator_vllm:BgeRerankerV2M3"
+}

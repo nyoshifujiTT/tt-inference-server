@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+"""Validate the EXTRA_MODELS_DIR bundles shipped for the canonical vLLM plugin.
+
+The standalone ``vllm-tt-plugin`` (upstream vLLM 0.24) discovers models by
+scanning ``EXTRA_MODELS_DIR`` for ``<name>/vllm_metadata.json`` files, each of
+which must carry an ``arch`` (HF architecture) and a ``main_class``
+(``"module:Class"``). These tests keep the shipped bundles well-formed so the
+plugin can register them without editing plugin source.
+"""
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+BUNDLE_ROOT = Path(__file__).resolve().parents[1] / "vllm-tt-metal" / "extra_models"
+
+_MODULE_CLASS_RE = re.compile(r"^[\w.]+:[\w]+$")
+
+
+def _bundle_dirs():
+    if not BUNDLE_ROOT.is_dir():
+        return []
+    return sorted(p for p in BUNDLE_ROOT.iterdir() if p.is_dir())
+
+
+def test_bundle_root_exists():
+    assert BUNDLE_ROOT.is_dir(), f"missing bundle root {BUNDLE_ROOT}"
+
+
+def test_at_least_reranker_bundle_present():
+    names = {p.name for p in _bundle_dirs()}
+    assert "bge-reranker-v2-m3" in names
+
+
+@pytest.mark.parametrize("bundle", _bundle_dirs(), ids=lambda p: p.name)
+def test_bundle_metadata_wellformed(bundle):
+    meta_path = bundle / "vllm_metadata.json"
+    assert meta_path.is_file(), f"{bundle.name}: missing vllm_metadata.json"
+    data = json.loads(meta_path.read_text())
+    assert isinstance(data.get("arch"), str) and data["arch"], (
+        f"{bundle.name}: 'arch' must be a non-empty string"
+    )
+    main_class = data.get("main_class")
+    assert isinstance(main_class, str) and _MODULE_CLASS_RE.match(main_class), (
+        f"{bundle.name}: 'main_class' must be 'module.path:ClassName', got {main_class!r}"
+    )
+
+
+def test_reranker_bundle_targets_expected_arch_and_class():
+    meta = json.loads(
+        (BUNDLE_ROOT / "bge-reranker-v2-m3" / "vllm_metadata.json").read_text()
+    )
+    assert meta["arch"] == "XLMRobertaForSequenceClassification"
+    assert meta["main_class"] == (
+        "models.demos.bge_reranker_v2_m3.demo.generator_vllm:BgeRerankerV2M3"
+    )
