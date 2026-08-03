@@ -74,6 +74,9 @@ UBUNTU_VERSION="20.04"
 CONTAINER_APP_UID=1000
 TT_METAL_COMMIT_SHA_OR_TAG=v0.56.0-rc6
 TT_VLLM_COMMIT_SHA_OR_TAG=b9564bf364e95a3850619fc7b2ed968cc71e30b7
+# Source git repos (default upstream; override to build a fork branch).
+TT_METAL_REPO_URL="https://github.com/tenstorrent-metal/tt-metal.git"
+TT_VLLM_REPO_URL="https://github.com/tenstorrent/vllm.git"
 TAG_SUFFIX=""
 IMAGE_REPO="ghcr.io/tenstorrent/tt-inference-server"
 # ------------------------------------------------------------------------------
@@ -111,6 +114,22 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             TT_VLLM_COMMIT_SHA_OR_TAG="$2"
+            shift
+            ;;
+        --tt-metal-repo-url)
+            if [ $# -lt 2 ]; then
+                echo "⛔ Error: --tt-metal-repo-url requires a value."
+                exit 1
+            fi
+            TT_METAL_REPO_URL="$2"
+            shift
+            ;;
+        --tt-vllm-repo-url)
+            if [ $# -lt 2 ]; then
+                echo "⛔ Error: --tt-vllm-repo-url requires a value."
+                exit 1
+            fi
+            TT_VLLM_REPO_URL="$2"
             shift
             ;;
         --ubuntu-version)
@@ -279,6 +298,8 @@ generate_model_specs_json()
         --build-arg TT_METAL_DOCKERFILE_URL="${TT_METAL_DOCKERFILE_URL}" \
         --build-arg TT_METAL_COMMIT_SHA_OR_TAG="${TT_METAL_COMMIT_SHA_OR_TAG}" \
         --build-arg TT_VLLM_COMMIT_SHA_OR_TAG="${TT_VLLM_COMMIT_SHA_OR_TAG}" \
+        --build-arg TT_METAL_REPO_URL="${TT_METAL_REPO_URL}" \
+        --build-arg TT_VLLM_REPO_URL="${TT_VLLM_REPO_URL}" \
         --build-arg CONTAINER_APP_UID="${CONTAINER_APP_UID}" \
         . -f vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 
