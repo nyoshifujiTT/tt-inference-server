@@ -352,3 +352,50 @@ class TestLogResourceSummary:
 
         assert "Available memory after reserve" in caplog.text
         assert "below the minimum per-build requirement" in caplog.text
+
+
+from scripts.build_docker_images import (
+    _build_variant_for_impl,
+    _dev_dockerfile_for_variant,
+    _DEV_DOCKERFILE_CANONICAL,
+    _DEV_DOCKERFILE_LEGACY,
+    list_image_combinations,
+)
+
+
+class TestBuildVariantSelection:
+    def test_variant_for_canonical_impl(self):
+        assert _build_variant_for_impl("tt_vllm_plugin_canonical") == "canonical"
+
+    def test_variant_for_legacy_impls(self):
+        for impl_id in ("tt_transformers", "tt_vllm_plugin", "qwen3_32b_galaxy"):
+            assert _build_variant_for_impl(impl_id) == "legacy"
+
+    def test_dockerfile_for_variant(self):
+        assert _dev_dockerfile_for_variant("canonical") == _DEV_DOCKERFILE_CANONICAL
+        assert _dev_dockerfile_for_variant("legacy") == _DEV_DOCKERFILE_LEGACY
+        # anything not "canonical" falls back to the legacy Dockerfile
+        assert _dev_dockerfile_for_variant("unknown") == _DEV_DOCKERFILE_LEGACY
+
+    def test_combinations_carry_variant(self):
+        from types import SimpleNamespace
+
+        configs = {
+            "legacy": SimpleNamespace(
+                tt_metal_commit="ttm", vllm_commit="vfork",
+                impl=SimpleNamespace(impl_id="tt_vllm_plugin"),
+            ),
+            "canonical": SimpleNamespace(
+                tt_metal_commit="ttm", vllm_commit="vplugin",
+                impl=SimpleNamespace(impl_id="tt_vllm_plugin_canonical"),
+            ),
+            "skipme": SimpleNamespace(
+                tt_metal_commit="ttm", vllm_commit=None,
+                impl=SimpleNamespace(impl_id="tt_transformers"),
+            ),
+        }
+        combos = list_image_combinations(configs)
+        assert ("ttm", "vfork", "legacy") in combos
+        assert ("ttm", "vplugin", "canonical") in combos
+        # vllm_commit=None configs are skipped (unchanged behavior)
+        assert all(c[1] is not None for c in combos)

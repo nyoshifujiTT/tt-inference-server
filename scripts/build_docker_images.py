@@ -271,6 +271,31 @@ def _format_commit_for_id(commit, fallback):
     return (commit if commit else fallback)[:16]
 
 
+# Impl IDs served by the standalone (canonical) Tenstorrent vLLM plugin
+# (upstream vLLM 0.24) rather than the legacy in-tree fork plugin. Their images
+# are built with the canonical Dockerfile (upstream vLLM + standalone plugin +
+# EXTRA_MODELS_DIR), and the plugin git ref is cloned from a canonical repo.
+_CANONICAL_PLUGIN_IMPL_IDS = frozenset({"tt_vllm_plugin_canonical"})
+
+# Dockerfile + plugin clone source per build variant.
+_DEV_DOCKERFILE_LEGACY = "vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile"
+_DEV_DOCKERFILE_CANONICAL = "vllm-tt-metal/vllm.tt-metal.src.canonical.Dockerfile"
+
+
+def _build_variant_for_impl(impl_id):
+    """Return the build variant ("canonical" or "legacy") for an impl id."""
+    return "canonical" if impl_id in _CANONICAL_PLUGIN_IMPL_IDS else "legacy"
+
+
+def _dev_dockerfile_for_variant(build_variant):
+    """Return the dev Dockerfile path for a build variant."""
+    return (
+        _DEV_DOCKERFILE_CANONICAL
+        if build_variant == "canonical"
+        else _DEV_DOCKERFILE_LEGACY
+    )
+
+
 def _build_combination_id(tt_metal_commit, vllm_commit):
     """
     Build a safe combination identifier from tt_metal and vllm commits.
@@ -398,6 +423,7 @@ def process_sha_combination(args_tuple):
     (
         tt_metal_commit,
         vllm_commit,
+        build_variant,
         ubuntu_version,
         force_build,
         release,
@@ -563,6 +589,7 @@ def process_sha_combination(args_tuple):
                         vllm_commit,
                         container_app_uid,
                         process_logger,
+                        build_variant=build_variant,
                     )
                     image_status["dev"]["build_succeeded"] = True
                 except Exception as e:
@@ -1144,7 +1171,8 @@ def should_push_image(image_tag, force_push=False):
 
 
 def build_dev_image(
-    image_tags, tt_metal_commit, vllm_commit, container_app_uid, logger
+    image_tags, tt_metal_commit, vllm_commit, container_app_uid, logger,
+    build_variant="legacy",
 ):
     """
     Build the dev Docker image from the Dockerfile.
@@ -1155,6 +1183,8 @@ def build_dev_image(
         vllm_commit: VLLM commit hash
         container_app_uid: Container application UID
         logger: Logger instance
+        build_variant: "legacy" (in-tree fork plugin) or "canonical" (standalone
+            upstream vLLM 0.24 plugin). Selects the dev Dockerfile.
     """
     repo_root = get_repo_root_path()
     dev_image_tag = image_tags["dev"]
@@ -1164,7 +1194,9 @@ def build_dev_image(
     model_specs_json_path = generate_model_specs_json()
     logger.info(f"Generated model specs JSON at: {model_specs_json_path}")
 
+    dev_dockerfile = _dev_dockerfile_for_variant(build_variant)
     logger.info(f"Building dev image: {dev_image_tag}")
+    logger.info(f"Build variant: {build_variant} (Dockerfile: {dev_dockerfile})")
 
     build_command = [
         "docker",
@@ -1180,7 +1212,7 @@ def build_dev_image(
         "--build-arg",
         f"CONTAINER_APP_UID={container_app_uid}",
         "-f",
-        "vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile",
+        dev_dockerfile,
         ".",
     ]
 
@@ -1254,10 +1286,17 @@ def list_image_combinations(model_configs, build_metal_commit=None):
         build_metal_commit: Only return combinations with this exact tt-metal commit
 
     Returns:
-        Set of tuples (tt_metal_commit, vllm_commit) representing unique combinations
+        Set of tuples (tt_metal_commit, vllm_commit, build_variant) representing
+        unique combinations. ``build_variant`` is ``"canonical"`` when the
+        combination is owned by a canonical (standalone vLLM plugin) impl, else
+        ``"legacy"``; it selects the Dockerfile / vLLM source at build time.
     """
     unique_sha_combinations = {
-        (config.tt_metal_commit, config.vllm_commit)
+        (
+            config.tt_metal_commit,
+            config.vllm_commit,
+            _build_variant_for_impl(config.impl.impl_id),
+        )
         for config in model_configs.values()
         if config.vllm_commit is not None
     }
@@ -1436,6 +1475,7 @@ def build_docker_images(
         (
             tt_metal_commit,
             vllm_commit,
+            build_variant,
             ubuntu_version,
             force_build,
             release,
@@ -1446,7 +1486,7 @@ def build_docker_images(
             stdout_only,
             dry_run_build_duration,
         )
-        for tt_metal_commit, vllm_commit in unique_sha_combinations
+        for tt_metal_commit, vllm_commit, build_variant in unique_sha_combinations
     ]
 
     if not args_tuples:
