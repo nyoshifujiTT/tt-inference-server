@@ -329,6 +329,7 @@ templates:
         TT_QWEN35_TEXT_VER: qwen36_blackhole
         HF_MODEL: Qwen/Qwen3.6-27B
         MESH_DEVICE: "(2, 4)"
+        TT_METAL_OPERATION_TIMEOUT_SECONDS: "0.0"  # disable inf-server 5s op watchdog (tt-metal native default = no timeout); replaces --disable-metal-timeout
       vllm_args:
         data_parallel_size: 2
         async_scheduling: true
