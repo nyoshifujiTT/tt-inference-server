@@ -143,6 +143,7 @@ MODEL_TYPE_DESCRIPTIONS = {
     ModelType.EMBEDDING: "Text embedding models",
     ModelType.TEXT_TO_SPEECH: "Text-to-speech models",
     ModelType.VIDEO: "Video generation models",
+    ModelType.DIARIZATION: "Speaker diarization models",
 }
 
 # Status groups for supported models (excludes EXPERIMENTAL)
