@@ -98,17 +98,39 @@ def test_response_output_keys_match_official(official_schemas):
             assert set(seg.keys()) == official_seg_required
 
 
-def test_request_speaker_controls_match_official(official_schemas):
+def test_request_fields_cover_official_schema(official_schemas):
+    """Every official DiarizeRequest field is either implemented or explicitly
+    marked unsupported -- nothing is silently ignored, and we do not invent
+    fields the official schema does not have."""
     from open_ai_api import diarization
 
-    req_props = set(official_schemas["DiarizeRequest"]["properties"].keys())
-    expected = {"numSpeakers", "minSpeakers", "maxSpeakers", "exclusive"}
-    assert expected <= req_props, f"official DiarizeRequest dropped {expected - req_props}"
+    official = set(official_schemas["DiarizeRequest"]["properties"].keys())
+    implemented = set(diarization.IMPLEMENTED_REQUEST_FIELDS)
+    unsupported = set(diarization.UNSUPPORTED_REQUEST_FIELDS)
 
-    params = inspect.signature(diarization.parse_diarization_request).parameters
-    aliases = set()
-    for p in params.values():
-        alias = getattr(p.default, "alias", None)
-        aliases.add(alias if alias else p.name)
-    for name in expected:
-        assert name in aliases, f"diarize form does not accept official field {name!r}"
+    # we never classify a field that is not in the official schema
+    assert implemented <= official, f"non-official implemented fields: {implemented - official}"
+    assert unsupported <= official, f"non-official unsupported fields: {unsupported - official}"
+    # implemented and unsupported are disjoint
+    assert not (implemented & unsupported)
+    # union covers the whole official request schema
+    missing = official - implemented - unsupported
+    assert not missing, f"official DiarizeRequest fields not classified: {missing}"
+
+
+def test_response_fields_cover_official_schema(official_schemas):
+    """Every official DiarizationJobOutput field is either emitted or explicitly
+    documented as not-emitted (precision-2-only)."""
+    official = set(official_schemas["DiarizationJobOutput"]["properties"].keys())
+    emitted = {"diarization", "exclusiveDiarization", "warning"}
+    not_emitted = {
+        "confidence",
+        "wordLevelTranscription",
+        "turnLevelTranscription",
+        "error",  # only meaningful for the async job model; sync diarize uses HTTP status
+    }
+    assert emitted <= official, f"non-official emitted fields: {emitted - official}"
+    assert not_emitted <= official
+    assert not (emitted & not_emitted)
+    missing = official - emitted - not_emitted
+    assert not missing, f"official DiarizationJobOutput fields not classified: {missing}"
