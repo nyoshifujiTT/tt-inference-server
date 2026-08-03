@@ -38,7 +38,7 @@ def test_response_to_dict_pyannoteai_shape():
         exclusiveDiarization=[DiarizationSegment(start=0.2, end=1.6, speaker="SPEAKER_00")],
     )
     d = resp.to_dict()
-    assert d["segments"][0] == {"start": 0.2, "end": 1.6, "speaker": "SPEAKER_00"}
+    assert d["diarization"][0] == {"speaker": "SPEAKER_00", "start": 0.2, "end": 1.6}
     assert d["exclusiveDiarization"][0]["speaker"] == "SPEAKER_00"
 
 

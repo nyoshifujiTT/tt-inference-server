@@ -46,7 +46,7 @@ def test_diarize_endpoint_returns_pyannoteai_shape():
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["segments"][0] == {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}
+    assert body["diarization"][0] == {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}
     assert body["exclusiveDiarization"][0]["speaker"] == "SPEAKER_00"
     # request parsing wired the speaker hint through
     assert fake.last.num_speakers == 2
