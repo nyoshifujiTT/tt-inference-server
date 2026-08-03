@@ -556,6 +556,50 @@ ignored): `confidence`, `turnLevelConfidence`, `transcription`,
 (`confidence`, `wordLevelTranscription`, `turnLevelTranscription`) are never
 emitted. See https://docs.pyannote.ai/openapi.json.
 
+## Asynchronous job API (pyannoteAI-native)
+
+In addition to the synchronous `POST /v1/audio/diarize` above, the server
+exposes the pyannoteAI-native asynchronous flow so a pyannoteAI client can
+switch base URL only:
+
+- `POST /v1/diarize` — create a job. Body is the pyannoteAI `DiarizeRequest`
+  (`url` + optional `numSpeakers`/`minSpeakers`/`maxSpeakers`/`exclusive`/`model`
+  and `webhook`/`webhookStatusOnly`). Returns `201` with `JobCreated`
+  (`{jobId, status}`).
+- `GET /v1/jobs/{jobId}` — returns the `DiarizationJob`
+  (`{jobId, status, createdAt, updatedAt, output}`); `output` is the
+  `DiarizationJobOutput` once `status` is `succeeded`. Status values are the
+  pyannoteAI enum `created|running|succeeded|failed|canceled`.
+- `webhook` / `webhookStatusOnly` — when `webhook` is set, the job payload is
+  POSTed to that URL on completion (`webhookStatusOnly=true` sends only
+  `{jobId, status}`).
+
+```bash
+# 1. stage a private file (optional; or pass a public https url)
+UP=$(curl -s -X POST http://127.0.0.1:8000/v1/media/input \
+  -H 'Authorization: Bearer your-secret-key' -H 'Content-Type: application/json' \
+  -d '{"url":"media://sess/audio.wav"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')
+curl -s -X PUT "$UP" --data-binary @/path/to/audio.wav -H 'Authorization: Bearer your-secret-key'
+
+# 2. create the job
+JOB=$(curl -s -X POST http://127.0.0.1:8000/v1/diarize \
+  -H 'Authorization: Bearer your-secret-key' -H 'Content-Type: application/json' \
+  -d '{"url":"media://sess/audio.wav","exclusive":true}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["jobId"])')
+
+# 3. poll for the result
+curl -s http://127.0.0.1:8000/v1/jobs/$JOB -H 'Authorization: Bearer your-secret-key'
+```
+
+## Media input (staging private files)
+
+`POST /v1/media/input` with `{"url":"media://<object-key>"}` returns a PUT url;
+`PUT` the file bytes there, then pass `media://<object-key>` as the diarize
+`url`. This mirrors the pyannoteAI temporary media storage
+(https://docs.pyannote.ai/api-reference/upload-media). Objects expire after
+`MEDIA_INPUT_RETENTION_SECONDS` (default 24h); storage dir is
+`MEDIA_INPUT_DIR` (default `/tmp/tt_media_input`).
+
 
 # Speaker-diarized transcription test call
 
