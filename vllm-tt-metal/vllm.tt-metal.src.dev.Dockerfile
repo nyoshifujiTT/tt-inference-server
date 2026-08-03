@@ -77,7 +77,7 @@ RUN /bin/bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
     && rustup update"
 
 # Build tt-metal - clone with minimal history, build, and clean
-RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${TT_METAL_HOME} \
+RUN /bin/bash -c "git clone https://github.com/nyoshifujiTT/tt-metal.git ${TT_METAL_HOME} \
     && cd ${TT_METAL_HOME} \
     && git checkout ${TT_METAL_COMMIT_SHA_OR_TAG} \
     && git submodule update --init --recursive \
@@ -94,10 +94,25 @@ RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm.git ${vllm_dir} 
     && cd ${vllm_dir} \
     && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
     && source ${PYTHON_ENV_DIR}/bin/activate \
+    && export VLLM_TARGET_DEVICE=empty \
     && uv pip install --upgrade pip \
     && uv pip install --index-strategy unsafe-best-match -e . --extra-index-url https://download.pytorch.org/whl/cpu \
     && if [ -d plugins/vllm-tt-plugin ]; then uv pip install --no-deps -e plugins/vllm-tt-plugin; fi \  
     && rm -rf ${vllm_dir}/.git"
+
+# Bake bge pooling support into the in-tree vllm-tt-plugin: the dev plugin ships
+# without a pooling runner ("does not support pooling/embedding tasks yet"), so
+# cross-encoder / embedding models (bge-reranker-v2-m3, bge-m3) fall into the
+# generative KV path and crash. Add a TT pooling model runner and wire the
+# worker to select it (and skip KV) for pooling models. Applied here so the
+# published image is self-contained (no runtime overlay).
+COPY --chown=${CONTAINER_APP_USERNAME}:${CONTAINER_APP_USERNAME} \
+    vllm-tt-metal/tt_plugin_pooling/pooling_runner.py \
+    vllm-tt-metal/tt_plugin_pooling/apply_worker_patch.py \
+    /tmp/tt_plugin_pooling/
+RUN /bin/bash -c "cp /tmp/tt_plugin_pooling/pooling_runner.py ${vllm_dir}/plugins/vllm-tt-plugin/src/vllm_tt_plugin/pooling_runner.py \
+    && source ${PYTHON_ENV_DIR}/bin/activate \
+    && python /tmp/tt_plugin_pooling/apply_worker_patch.py ${vllm_dir}/plugins/vllm-tt-plugin/src/vllm_tt_plugin/worker.py"
 
 # Build tt-smi in separate venv to avoid conflicts with tt-metal venv
 RUN /bin/bash -c "git clone https://github.com/tenstorrent/tt-smi.git ${TT_SMI_DIR} \
@@ -141,7 +156,7 @@ ENV TT_METAL_COMMIT_SHA_OR_TAG=${TT_METAL_COMMIT_SHA_OR_TAG} \
     LOGURU_LEVEL=INFO \
     TT_METAL_LOGS_PATH=${HOME_DIR}/logs
 # Environment variables defined by other env vars
-ENV PYTHONPATH=${TT_METAL_HOME}:${APP_DIR} \
+ENV PYTHONPATH=${TT_METAL_HOME}:${APP_DIR}:${APP_DIR}/src \
     PYTHON_ENV_DIR=${TT_METAL_HOME}/python_env \
     LD_LIBRARY_PATH=${TT_METAL_HOME}/build/lib
 

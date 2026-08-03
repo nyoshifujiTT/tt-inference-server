@@ -887,7 +887,7 @@ def resolve_commit_to_full_sha(tt_metal_commit):
         # Try to resolve using ls-remote to get the full SHA from origin
         # need to use shell=True and cmd string because of the pipe
         result = subprocess.run(
-            f"git ls-remote https://github.com/tenstorrent/tt-metal.git | grep {tt_metal_commit}",
+            f"git ls-remote https://github.com/nyoshifujiTT/tt-metal.git | grep {tt_metal_commit}",
             shell=True,
             capture_output=True,
             text=True,
@@ -919,7 +919,7 @@ def resolve_commit_to_full_sha(tt_metal_commit):
     # Fallback: Try GitHub API for short SHA resolution
     try:
         logger.info(f"Trying GitHub commits API fallback for {tt_metal_commit}...")
-        api_url = f"https://api.github.com/repos/tenstorrent/tt-metal/commits/{tt_metal_commit}"
+        api_url = f"https://api.github.com/repos/nyoshifujiTT/tt-metal/commits/{tt_metal_commit}"
 
         with urllib.request.urlopen(api_url, timeout=10) as response:
             if response.status == 200:
@@ -987,7 +987,7 @@ def build_tt_metal_base_image(
                 "clone",
                 "--depth",
                 "1",
-                "https://github.com/tenstorrent/tt-metal.git",
+                "https://github.com/nyoshifujiTT/tt-metal.git",
             ],
             logger=logger,
             check=True,
@@ -1052,24 +1052,70 @@ def build_tt_metal_base_image(
 
         # Build the Docker image
         logger.info("Building tt-metal Docker image...")
-        build_command = [
+        # The newer tt-metal Dockerfile declares its build tools (cmake, sfpi,
+        # openmpi, ccache, ...) as `FROM scratch AS <tool>-layer` placeholders
+        # that must be populated via BuildKit named build-contexts (see
+        # .github/workflows/build-evaluation-image.yaml). Without them the very
+        # first `COPY --from=cmake-layer` fails ("stat install/: file does not
+        # exist"). Compute the content-addressed tool image tags the same way
+        # tt-metal CI does (.github/scripts/compute-tool-tags.sh) and pass them
+        # as build-contexts. The tool images are public on ghcr under the
+        # upstream tenstorrent/tt-metal repo (a fork shares identical tool
+        # versions/hashes), so resolve them against tenstorrent/tt-metal.
+        import json as _json
+
+        tool_tags = _json.loads(
+            subprocess.check_output(
+                ["bash", ".github/scripts/compute-tool-tags.sh", "tenstorrent/tt-metal"],
+                cwd=tt_metal_dir,
+                text=True,
+            )
+        )
+        build_contexts = []
+        for _key, _tag in tool_tags.items():
+            # keys look like "cmake-tag" -> build-context name "cmake-layer"
+            _layer = _key[: -len("-tag")] + "-layer"
+            build_contexts += [
+                "--build-context",
+                f"{_layer}=docker-image://{_tag}",
+            ]
+
+        # The newer tt-metal build is orchestrated by `docker buildx bake`
+        # (dockerfile/docker-bake.hcl): the ci-build target pulls in not only the
+        # tool layers but also a Python venv layer (ci-build-venv, built from
+        # dockerfile/Dockerfile.python) that a plain `docker build --target
+        # ci-build` cannot produce (it is a `FROM scratch` placeholder wired via
+        # bake `contexts`). So drive the base build through bake: it builds the
+        # venv locally and we override the tool contexts to the pre-built public
+        # ghcr tool images (fast). The bake `ci-build` target outputs
+        # `tt-metalium-ci-build:local`, which we then tag as the expected base
+        # tag consumed by the dev Dockerfile.
+        set_overrides = []
+        for _key, _tag in tool_tags.items():
+            _layer = _key[: -len("-tag")] + "-layer"
+            set_overrides += [
+                "--set",
+                f"ci-build.contexts.{_layer}=docker-image://{_tag}",
+            ]
+
+        bake_command = [
             "docker",
-            "build",
-            "--platform",
-            "linux/amd64",
-            "-t",
-            tt_metal_base_tag,
-            "--build-arg",
-            f"UBUNTU_VERSION={ubuntu_version}",
-            "--target",
-            "ci-build",
+            "buildx",
+            "bake",
             "-f",
-            "dockerfile/Dockerfile",
-            ".",
+            "dockerfile/docker-bake.hcl",
+            "ci-build",
+            "--set",
+            f"ci-build.args.UBUNTU_VERSION={ubuntu_version}",
+            "--set",
+            f"ci-build.tags={tt_metal_base_tag}",
+            "--set",
+            "ci-build.output=type=docker",
+            *set_overrides,
         ]
 
         run_command_with_logging(
-            build_command, logger=logger, check=True, cwd=tt_metal_dir
+            bake_command, logger=logger, check=True, cwd=tt_metal_dir
         )
 
         logger.info(f"Successfully built tt-metal base image: {tt_metal_base_tag}")
