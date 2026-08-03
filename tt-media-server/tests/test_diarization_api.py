@@ -100,3 +100,38 @@ def test_diarize_rejects_unknown_model():
     assert resp.status_code == 400, resp.text
     assert "unknown diarization model" in resp.json()["detail"]
     assert fake.last is None
+
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize(
+    "field,value",
+    [
+        ("confidence", "true"),
+        ("turnLevelConfidence", "true"),
+        ("transcription", "true"),
+        ("transcriptionConfig", "{}"),
+    ],
+)
+def test_diarize_rejects_precision2_only_options(field, value):
+    fake = _FakeService()
+    resp = _make_client(fake).post(
+        "/v1/audio/diarize",
+        files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data={field: value},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "precision-2" in resp.json()["detail"]
+    assert fake.last is None
+
+
+def test_diarize_allows_precision2_options_when_false():
+    # explicitly false / unset must NOT be rejected
+    fake = _FakeService()
+    resp = _make_client(fake).post(
+        "/v1/audio/diarize",
+        files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data={"confidence": "false", "transcription": "false"},
+    )
+    assert resp.status_code == 200, resp.text

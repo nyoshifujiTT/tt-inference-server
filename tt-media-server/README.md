@@ -543,6 +543,19 @@ Response (pyannoteAI `DiarizationJobOutput`; `exclusiveDiarization` present when
 }
 ```
 
+## Model and unsupported options
+
+`model` follows the pyannoteAI `DiarizeRequest.model` enum. This server serves
+**`community-1`** only; `model=precision-2` (the paid cloud model) or any unknown
+value is rejected with HTTP 400.
+
+The following pyannoteAI options are **precision-2-only** and cannot be produced
+by community-1, so requesting them returns HTTP 400 (they are never silently
+ignored): `confidence`, `turnLevelConfidence`, `transcription`,
+`transcriptionConfig`. Correspondingly, the precision-2-only response fields
+(`confidence`, `wordLevelTranscription`, `turnLevelTranscription`) are never
+emitted. See https://docs.pyannote.ai/openapi.json.
+
 
 # Speaker-diarized transcription test call
 

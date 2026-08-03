@@ -49,6 +49,27 @@ def _validate_served_model(model):
         )
 
 
+def _reject_precision2_only_options(**options) -> None:
+    """Reject pyannoteAI options that only the paid precision-2 model supports.
+
+    ``confidence`` / ``turnLevelConfidence`` / ``transcription`` /
+    ``transcriptionConfig`` are precision-2-only in the pyannoteAI cloud API
+    (https://docs.pyannote.ai/openapi.json) and cannot be produced by
+    community-1. If a client requests any of them, fail with HTTP 400 rather
+    than silently ignoring the flag.
+    """
+    requested = [name for name, value in options.items() if value not in (None, False, "")]
+    if requested:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "the following pyannoteAI options require the paid precision-2 "
+                f"model and are not supported by this community-1 server: "
+                f"{sorted(requested)}"
+            ),
+        )
+
+
 async def parse_diarization_request(
     file: UploadFile = File(...),
     model: Optional[str] = Form(None),
@@ -56,6 +77,10 @@ async def parse_diarization_request(
     min_speakers: Optional[int] = Form(None, alias="minSpeakers"),
     max_speakers: Optional[int] = Form(None, alias="maxSpeakers"),
     exclusive: Optional[bool] = Form(True),
+    confidence: Optional[bool] = Form(None),
+    turn_level_confidence: Optional[bool] = Form(None, alias="turnLevelConfidence"),
+    transcription: Optional[bool] = Form(None),
+    transcription_config: Optional[str] = Form(None, alias="transcriptionConfig"),
 ) -> DiarizationRequest:
     """Parse a diarization request.
 
@@ -65,6 +90,12 @@ async def parse_diarization_request(
     pyannoteAI enum and is validated against the served model.
     """
     _validate_served_model(model)
+    _reject_precision2_only_options(
+        confidence=confidence,
+        turnLevelConfidence=turn_level_confidence,
+        transcription=transcription,
+        transcriptionConfig=transcription_config,
+    )
     file_content = await file.read()
     return DiarizationRequest(
         file=file_content,
