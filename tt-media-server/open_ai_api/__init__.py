@@ -12,6 +12,7 @@ from fastapi import APIRouter
 from open_ai_api import (
     audio,
     chat,
+    diarization,
     cnn,
     embedding,
     fine_tuning,
@@ -58,6 +59,11 @@ SERVICE_ROUTER_MAP: dict[str, list[ServiceRoute]] = {
     ModelServices.TEXT_TO_SPEECH.value: [
         ServiceRoute(
             text_to_speech.router, "/v1/audio", "/audio", ["Text to speech processing"]
+        ),
+    ],
+    ModelServices.DIARIZATION.value: [
+        ServiceRoute(
+            diarization.router, "/v1/audio", "/audio", ["Speaker diarization"]
         ),
     ],
     ModelServices.VIDEO.value: [

@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     chat_template_kwargs: dict = {}  # extra kwargs passed to apply_chat_template
     tokenizer_type: str = ""  # AutoTokenizer tokenizer_type
     preprocessing_model_weights_path: str = ""
+    # Optional external ASR endpoint (OpenAI /v1/audio/transcriptions) used by
+    # the diarized-transcription path to transcribe each speaker turn. When
+    # empty, diarized transcription is unavailable and the diarize-only
+    # endpoint is still served.
+    asr_url: str = ""
+    asr_timeout_s: int = 600
     trace_region_size: int = 34541598
     download_weights_from_service: bool = True
 
