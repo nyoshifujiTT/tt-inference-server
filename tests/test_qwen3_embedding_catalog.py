@@ -46,3 +46,38 @@ def test_qwen3_embedding_p150_runner_is_pooling(weight):
         f"which vLLM --runner auto would otherwise serve as a generate model); "
         f"got runner={vllm_args.get('runner')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# trace_region_size: batched (B>=4) embedding prefill on a single p150 builds a
+# mesh trace larger than tt-metal's 50_000_000 B default, which otherwise fails
+# with a mesh_trace TT_FATAL (EngineDead). Only the 0.6B P150 entry is covered
+# here: it is the size we brought up and swept B=1..32 on p150x1. The 8B batched
+# requirement was not measured on this hardware, so we intentionally do not
+# assert (or set) a value for it (same "don't ship what we haven't measured"
+# policy as the device list).
+# ---------------------------------------------------------------------------
+import json
+
+# Measured on p150x1: B=4 batched prefill needs 53,780,480 B of trace buffers.
+B4_TRACE_BYTES = 53_780_480
+
+
+def test_qwen3_embedding_06b_p150_trace_region_size_admits_batched_prefill():
+    specs = _p150_specs_by_weight()
+    weight = "Qwen/Qwen3-Embedding-0.6B"
+    assert weight in specs, f"{weight} P150 spec missing from dev/embedding.yaml"
+    dms = specs[weight].device_model_spec
+    trs = dms.override_tt_config.get("trace_region_size")
+    assert trs is not None, (
+        f"{weight} P150 must set override_tt_config.trace_region_size; batched "
+        f"(B>=4) embedding prefill needs >50MB of trace buffers and the tt "
+        f"default (50_000_000) triggers a mesh_trace TT_FATAL EngineDead."
+    )
+    assert int(trs) >= B4_TRACE_BYTES, (
+        f"{weight} P150 trace_region_size={trs} is below the measured B=4 "
+        f"batched-prefill trace requirement ({B4_TRACE_BYTES} B)."
+    )
+    # The value must surface in the serialized additional_config.tt that vLLM reads.
+    add_cfg = json.loads(dms.vllm_args["additional_config"])
+    assert int(add_cfg["tt"]["trace_region_size"]) == int(trs)
