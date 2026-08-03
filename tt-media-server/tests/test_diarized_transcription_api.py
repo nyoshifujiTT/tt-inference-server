@@ -44,7 +44,7 @@ def test_diarized_transcriptions_returns_diarized_json():
         files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
         data={
             "model": "neosophie/Qwen3-ASR-1.7B-JA+pyannote/speaker-diarization-community-1",
-            "num_speakers": "2",
+            "numSpeakers": "2",
             "language": "ja",
         },
     )

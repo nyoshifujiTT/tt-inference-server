@@ -42,7 +42,7 @@ def test_diarize_endpoint_returns_pyannoteai_shape():
     resp = client.post(
         "/v1/audio/diarize",
         files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
-        data={"num_speakers": "2", "exclusive": "true"},
+        data={"numSpeakers": "2", "exclusive": "true"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()

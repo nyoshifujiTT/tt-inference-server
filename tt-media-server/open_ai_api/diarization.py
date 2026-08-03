@@ -22,11 +22,17 @@ router = APIRouter()
 
 async def parse_diarization_request(
     file: UploadFile = File(...),
-    num_speakers: Optional[int] = Form(None),
-    min_speakers: Optional[int] = Form(None),
-    max_speakers: Optional[int] = Form(None),
+    num_speakers: Optional[int] = Form(None, alias="numSpeakers"),
+    min_speakers: Optional[int] = Form(None, alias="minSpeakers"),
+    max_speakers: Optional[int] = Form(None, alias="maxSpeakers"),
     exclusive: Optional[bool] = Form(True),
 ) -> DiarizationRequest:
+    """Parse a diarization request.
+
+    Speaker-count hints use the pyannoteAI camelCase field names
+    (``numSpeakers`` / ``minSpeakers`` / ``maxSpeakers``); see
+    https://docs.pyannote.ai/openapi.json (DiarizeRequest).
+    """
     file_content = await file.read()
     return DiarizationRequest(
         file=file_content,
@@ -54,9 +60,9 @@ async def diarize(
 async def parse_diarized_transcription_request(
     file: UploadFile = File(...),
     model: str = Form(...),
-    num_speakers: Optional[int] = Form(None),
-    min_speakers: Optional[int] = Form(None),
-    max_speakers: Optional[int] = Form(None),
+    num_speakers: Optional[int] = Form(None, alias="numSpeakers"),
+    min_speakers: Optional[int] = Form(None, alias="minSpeakers"),
+    max_speakers: Optional[int] = Form(None, alias="maxSpeakers"),
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
 ) -> dict:
