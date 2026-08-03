@@ -43,6 +43,8 @@ All API endpoints use the `/v1` prefix to match the OpenAI API standard. Legacy 
 | `/v1/images/edits`                                          | `/image/edits`                                       | POST   | Image editing (SDXL edit)                  |
 | `/v1/audio/transcriptions`                                  | `/audio/transcriptions`                              | POST   | Speech-to-text                             |
 | `/v1/audio/translations`                                    | `/audio/translations`                                | POST   | Speech-to-English (translation)            |
+| `/v1/audio/diarize`                                         | `/audio/diarize`                                     | POST   | Speaker diarization (who spoke when)       |
+| `/v1/audio/diarized-transcriptions`                         | `/audio/diarized-transcriptions`                     | POST   | Speaker-diarized transcription (ASR + diarization) |
 | `/v1/audio/speech`                                          | `/audio/speech`                                      | POST   | Text-to-speech                             |
 | `/v1/videos/generations`                                    | `/video/generations`                                 | POST   | Text-to-video generation                   |
 | `/v1/videos/generations/i2v`                                | `/video/generations/i2v`                             | POST   | Image-to-video generation (Wan2.2 I2V)     |
@@ -483,6 +485,90 @@ curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
 **Note:** Replace `your-secret-key` with the value of your `API_KEY` environment variable.
 
 *Please note that test_data.json is within docker container or within tests folder*
+
+
+# Speaker diarization test call
+
+Available when `MODEL_SERVICE=diarization`. Speaker diarization answers "who
+spoke when": it returns speaker turns only (no transcript). The request/response
+schema is aligned with the pyannoteAI cloud diarization API, so a client can
+switch base URL only. The diarization neural nets
+(`pyannote/speaker-diarization-community-1`) run on the Tenstorrent device; set
+`PREPROCESSING_MODEL_WEIGHTS_PATH` to the local community-1 weights and
+`DIARIZATION_TT_DEVICE_ID=0` (optionally `DIARIZATION_TT_SEGMENTATION=1` to run
+both neural nets on device).
+
+**Endpoint:** `POST /v1/audio/diarize` (legacy: `POST /audio/diarize`)
+**Content-Type:** `multipart/form-data`
+
+## Request parameters
+
+| Parameter      | Required | Description |
+|----------------|----------|-------------|
+| `file`         | Yes      | Audio file upload (WAV/MP3, OpenAI-audio style). |
+| `num_speakers` | No       | Exact number of speakers, if known. |
+| `min_speakers` | No       | Lower bound on the number of speakers. |
+| `max_speakers` | No       | Upper bound on the number of speakers. |
+| `exclusive`    | No       | When `true` (default), also return non-overlapping turns as `exclusiveDiarization`. |
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/v1/audio/diarize' \
+  -H 'Authorization: Bearer your-secret-key' \
+  -F 'file=@/path/to/audio.wav' \
+  -F 'exclusive=true'
+```
+
+Response (pyannoteAI-shaped; `exclusiveDiarization` present when `exclusive=true`):
+
+```json
+{
+  "segments": [
+    {"start": 0.5, "end": 4.2, "speaker": "SPEAKER_00"},
+    {"start": 4.2, "end": 7.8, "speaker": "SPEAKER_01"}
+  ],
+  "exclusiveDiarization": [
+    {"start": 0.5, "end": 4.2, "speaker": "SPEAKER_00"},
+    {"start": 4.2, "end": 7.8, "speaker": "SPEAKER_01"}
+  ]
+}
+```
+
+
+# Speaker-diarized transcription test call
+
+Available when `MODEL_SERVICE=diarization` and an ASR endpoint is configured via
+`ASR_URL`. This runs diarization on this service, then transcribes each speaker
+turn with the ASR model, returning an OpenAI `diarized_json`-style result.
+
+**Endpoint:** `POST /v1/audio/diarized-transcriptions` (legacy: `POST /audio/diarized-transcriptions`)
+**Content-Type:** `multipart/form-data`
+
+The single OpenAI `model` field carries **both** models, using a `+` separator
+as an explicit extension of the OpenAI `model` field (first part = ASR model,
+second = diarization model):
+
+- `model="<asr_model>"` — ASR only.
+- `model="<asr_model>+<diarization_model>"` — diarized transcription, e.g.
+  `model="neosophie/Qwen3-ASR-1.7B-JA+pyannote/speaker-diarization-community-1"`.
+
+## Request parameters
+
+| Parameter      | Required | Description |
+|----------------|----------|-------------|
+| `file`         | Yes      | Audio file upload (WAV/MP3). |
+| `model`        | Yes      | Composite `"<asr_model>+<diarization_model>"` id (see above). |
+| `num_speakers` | No       | Exact number of speakers, if known. |
+| `min_speakers` | No       | Lower bound on the number of speakers. |
+| `max_speakers` | No       | Upper bound on the number of speakers. |
+| `language`     | No       | ASR language hint passed through to the ASR endpoint. |
+| `prompt`       | No       | ASR prompt passed through to the ASR endpoint. |
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/v1/audio/diarized-transcriptions' \
+  -H 'Authorization: Bearer your-secret-key' \
+  -F 'file=@/path/to/audio.wav' \
+  -F 'model=neosophie/Qwen3-ASR-1.7B-JA+pyannote/speaker-diarization-community-1'
+```
 
 
 # Text-to-Speech (TTS) test call
