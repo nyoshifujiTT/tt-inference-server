@@ -13,6 +13,7 @@ from open_ai_api import (
     audio,
     chat,
     diarization,
+    media,
     cnn,
     embedding,
     fine_tuning,
@@ -65,6 +66,7 @@ SERVICE_ROUTER_MAP: dict[str, list[ServiceRoute]] = {
         ServiceRoute(
             diarization.router, "/v1/audio", "/audio", ["Speaker diarization"]
         ),
+        ServiceRoute(media.router, "/v1/media", None, ["Media input"]),
     ],
     ModelServices.VIDEO.value: [
         ServiceRoute(video.router, "/v1/videos", "/video", ["Video processing"]),
