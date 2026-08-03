@@ -23,6 +23,10 @@ from domain.diarization_request import DiarizationRequest
 from domain.diarization_response import DiarizationResponse, DiarizationSegment
 from utils.decorators import log_execution_time
 from utils.diarization_backend import DiarizationBackend
+from utils.diarization_warnings import (
+    build_speaker_count_warning,
+    count_distinct_speakers,
+)
 from utils.diarized_asr_coordinator import DiarizedAsrCoordinator
 from utils.asr_http_client import encode_wav_pcm16, transcribe_wav_bytes
 from utils.composite_model_id import parse_model_id
@@ -117,7 +121,15 @@ class DiarizationService:
             exclusive = [
                 DiarizationSegment(**s) for s in result["exclusiveDiarization"]
             ]
-        return DiarizationResponse(segments=segments, exclusiveDiarization=exclusive)
+        warning = build_speaker_count_warning(
+            count_distinct_speakers(result["segments"]),
+            num_speakers=request.num_speakers,
+            min_speakers=request.min_speakers,
+            max_speakers=request.max_speakers,
+        )
+        return DiarizationResponse(
+            segments=segments, exclusiveDiarization=exclusive, warning=warning
+        )
 
     def start_workers(self):
         """Warm up the pipeline (and compile ttnn kernels) at service start.

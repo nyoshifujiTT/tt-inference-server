@@ -39,6 +39,7 @@ class DiarizationResponse(BaseModel):
 
     segments: List[DiarizationSegment]
     exclusiveDiarization: Optional[List[DiarizationSegment]] = None
+    warning: Optional[str] = None
 
     def to_dict(self) -> dict:
         out = {
@@ -52,4 +53,6 @@ class DiarizationResponse(BaseModel):
                 {"speaker": s.speaker, "start": s.start, "end": s.end}
                 for s in self.exclusiveDiarization
             ]
+        if self.warning is not None:
+            out["warning"] = self.warning
         return out
