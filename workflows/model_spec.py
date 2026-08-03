@@ -3431,7 +3431,7 @@ embedding_templates = [
             DeviceModelSpec(
                 device=DeviceTypes.P150,
                 max_concurrency=1,
-                max_context=64 * 1024,
+                max_context=8 * 1024,
                 default_impl=True,
                 env_vars={
                     "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
