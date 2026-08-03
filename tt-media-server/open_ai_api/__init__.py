@@ -66,6 +66,9 @@ SERVICE_ROUTER_MAP: dict[str, list[ServiceRoute]] = {
         ServiceRoute(
             diarization.router, "/v1/audio", "/audio", ["Speaker diarization"]
         ),
+        ServiceRoute(
+            diarization.async_router, "/v1", None, ["Speaker diarization (async)"]
+        ),
         ServiceRoute(media.router, "/v1/media", None, ["Media input"]),
     ],
     ModelServices.VIDEO.value: [

@@ -25,7 +25,17 @@ router = APIRouter()
 # conformance test can assert the union covers the whole official schema and
 # nothing is silently ignored. See https://docs.pyannote.ai/openapi.json.
 IMPLEMENTED_REQUEST_FIELDS = frozenset(
-    {"url", "model", "numSpeakers", "minSpeakers", "maxSpeakers", "exclusive"}
+    {
+        "url",
+        "model",
+        "numSpeakers",
+        "minSpeakers",
+        "maxSpeakers",
+        "exclusive",
+        # async job model (POST /v1/diarize + GET /v1/jobs/{id})
+        "webhook",
+        "webhookStatusOnly",
+    }
 )
 # precision-2-only options: accepted by the parser only to reject them with 400.
 UNSUPPORTED_REQUEST_FIELDS = frozenset(
@@ -34,8 +44,6 @@ UNSUPPORTED_REQUEST_FIELDS = frozenset(
         "turnLevelConfidence",
         "transcription",
         "transcriptionConfig",
-        "webhook",
-        "webhookStatusOnly",
     }
 )
 
@@ -90,18 +98,8 @@ def _reject_precision2_only_options(**options) -> None:
         )
 
 
-async def parse_diarization_request(request: Request) -> DiarizationRequest:
-    """Parse a pyannoteAI-style diarization JSON body into a DiarizationRequest.
-
-    Body matches the pyannoteAI ``DiarizeRequest`` schema
-    (https://docs.pyannote.ai/openapi.json): required ``url`` (http(s):// or
-    media://), optional ``model`` (validated against the served model),
-    ``numSpeakers`` / ``minSpeakers`` / ``maxSpeakers``, and ``exclusive``. The
-    precision-2-only options are rejected. The referenced audio is fetched here
-    and passed to the service as bytes.
-    """
-    from utils.audio_url_resolver import AudioUrlError, resolve_audio_url
-
+async def _read_json_body(request: Request) -> dict:
+    """Require application/json and return the parsed object body."""
     if "application/json" not in request.headers.get("content-type", "").lower():
         raise HTTPException(
             status_code=415,
@@ -110,6 +108,17 @@ async def parse_diarization_request(request: Request) -> DiarizationRequest:
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="request body must be a JSON object")
+    return body
+
+
+async def _build_request_from_body(body: dict) -> DiarizationRequest:
+    """Validate a pyannoteAI DiarizeRequest body and resolve it to a request.
+
+    Validates ``model`` and rejects precision-2-only options, requires ``url``
+    (http(s):// or media://), fetches the audio bytes, and builds the internal
+    DiarizationRequest. See https://docs.pyannote.ai/openapi.json.
+    """
+    from utils.audio_url_resolver import AudioUrlError, resolve_audio_url
 
     _validate_served_model(body.get("model"))
     _reject_precision2_only_options(
@@ -139,6 +148,12 @@ async def parse_diarization_request(request: Request) -> DiarizationRequest:
     )
 
 
+async def parse_diarization_request(request: Request) -> DiarizationRequest:
+    """Parse a pyannoteAI-style diarization JSON body into a DiarizationRequest."""
+    body = await _read_json_body(request)
+    return await _build_request_from_body(body)
+
+
 @router.post("/diarize")
 async def diarize(
     request: DiarizationRequest = Depends(parse_diarization_request),
@@ -151,6 +166,29 @@ async def diarize(
     except Exception as e:  # noqa: BLE001 - surface as HTTP 500 like audio route
         raise HTTPException(status_code=500, detail=str(e))
     return result.to_dict()
+
+
+async def _run_diarization_job(job_id, request, service, webhook, webhook_status_only):
+    """Background worker: run diarization, store the job output, fire webhook."""
+    import asyncio
+
+    from utils.diarization_jobs import get_job_store, post_webhook
+
+    store = get_job_store()
+    store.set_running(job_id)
+    try:
+        result = await service.process_request(request)
+        output = result.to_dict()
+        warning = output.get("warning")
+        store.set_succeeded(job_id, output, warning=warning)
+    except Exception as e:  # noqa: BLE001 - record failure on the job
+        store.set_failed(job_id, str(e))
+
+    if webhook:
+        job = store.get(job_id)
+        if job is not None:
+            payload = job.created_dict() if webhook_status_only else job.job_dict()
+            await asyncio.to_thread(post_webhook, webhook, payload)
 
 
 async def parse_diarized_transcription_request(
@@ -201,3 +239,55 @@ async def diarized_transcriptions(
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
     return result
+
+
+# ---------------------------------------------------------------------------
+# pyannoteAI-native asynchronous job API
+#
+# These live at the pyannoteAI paths (POST /v1/diarize, GET /v1/jobs/{jobId})
+# rather than under /v1/audio, so a pyannoteAI client can switch base URL only.
+# The synchronous /v1/audio/diarize above is kept as a convenience that returns
+# the DiarizationJobOutput directly.
+# ---------------------------------------------------------------------------
+
+async_router = APIRouter()
+
+
+@async_router.post("/diarize", status_code=201)
+async def create_diarization_job(
+    request: Request,
+    service=Depends(service_resolver),
+    api_key: str = Security(get_api_key),
+):
+    """Create an async diarization job; returns pyannoteAI JobCreated (201)."""
+    import asyncio
+
+    from utils.diarization_jobs import get_job_store
+
+    body = await _read_json_body(request)
+    diar_request = await _build_request_from_body(body)
+
+    webhook = body.get("webhook")
+    webhook_status_only = bool(body.get("webhookStatusOnly", False))
+
+    job = get_job_store().create()
+    asyncio.create_task(
+        _run_diarization_job(
+            job.job_id, diar_request, service, webhook, webhook_status_only
+        )
+    )
+    return job.created_dict()
+
+
+@async_router.get("/jobs/{job_id}")
+async def get_diarization_job(
+    job_id: str,
+    api_key: str = Security(get_api_key),
+):
+    """Return the pyannoteAI DiarizationJob for a job id."""
+    from utils.diarization_jobs import get_job_store
+
+    job = get_job_store().get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"job {job_id!r} not found")
+    return job.job_dict()
