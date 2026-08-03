@@ -76,6 +76,25 @@ templates:
         TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_x2_mesh_graph_descriptor.textproto"
   status: COMPLETE
 
+# =============================================================================
+# Speaker diarization templates
+# =============================================================================
+- weights:
+    - pyannote/speaker-diarization-community-1
+  impl: pyannote_diarization
+  min_disk_gb: 15
+  min_ram_gb: 6
+  model_type: DIARIZATION
+  inference_engine: MEDIA
+  device_model_specs:
+    - device: P150
+      max_concurrency: 1
+      max_context: 65536  # 64 * 1024
+      default_impl: true
+      env_vars:
+        TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+  status: COMPLETE
+
 - weights:
     - microsoft/speecht5_tts
   impl: speecht5_tts
