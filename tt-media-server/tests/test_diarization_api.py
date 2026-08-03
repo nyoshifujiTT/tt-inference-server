@@ -64,3 +64,39 @@ def test_diarize_endpoint_default_exclusive_and_no_hints():
     assert resp.status_code == 200, resp.text
     assert fake.last.num_speakers is None
     assert fake.last.exclusive is True
+
+
+def test_diarize_accepts_served_community_1_model():
+    fake = _FakeService()
+    resp = _make_client(fake).post(
+        "/v1/audio/diarize",
+        files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data={"model": "community-1"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["diarization"][0]["speaker"] == "SPEAKER_00"
+
+
+def test_diarize_rejects_precision_2_model():
+    fake = _FakeService()
+    resp = _make_client(fake).post(
+        "/v1/audio/diarize",
+        files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data={"model": "precision-2"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "not served" in resp.json()["detail"]
+    # a rejected request must not reach the service
+    assert fake.last is None
+
+
+def test_diarize_rejects_unknown_model():
+    fake = _FakeService()
+    resp = _make_client(fake).post(
+        "/v1/audio/diarize",
+        files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        data={"model": "totally-made-up"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "unknown diarization model" in resp.json()["detail"]
+    assert fake.last is None

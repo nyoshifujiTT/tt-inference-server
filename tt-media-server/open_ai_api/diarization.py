@@ -20,8 +20,38 @@ from security.api_key_checker import get_api_key
 router = APIRouter()
 
 
+def _validate_served_model(model):
+    """Reject diarization models this server does not serve.
+
+    The pyannoteAI ``DiarizeRequest.model`` enum is ``community-1`` /
+    ``precision-2`` (https://docs.pyannote.ai/openapi.json). This self-hosted
+    server serves ``community-1`` only; anything else (notably the paid
+    ``precision-2``) is rejected with HTTP 400.
+    """
+    from config.constants import PyannoteAiDiarizationModel, SERVED_DIARIZATION_MODEL
+
+    if model is None or model == "":
+        return
+    served = SERVED_DIARIZATION_MODEL.value
+    valid = {m.value for m in PyannoteAiDiarizationModel}
+    if model not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown diarization model {model!r}; valid values are {sorted(valid)}",
+        )
+    if model != served:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"diarization model {model!r} is not served by this server; "
+                f"only {served!r} is available"
+            ),
+        )
+
+
 async def parse_diarization_request(
     file: UploadFile = File(...),
+    model: Optional[str] = Form(None),
     num_speakers: Optional[int] = Form(None, alias="numSpeakers"),
     min_speakers: Optional[int] = Form(None, alias="minSpeakers"),
     max_speakers: Optional[int] = Form(None, alias="maxSpeakers"),
@@ -31,8 +61,10 @@ async def parse_diarization_request(
 
     Speaker-count hints use the pyannoteAI camelCase field names
     (``numSpeakers`` / ``minSpeakers`` / ``maxSpeakers``); see
-    https://docs.pyannote.ai/openapi.json (DiarizeRequest).
+    https://docs.pyannote.ai/openapi.json (DiarizeRequest). ``model`` follows the
+    pyannoteAI enum and is validated against the served model.
     """
+    _validate_served_model(model)
     file_content = await file.read()
     return DiarizationRequest(
         file=file_content,

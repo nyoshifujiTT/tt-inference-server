@@ -158,6 +158,21 @@ class ModelServices(Enum):
     DIARIZATION = "diarization"
 
 
+class PyannoteAiDiarizationModel(str, Enum):
+    """pyannoteAI cloud ``DiarizeRequest.model`` enum values.
+
+    See https://docs.pyannote.ai/openapi.json. ``precision-2`` is the paid cloud
+    model; this self-hosted server serves ``community-1`` only.
+    """
+
+    COMMUNITY_1 = "community-1"
+    PRECISION_2 = "precision-2"
+
+
+# The diarization model this server actually serves.
+SERVED_DIARIZATION_MODEL = PyannoteAiDiarizationModel.COMMUNITY_1
+
+
 MODEL_SERVICE_RUNNER_MAP = {
     ModelServices.IMAGE: {
         ModelRunners.TT_SDXL_EDIT,
