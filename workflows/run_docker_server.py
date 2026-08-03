@@ -262,28 +262,55 @@ def generate_docker_run_command(
             "--mount", f"type=bind,src={repo_root_path}/utils,dst={user_home_path}/app/utils",
             "--mount", f"type=bind,src={repo_root_path}/tests,dst={user_home_path}/app/tests",
         ]
-        if (
-            model_spec.model_type in (
-                ModelType.CNN,
-                ModelType.IMAGE,
-                ModelType.EMBEDDING,
-                ModelType.VIDEO,
-                ModelType.TEXT_TO_SPEECH,
-                ModelType.AUDIO,
-            )
-        ):
+        is_media_type = model_spec.model_type in (
+            ModelType.CNN,
+            ModelType.IMAGE,
+            ModelType.EMBEDDING,
+            ModelType.VIDEO,
+            ModelType.TEXT_TO_SPEECH,
+            ModelType.AUDIO,
+        )
+        is_bge_family = model_spec.hf_model_repo in {
+            "BAAI/bge-m3",
+            "BAAI/bge-reranker-v2-m3",
+        }
+        if is_media_type:
             docker_command += [
                 "--mount", f"type=bind,src={repo_root_path}/tt-media-server,dst={user_home_path}/tt-metal/server",
             ]
-            if model_spec.hf_model_repo in {"BAAI/bge-m3", "BAAI/bge-reranker-v2-m3"}:
-                docker_command += [
-                    "--mount", f"type=bind,src={repo_root_path}/vllm-tt-metal/src,dst={user_home_path}/app/src",
-                    "--mount", "type=bind,src=/home/ubuntu/worktrees/tt-metal-bgm-reranker-p150x1/models/demos/wormhole/bge_m3,dst=/home/container_app_user/tt-metal/models/demos/wormhole/bge_m3,readonly",
-                ]
-        else:
+        # The vLLM plugin source is needed for the VLLM engine path and for the
+        # BGE family (bge-m3 shares it even under the media engine).
+        if not is_media_type or is_bge_family:
             docker_command += [
                 "--mount", f"type=bind,src={repo_root_path}/vllm-tt-metal/src,dst={user_home_path}/app/src",
             ]
+        # The BGE family (bge-m3 embedding backbone and the bge-reranker-v2-m3
+        # cross-encoder) is not baked into any published image, so in dev-mode
+        # its model code must be supplied from a local tt-metal checkout given
+        # via --tt-metal-home. Bind-mount it at the standard container paths,
+        # covering both the shared bge_m3 backbone and the reranker package
+        # (which lives at demos/ root after moving out of wormhole/). This is
+        # gated on the model, not model_type, so the reranker (an LLM) is
+        # covered too. No implicit machine-specific fallback path.
+        if is_bge_family:
+            if not runtime_config.tt_metal_home:
+                raise ValueError(
+                    f"{model_spec.hf_model_repo} is not included in any published "
+                    "image; its model code must be supplied from a local tt-metal "
+                    "checkout. Re-run with --dev-mode and --tt-metal-home "
+                    "<path-to-tt-metal>."
+                )
+            tt_metal_home = Path(runtime_config.tt_metal_home).expanduser()
+            container_tt_metal = f"{user_home_path}/tt-metal"
+            bge_model_dirs = ["models/demos/wormhole/bge_m3"]
+            if model_spec.hf_model_repo == "BAAI/bge-reranker-v2-m3":
+                bge_model_dirs.append("models/demos/bge_reranker_v2_m3")
+            for model_dir in bge_model_dirs:
+                docker_command += [
+                    "--mount",
+                    f"type=bind,src={tt_metal_home / model_dir},"
+                    f"dst={container_tt_metal}/{model_dir},readonly",
+                ]
         # fmt: on
 
     for key, value in docker_env_vars.items():
