@@ -391,6 +391,57 @@ templates:
         trace_region_size: 268435456
         l1_small_size: 24576
         sample_on_device_mode: decode_only
+    # QB2's 4 Blackhole chips (4x p150a) also run as a P150x4 (1,4) mesh. This
+    # device_model_spec targets bare p150x4 hosts (--tt-device p150x4). The custom
+    # p300_x2 descriptor lays TP collectives over the wrong fabric links and corrupts
+    # decode logits (see Gemma4 note); omitting TT_MESH_GRAPH_DESC_PATH selects the
+    # default p150_x4 descriptor from MESH_DEVICE, which is correct. on-device sampling
+    # is omitted to stay compatible with the pinned tt-metal c49bb76 (qwen36 lacks it).
+    - device: P150X4
+      max_concurrency: 1
+      max_context: 262144
+      default_impl: true
+      env_vars:
+        TT_QWEN35_TEXT_VER: qwen36_blackhole
+        HF_MODEL: Qwen/Qwen3.6-27B
+        MESH_DEVICE: "P150x4"
+      vllm_args:
+        async_scheduling: true
+        enable_auto_tool_choice: true
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+      override_tt_config:
+        fabric_config: FABRIC_1D
+        trace_region_size: 268435456
+        l1_small_size: 24576
+        trace_mode: none
+    # p150x8 (8x p150a) hosts run Qwen3.6-27B as 2 data-parallel replicas, each a
+    # TP=4 P150x4 (1,4) sub-mesh. qwen36_blackhole cannot tensor-parallelise across
+    # 8 chips (num_key_value_heads=4 < 8, so TP=8 would need GQA KV replication that
+    # this impl does not implement); DP=2 x TP=4 reuses the proven p150x4 config
+    # unchanged and doubles throughput. data_parallel_size=2 makes the launcher set
+    # MESH_DEVICE to the P150x4 subdevice per engine rank (default p150_x4 mesh graph
+    # descriptor), so no per-rank mesh override is needed.
+    - device: P150X8
+      max_concurrency: 2  # 1 per DP rank * 2 ranks
+      max_context: 262144
+      default_impl: true
+      env_vars:
+        TT_QWEN35_TEXT_VER: qwen36_blackhole
+        HF_MODEL: Qwen/Qwen3.6-27B
+        MESH_DEVICE: "(2, 4)"
+        TT_METAL_OPERATION_TIMEOUT_SECONDS: "0.0"  # disable inf-server 5s op watchdog (tt-metal native default = no timeout); replaces --disable-metal-timeout
+      vllm_args:
+        data_parallel_size: 2
+        async_scheduling: true
+        enable_auto_tool_choice: true
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+      override_tt_config:
+        fabric_config: FABRIC_1D
+        trace_region_size: 268435456
+        l1_small_size: 24576
+        trace_mode: all
   status: EXPERIMENTAL
   has_builtin_warmup: true
   metadata:
