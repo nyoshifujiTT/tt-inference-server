@@ -489,33 +489,20 @@ curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
 
 # Speaker diarization test call
 
-Available when `MODEL_SERVICE=diarization`. Speaker diarization answers "who
-spoke when": it returns speaker turns only (no transcript). The request/response
-schema follows the **pyannoteAI cloud diarization API** — request fields match
-[`DiarizeRequest`](https://docs.pyannote.ai/api-reference/diarize) and the
-response matches [`DiarizationJobOutput`](https://docs.pyannote.ai/api-reference/get-job)
-/ `DiarizationSegment` (machine-readable spec:
-https://docs.pyannote.ai/openapi.json) — so a client can switch base URL only.
-The one intentional difference: pyannoteAI is asynchronous and takes the audio
-as a `url` (or `media://`) creating a job you poll via `GET /v1/jobs/{jobId}`,
-whereas this endpoint is synchronous and takes the audio as a `multipart/form-data`
-file upload (OpenAI-audio style), returning the `DiarizationJobOutput` body
-directly. The `tests/test_diarization_pyannoteai_schema_conformance.py` test
-fetches the official OpenAPI spec live on every run and fails if these fields
-drift. The diarization neural nets
-(`pyannote/speaker-diarization-community-1`) run on the Tenstorrent device; set
-`PREPROCESSING_MODEL_WEIGHTS_PATH` to the local community-1 weights and
-`DIARIZATION_TT_DEVICE_ID=0` (optionally `DIARIZATION_TT_SEGMENTATION=1` to run
-both neural nets on device).
+Available when `MODEL_SERVICE=diarization`. Speaker diarization answers "who spoke when": it returns speaker turns only (no transcript). The request/response schema follows the **pyannoteAI cloud diarization API** — the request matches [`DiarizeRequest`](https://docs.pyannote.ai/api-reference/diarize) and the response matches [`DiarizationJobOutput`](https://docs.pyannote.ai/api-reference/get-job) / `DiarizationSegment` (machine-readable spec: https://docs.pyannote.ai/openapi.json) — so a pyannoteAI client can switch base URL only. The `tests/test_diarization_pyannoteai_schema_conformance.py` test fetches the official OpenAPI spec live on every run and fails if these fields drift. The diarization neural nets (`pyannote/speaker-diarization-community-1`) run on the Tenstorrent device; set `PREPROCESSING_MODEL_WEIGHTS_PATH` to the local community-1 weights and `DIARIZATION_TT_DEVICE_ID=0` (optionally `DIARIZATION_TT_SEGMENTATION=1` to run both neural nets on device).
+
+There are two ways to call it: a synchronous convenience endpoint that returns the result directly, and the pyannoteAI-native asynchronous job API (below).
 
 **Endpoint:** `POST /v1/audio/diarize` (legacy: `POST /audio/diarize`)
-**Content-Type:** `multipart/form-data`
+**Content-Type:** `application/json`
+
+The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url` (a public `http(s)://` URL, or a `media://<object-key>` staged via the media API — see below); there is no multipart file field, matching pyannoteAI.
 
 ## Request parameters
 
 | Parameter      | Required | Description |
 |----------------|----------|-------------|
-| `file`         | Yes      | Audio file upload (WAV/MP3, OpenAI-audio style). Local synchronous substitute for the pyannoteAI `url`/`media://` input. |
+| `url`          | Yes      | Audio location: `http(s)://…` or `media://<object-key>`. |
 | `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
 | `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
 | `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |
@@ -524,8 +511,8 @@ both neural nets on device).
 ```bash
 curl -X POST 'http://127.0.0.1:8000/v1/audio/diarize' \
   -H 'Authorization: Bearer your-secret-key' \
-  -F 'file=@/path/to/audio.wav' \
-  -F 'exclusive=true'
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com/audio.wav", "exclusive": true}'
 ```
 
 Response (pyannoteAI `DiarizationJobOutput`; `exclusiveDiarization` present when `exclusive=true`):
@@ -545,34 +532,17 @@ Response (pyannoteAI `DiarizationJobOutput`; `exclusiveDiarization` present when
 
 ## Model and unsupported options
 
-`model` follows the pyannoteAI `DiarizeRequest.model` enum. This server serves
-**`community-1`** only; `model=precision-2` (the paid cloud model) or any unknown
-value is rejected with HTTP 400.
+`model` follows the pyannoteAI `DiarizeRequest.model` enum. This server serves **`community-1`** only; `model=precision-2` (the paid cloud model) or any unknown value is rejected with HTTP 400.
 
-The following pyannoteAI options are **precision-2-only** and cannot be produced
-by community-1, so requesting them returns HTTP 400 (they are never silently
-ignored): `confidence`, `turnLevelConfidence`, `transcription`,
-`transcriptionConfig`. Correspondingly, the precision-2-only response fields
-(`confidence`, `wordLevelTranscription`, `turnLevelTranscription`) are never
-emitted. See https://docs.pyannote.ai/openapi.json.
+The following pyannoteAI options are **precision-2-only** and cannot be produced by community-1, so requesting them returns HTTP 400 (they are never silently ignored): `confidence`, `turnLevelConfidence`, `transcription`, `transcriptionConfig`. Correspondingly, the precision-2-only response fields (`confidence`, `wordLevelTranscription`, `turnLevelTranscription`) are never emitted. See https://docs.pyannote.ai/openapi.json.
 
 ## Asynchronous job API (pyannoteAI-native)
 
-In addition to the synchronous `POST /v1/audio/diarize` above, the server
-exposes the pyannoteAI-native asynchronous flow so a pyannoteAI client can
-switch base URL only:
+In addition to the synchronous `POST /v1/audio/diarize` above, the server exposes the pyannoteAI-native asynchronous flow so a pyannoteAI client can switch base URL only:
 
-- `POST /v1/diarize` — create a job. Body is the pyannoteAI `DiarizeRequest`
-  (`url` + optional `numSpeakers`/`minSpeakers`/`maxSpeakers`/`exclusive`/`model`
-  and `webhook`/`webhookStatusOnly`). Returns `201` with `JobCreated`
-  (`{jobId, status}`).
-- `GET /v1/jobs/{jobId}` — returns the `DiarizationJob`
-  (`{jobId, status, createdAt, updatedAt, output}`); `output` is the
-  `DiarizationJobOutput` once `status` is `succeeded`. Status values are the
-  pyannoteAI enum `created|running|succeeded|failed|canceled`.
-- `webhook` / `webhookStatusOnly` — when `webhook` is set, the job payload is
-  POSTed to that URL on completion (`webhookStatusOnly=true` sends only
-  `{jobId, status}`).
+- `POST /v1/diarize` — create a job. Body is the pyannoteAI `DiarizeRequest` (`url` plus optional `numSpeakers`/`minSpeakers`/`maxSpeakers`/`exclusive`/`model` and `webhook`/`webhookStatusOnly`). Returns `201` with `JobCreated` (`{jobId, status}`).
+- `GET /v1/jobs/{jobId}` — returns the `DiarizationJob` (`{jobId, status, createdAt, updatedAt, output}`); `output` is the `DiarizationJobOutput` once `status` is `succeeded`. Status values are the pyannoteAI enum `created|running|succeeded|failed|canceled`.
+- `webhook` / `webhookStatusOnly` — when `webhook` is set, the job payload is POSTed to that URL on completion (`webhookStatusOnly=true` sends only `{jobId, status}`).
 
 ```bash
 # 1. stage a private file (optional; or pass a public https url)
@@ -593,30 +563,21 @@ curl -s http://127.0.0.1:8000/v1/jobs/$JOB -H 'Authorization: Bearer your-secret
 
 ## Media input (staging private files)
 
-`POST /v1/media/input` with `{"url":"media://<object-key>"}` returns a PUT url;
-`PUT` the file bytes there, then pass `media://<object-key>` as the diarize
-`url`. This mirrors the pyannoteAI temporary media storage
-(https://docs.pyannote.ai/api-reference/upload-media). Objects expire after
-`MEDIA_INPUT_RETENTION_SECONDS` (default 24h); storage dir is
-`MEDIA_INPUT_DIR` (default `/tmp/tt_media_input`).
+`POST /v1/media/input` with `{"url":"media://<object-key>"}` returns a PUT url; `PUT` the file bytes there, then pass `media://<object-key>` as the diarize `url`. This mirrors the pyannoteAI temporary media storage (https://docs.pyannote.ai/api-reference/upload-media). Objects expire after `MEDIA_INPUT_RETENTION_SECONDS` (default 24h); the storage dir is `MEDIA_INPUT_DIR` (default `/tmp/tt_media_input`).
+
 
 
 # Speaker-diarized transcription test call
 
-Available when `MODEL_SERVICE=diarization` and an ASR endpoint is configured via
-`ASR_URL`. This runs diarization on this service, then transcribes each speaker
-turn with the ASR model, returning an OpenAI `diarized_json`-style result.
+Available when `MODEL_SERVICE=diarization` and an ASR endpoint is configured via `ASR_URL`. This runs diarization on this service, then transcribes each speaker turn with the ASR model, returning an OpenAI `diarized_json`-style result.
 
 **Endpoint:** `POST /v1/audio/diarized-transcriptions` (legacy: `POST /audio/diarized-transcriptions`)
 **Content-Type:** `multipart/form-data`
 
-The single OpenAI `model` field carries **both** models, using a `+` separator
-as an explicit extension of the OpenAI `model` field (first part = ASR model,
-second = diarization model):
+The single OpenAI `model` field carries **both** models, using a `+` separator as an explicit extension of the OpenAI `model` field (first part = ASR model, second = diarization model):
 
 - `model="<asr_model>"` — ASR only.
-- `model="<asr_model>+<diarization_model>"` — diarized transcription, e.g.
-  `model="neosophie/Qwen3-ASR-1.7B-JA+pyannote/speaker-diarization-community-1"`.
+- `model="<asr_model>+<diarization_model>"` — diarized transcription, e.g. `model="neosophie/Qwen3-ASR-1.7B-JA+pyannote/speaker-diarization-community-1"`.
 
 ## Request parameters
 
