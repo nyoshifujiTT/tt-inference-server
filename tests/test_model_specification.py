@@ -620,6 +620,14 @@ class TestModelSpecsStructure:
             # Measured p150 batched-serving sweet spot is preserved.
             assert dms.max_concurrency == 4
             assert dms.vllm_args.get("max_num_seqs") == "4"
+            # Fast decode path is the default: decode_only tracing, and the old
+            # belt-and-suspenders TT_METAL_TRACE_REGION_SIZE=0 (which pinned an
+            # unusable 0-size trace region) is gone so the decode trace can be
+            # captured.
+            assert "TT_METAL_TRACE_REGION_SIZE" not in env
+            add_cfg = dms.vllm_args.get("additional-config", "")
+            assert '"trace_mode": "decode_only"' in add_cfg
+            assert "none" not in add_cfg
 
 
 if __name__ == "__main__":

@@ -3169,18 +3169,19 @@ audio_tts_templates = [
                     # required.
                     "HF_HUB_OFFLINE": "1",
                     "TRANSFORMERS_OFFLINE": "1",
-                    # Stability: the tt-metal decode ND-hang is aggravated by the
-                    # decode trace; disable tracing for this adapter (see worklog).
-                    "TT_METAL_TRACE_REGION_SIZE": "0",
                 },
-                # Belt-and-suspenders trace disable. The adapter itself now
-                # defaults to UNTRACED decode (see generator_vllm.py: DECODE_TRACE,
-                # env QWEN3ASR_DECODE_TRACE, default off) so decode never traces
-                # even under the plugin's default trace_mode='all'. We still pass
-                # trace_mode=none here so the plugin skips prefill/decode trace
-                # capture entirely, matching the upstream standalone server that
-                # deliberately runs the long-lived service without a decode trace.
-                vllm_args={"additional-config": '{"tt": {"trace_mode": "none"}}'},
+                # Serve the fast decode path: decode_only tracing (prefill stays
+                # untraced -- every request runs the audio encoder, whose dynamic
+                # device allocations cannot be captured). The adapter also defaults
+                # QWEN3ASR_DECODE_TRACE=1 (see generator_vllm.py), so the decode
+                # trace is captured up front at warmup. On the original board
+                # (10.160.20.103) a reused decode trace wedged the service within
+                # ~9-26 requests, which is why this used to pin trace_mode=none;
+                # that hang was board-specific -- on the delivery p150 decode trace
+                # ON sustained conc=4 soaks of 900 requests with zero wedges. The
+                # plugin's default 50 MB trace region is sufficient for the decode
+                # trace, so no trace_region_size override is needed here.
+                vllm_args={"additional-config": '{"tt": {"trace_mode": "decode_only"}}'},
             ),
         ],
         status=ModelStatusTypes.EXPERIMENTAL,
