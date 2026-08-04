@@ -3,13 +3,16 @@
 #
 # Qwen3-ASR server supervisor for TT p150.
 #
-# The tt-metal decode path has a known non-deterministic device hang (see
-# worklog / tt-metal #40592, #45052, #4752) that can wedge the board under
-# sustained load. This supervisor makes the ASR server survive it in production:
-# it (re)launches the standard run.py --local-server, watches liveness with a
-# lightweight canary transcription, and on a wedge recovers the device
-# (tt-smi -r, then ipmitool power cycle as a fallback) and relaunches -- the same
-# pattern used for the Qwen3-Embedding fullbench supervisor on this hardware.
+# The tt-metal decode path has a non-deterministic device hang (see worklog /
+# tt-metal #40592, #45052, #4752). It was reproducible on the original board
+# (10.160.20.103) but has NOT reproduced on the delivery p150 across 900-request
+# decode-trace-on soaks, so it no longer gates the default (see
+# scripts/qwen3_asr/README.md). This supervisor is kept as defense-in-depth so
+# the ASR server survives any residual wedge in production: it (re)launches the
+# standard run.py --local-server, watches liveness with a lightweight canary
+# transcription, and on a wedge recovers the device (tt-smi -r, then ipmitool
+# power cycle as a fallback) and relaunches -- the same pattern used for the
+# Qwen3-Embedding fullbench supervisor on this hardware.
 #
 # Usage: asr_supervisor.sh [PORT]
 set -u
