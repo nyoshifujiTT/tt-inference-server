@@ -638,3 +638,29 @@ class TestBgeRerankerCanonicalImpl:
         legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
         canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
         assert legacy.tt_metal_commit == canonical.tt_metal_commit
+
+    def test_impls_are_distinguished_by_their_vllm_commit(self):
+        # The two impls share the tt-metal device model but not the serving
+        # stack: legacy pins the in-tree fork, canonical pins the standalone
+        # plugin branch. If these ever collapsed to one value, both impls would
+        # resolve to the SAME generated image tag
+        # (VERSION-{tt_metal}-{vllm}) and "testing the canonical path" would
+        # silently exercise the legacy image instead.
+        legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
+        canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
+        assert legacy.vllm_commit != canonical.vllm_commit
+
+    def test_each_impl_resolves_to_its_own_docker_image_tag(self):
+        # docker_image is left unset in the spec so it is derived from
+        # (VERSION, tt_metal_commit, vllm_commit). Assert the derivation
+        # actually yields two distinct tags, and that each tag embeds the
+        # commits it was built from -- that is what makes an image traceable to
+        # a revision, and why bind-mounting sources over a pre-built image is
+        # never an acceptable substitute for rebuilding it.
+        legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
+        canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
+
+        assert legacy.docker_image != canonical.docker_image
+        for spec in (legacy, canonical):
+            assert spec.tt_metal_commit in spec.docker_image
+            assert spec.vllm_commit in spec.docker_image
