@@ -1118,5 +1118,84 @@ class TestUtilityFunctions:
         mock_ensure_dir.assert_called_once_with(mock_log_dir)
 
 
+class TestBgeModelCodeComesFromTheImage:
+    """The BGE family lives in tt-metal, so an image built from a tt-metal
+    commit that carries it already contains the model code. Serving must use
+    that baked-in code by default; overlaying a local checkout is opt-in and
+    only for local iteration."""
+
+    def _make_bge_spec(self):
+        spec = MagicMock()
+        spec.model_id = "id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"
+        spec.model_name = "bge-reranker-v2-m3"
+        spec.device_type = "p150"
+        spec.docker_image = "test:reranker-image"
+        spec.impl.impl_name = "tt-vllm-plugin-canonical"
+        spec.impl.impl_id = "tt_vllm_plugin_canonical"
+        spec.hf_model_repo = "BAAI/bge-reranker-v2-m3"
+        spec.subdevice_type = None
+        spec.inference_engine = "vLLM"
+        return spec
+
+    def _run(self, runtime_config, mock_setup_config):
+        with patch(
+            "workflows.run_docker_server.get_repo_root_path", return_value=Path("/tmp")
+        ), patch("workflows.run_docker_server.DeviceTypes"), patch(
+            "workflows.run_docker_server.short_uuid", return_value="test123"
+        ):
+            docker_command, _ = generate_docker_run_command(
+                self._make_bge_spec(),
+                runtime_config,
+                mock_setup_config,
+                Path("/tmp/test-model-spec.json"),
+            )
+        return docker_command
+
+    def _model_code_mounts(self, docker_command):
+        return [
+            arg
+            for arg in docker_command
+            if "dst=" in str(arg)
+            and "/tt-metal/models/demos/" in str(arg)
+        ]
+
+    def test_dev_mode_without_tt_metal_home_is_allowed_and_mounts_no_model_code(
+        self, mock_setup_config
+    ):
+        # Previously this raised ValueError("... is not included in any published
+        # image ..."), which forced every dev-mode run to overlay model sources.
+        # That premise is false: the image bakes in the whole tt-metal tree.
+        runtime_config = RuntimeConfig(
+            model="bge-reranker-v2-m3",
+            workflow="server",
+            device="p150",
+            service_port="8000",
+        )
+        runtime_config.dev_mode = True
+        runtime_config.tt_metal_home = None
+
+        docker_command = self._run(runtime_config, mock_setup_config)
+
+        assert self._model_code_mounts(docker_command) == []
+
+    def test_tt_metal_home_opt_in_overlays_backbone_and_reranker(
+        self, mock_setup_config
+    ):
+        runtime_config = RuntimeConfig(
+            model="bge-reranker-v2-m3",
+            workflow="server",
+            device="p150",
+            service_port="8000",
+        )
+        runtime_config.dev_mode = True
+        runtime_config.tt_metal_home = "/srv/tt-metal"
+
+        mounts = self._model_code_mounts(self._run(runtime_config, mock_setup_config))
+
+        assert any("models/demos/wormhole/bge_m3" in m for m in mounts)
+        assert any("models/demos/bge_reranker_v2_m3" in m for m in mounts)
+        assert all("readonly" in m for m in mounts)
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

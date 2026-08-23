@@ -285,22 +285,28 @@ def generate_docker_run_command(
                 "--mount", f"type=bind,src={repo_root_path}/vllm-tt-metal/src,dst={user_home_path}/app/src",
             ]
         # The BGE family (bge-m3 embedding backbone and the bge-reranker-v2-m3
-        # cross-encoder) is not baked into any published image, so in dev-mode
-        # its model code must be supplied from a local tt-metal checkout given
-        # via --tt-metal-home. Bind-mount it at the standard container paths,
-        # covering both the shared bge_m3 backbone and the reranker package
-        # (which lives at demos/ root after moving out of wormhole/). This is
-        # gated on the model, not model_type, so the reranker (an LLM) is
-        # covered too. No implicit machine-specific fallback path.
-        if is_bge_family:
-            if not runtime_config.tt_metal_home:
-                raise ValueError(
-                    f"{model_spec.hf_model_repo} is not included in any published "
-                    "image; its model code must be supplied from a local tt-metal "
-                    "checkout. Re-run with --dev-mode and --tt-metal-home "
-                    "<path-to-tt-metal>."
-                )
+        # cross-encoder) lives in tt-metal, so it is present in any image built
+        # from a tt-metal commit that carries it -- the image bakes in the whole
+        # tt-metal tree. Prefer that baked-in code: it is the revision the image
+        # tag names, and the only thing an image tag can honestly attest to.
+        #
+        # Overlaying model sources from a local checkout is therefore OPT-IN
+        # (--tt-metal-home) and is strictly a local iteration aid: it mixes model
+        # code from one revision with a C++ runtime and Python packages built
+        # from another, so results obtained that way say nothing about the image
+        # being shipped. Never use it to validate a release candidate; rebuild
+        # the image at the commit under test instead
+        # (scripts/build_docker_images.py --build-metal-commit <sha>).
+        if is_bge_family and runtime_config.tt_metal_home:
             tt_metal_home = Path(runtime_config.tt_metal_home).expanduser()
+            logger.warning(
+                "Overlaying %s model code from --tt-metal-home=%s onto image %s. "
+                "The image's own (baked-in) model code is being shadowed, so this "
+                "run does NOT validate that image. Use it for local iteration only.",
+                model_spec.hf_model_repo,
+                tt_metal_home,
+                model_spec.docker_image,
+            )
             container_tt_metal = f"{user_home_path}/tt-metal"
             bge_model_dirs = ["models/demos/wormhole/bge_m3"]
             if model_spec.hf_model_repo == "BAAI/bge-reranker-v2-m3":
