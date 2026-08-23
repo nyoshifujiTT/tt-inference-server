@@ -134,7 +134,7 @@ See [Host Storage Options](../workflows/README.md#host-storage-options) in the w
 
 | Option                   | Description                                                                                      |
 |--------------------------|--------------------------------------------------------------------------------------------------|
-| `--dev-mode`             | Enable developer mode: bind mounts source code into Docker container for live editing.          |
+| `--dev-mode`             | Enable developer mode: bind mounts source code into Docker container for live editing. Local iteration only -- a run with overlaid sources does not validate the image (see note below). |
 | `--override-docker-image`| Override the Docker image used by `--docker-server`.                                            |
 | `--device-id`            | Tenstorrent device IDs, comma-separated PCI indices (e.g. `0` or `0,1,2`).                    |
 | `--override-tt-config`   | Override TT config as JSON string (e.g., `'{"data_parallel": 16}'`).                          |
@@ -180,6 +180,19 @@ Add `--dev-mode` to bind mount source code into the container for live editing:
 ```bash
 python3 run.py --model Llama-3.2-1B-Instruct --tt-device n300 --workflow server --docker-server --dev-mode
 ```
+
+> **`--dev-mode` is for local iteration, not for validation.** Overlaid sources
+> shadow the code baked into the image, so the container ends up running model or
+> application code from one revision against a C++ runtime and Python packages
+> built from another. A green result then says nothing about the image, and the
+> image tag no longer describes what actually ran. To validate a commit, build an
+> image at that commit and run **without** `--dev-mode`:
+>
+> ```bash
+> python3 scripts/build_docker_images.py --build-metal-commit <tt-metal-sha>
+> python3 run.py --model <model> --workflow server --docker-server \
+>   --override-docker-image <tag-printed-by-the-build>
+> ```
 
 Use `--print-docker-cmd` to inspect the generated Docker command without starting the server:
 
