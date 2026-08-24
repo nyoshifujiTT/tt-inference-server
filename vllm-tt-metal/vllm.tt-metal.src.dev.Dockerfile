@@ -96,12 +96,20 @@ RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${
 # to `raise RuntimeError("Unknown runtime environment")` in get_vllm_version().
 # "tt" remains the correct *runtime* platform value (the TT platform is supplied
 # by the plugin), so the ENV above is intentionally left as-is.
+# The fork-bundled plugins/vllm-tt-plugin must be installed right after vLLM:
+# it owns the "vllm.platform_plugins" entry point that registers the tt
+# platform. Without it the server dies at startup with
+# "RuntimeError: Failed to infer device type". It is installed after (not with)
+# vLLM on purpose - the plugin deliberately does not declare vllm as a
+# dependency, so that resolution can never swap the locally built empty-target
+# vLLM for the CUDA wheel on PyPI.
 RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm.git ${vllm_dir} \
     && cd ${vllm_dir} \
     && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
     && source ${PYTHON_ENV_DIR}/bin/activate \
     && uv pip install --upgrade pip \
     && VLLM_TARGET_DEVICE=empty uv pip install --index-strategy unsafe-best-match -e . --extra-index-url https://download.pytorch.org/whl/cpu \
+    && uv pip install --index-strategy unsafe-best-match -e plugins/vllm-tt-plugin --extra-index-url https://download.pytorch.org/whl/cpu \
     && rm -rf ${vllm_dir}/.git"
 
 # Build tt-smi in separate venv to avoid conflicts with tt-metal venv
