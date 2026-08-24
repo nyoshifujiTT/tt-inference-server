@@ -258,9 +258,11 @@ def parse_arguments():
         "--vllm-dir",
         type=str,
         default=os.getenv("vllm_dir"),
-        help="[for --local-server] Host path to the vLLM source tree to export as vllm_dir "
-        "and append to PYTHONPATH. Defaults to vllm_dir from the environment when set, "
-        "otherwise tt-metal-home/vllm.",
+        help="[DEPRECATED, ignored] Formerly the host path to a vLLM source tree, exported "
+        "as vllm_dir and appended to PYTHONPATH. vLLM is now an ordinary installed package "
+        "in the tt-metal venv and the TT platform comes from the separately installed "
+        "vllm-tt-plugin, so no source tree is needed. Accepted for backwards compatibility; "
+        "will be removed in a future release.",
     )
     parser.add_argument(
         "--limit-samples-mode",
@@ -275,6 +277,15 @@ def parse_arguments():
         "Accepts a JSON string '{\"task_name\": [int, ...]}' or a path to a JSON file. "
         "Indices are zero-based. Mutually exclusive with --limit-samples-mode. "
         "Text/LLM evals only.",
+    )
+    parser.add_argument(
+        "--repeat-evals",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run --workflow evals N times, keeping each run's report under "
+        "run_NN/ and writing an aggregated summary/ (reuses the workflow engine's "
+        "--repeat). Default 1 (no summary).",
     )
     parser.add_argument(
         "--skip-system-sw-validation",
@@ -465,6 +476,85 @@ def parse_arguments():
         "--model's HF repo, then run_stack.sh's built-in default.",
     )
 
+    agentic_group = parser.add_argument_group(
+        "Agentic evals",
+        "Arguments for --workflow agentic (accuracy evals: tau3 / terminal-bench / "
+        "swe-bench), routed to the workflow engine",
+    )
+    agentic_group.add_argument(
+        "--agentic-benchmark",
+        type=str,
+        default=None,
+        help="Comma-separated agentic benchmark(s) to run under --workflow agentic. "
+        "Aliases: tau3 (tau3_bench_*), tb2.0 (terminal_bench_2), tb2.1 "
+        "(terminal_bench_2_1), swebench (swe_bench_*). Raw task names are also "
+        "accepted. When unset (or 'all'), runs every EVALS_AGENTIC task configured "
+        "for the model.",
+    )
+
+    agentic_traces_group = parser.add_argument_group(
+        "Agentic-traces benchmark",
+        "Arguments for --workflow agentic_traces, and --workflow release "
+        "--agentic-traces (routed to the workflow engine)",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces",
+        action="store_true",
+        help="Add the agentic trace replay to --workflow release, as a child alongside "
+        "evals/benchmarks/spec_tests, so its Blocks land in the same release report. "
+        "Opt-in because a full-mode run adds roughly an hour of profiling per "
+        "configured run on top of the rest of the release. Requires --workflow release; "
+        "use --workflow agentic_traces to run it on its own.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-mode",
+        type=str,
+        choices=["full", "ci"],
+        default="full",
+        help="Duration profile for the agentic-traces runs (default: full). 'full' is "
+        "the reference run used for reportable numbers; 'ci' is the shortest run the "
+        "InferenceX scenario permits (900s of profiling). Per-mode durations come from "
+        "the model's entry in reference_config/agentic_traces/.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-sources",
+        type=str,
+        default=None,
+        help="Comma-separated trace sources to run (inferencex_agentx, swarmone). When "
+        "unset, runs every configured source except opt-in ones. swarmone is opt-in: "
+        "it replays SwarmOne swo-bench scenarios and needs a SwarmOne license "
+        "(SWO_LICENSE_KEY or ~/.swarmone/license.key), so name it explicitly to run it.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-duration",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Override the mode's profiling duration. The InferenceX scenario rejects "
+        "anything below 900s.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-git-ref",
+        type=str,
+        default=None,
+        metavar="REF",
+        help="Override the InferenceX revision cloned into the AGENTIC_TRACES venv. "
+        "Defaults to the ref pinned for the ModelSpec; results are only comparable "
+        "across runs on the same ref.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-metrics-url",
+        type=str,
+        action="append",
+        default=None,
+        metavar="URL",
+        help="Extra Prometheus /metrics endpoint holding the prefix-cache counters, "
+        "for a deployment whose load target does not expose them (e.g. the "
+        "cpp_server worker(s) behind a Dynamo frontend). AIPerf scrapes the load "
+        "target regardless. Accepts a URL, host:port, or host:port/metrics; "
+        "repeatable.",
+    )
+
     prefix_cache_group = parser.add_argument_group(
         "Prefix-cache benchmark",
         "Arguments for --workflow benchmarks --prefix-cache (routed to the workflow engine)",
@@ -626,8 +716,12 @@ def parse_arguments():
         args.device = infer_default_device(args.model, args.engine)
     args.tt_device = args.device
 
-    if not args.vllm_dir and args.tt_metal_home:
-        args.vllm_dir = str(Path(args.tt_metal_home).expanduser() / "vllm")
+    if args.vllm_dir:
+        logger.warning(
+            "--vllm-dir (or the vllm_dir env var) is deprecated and ignored: vLLM is "
+            "installed into the tt-metal venv as an ordinary package and the TT platform "
+            "is provided by vllm-tt-plugin, so no vLLM source tree is used."
+        )
 
     # indirectly set additional flags for CI-mode
     if args.ci_mode:
@@ -663,6 +757,56 @@ def parse_arguments():
             f"(got --workflow {args.workflow})."
         )
 
+    if args.agentic_benchmark and args.workflow != "agentic":
+        parser.error(
+            "--agentic-benchmark selects which agentic eval(s) to run and requires "
+            f"--workflow agentic (got --workflow {args.workflow})."
+        )
+
+    if args.repeat_evals is not None and args.repeat_evals < 1:
+        parser.error(
+            f"--repeat-evals must be a positive integer (got {args.repeat_evals})."
+        )
+
+    if args.repeat_evals and args.repeat_evals > 1 and args.workflow != "evals":
+        parser.error(
+            "--repeat-evals applies to --workflow evals "
+            f"(got --workflow {args.workflow})."
+        )
+
+    if args.agentic_traces and args.workflow != "release":
+        parser.error(
+            "--agentic-traces adds the trace replay to a release run and requires "
+            "--workflow release; run it on its own with --workflow agentic_traces "
+            f"(got --workflow {args.workflow})."
+        )
+
+    runs_agentic_traces = args.workflow == "agentic_traces" or args.agentic_traces
+    agentic_traces_overrides = (
+        args.agentic_traces_sources,
+        args.agentic_traces_duration,
+        args.agentic_traces_git_ref,
+        args.agentic_traces_metrics_url,
+    )
+    if any(f is not None for f in agentic_traces_overrides) and not runs_agentic_traces:
+        parser.error(
+            "--agentic-traces-* flags require --workflow agentic_traces or "
+            "--workflow release --agentic-traces "
+            f"(got --workflow {args.workflow})."
+        )
+
+    if args.agentic_traces_duration is not None:
+        from reference_config.agentic_traces.agentic_traces_config import (
+            AGENTIC_TRACES_MIN_PROFILE_SECONDS,
+        )
+
+        if args.agentic_traces_duration < AGENTIC_TRACES_MIN_PROFILE_SECONDS:
+            parser.error(
+                "--agentic-traces-duration must be at least "
+                f"{AGENTIC_TRACES_MIN_PROFILE_SECONDS}s (the InferenceX "
+                f"scenario's floor), got {args.agentic_traces_duration}s."
+            )
+
     # Dev specs don't pin a docker image (they're built/published out of band),
     # so dev-mode has no image to run in a container — require an explicit one.
     if args.dev_mode and args.docker_server and not args.override_docker_image:
@@ -689,6 +833,9 @@ def handle_secrets(runtime_config):
     # HF_TOKEN is optional for client-side scripts workflows. These run
     # against an inference server (local, docker, or external via
     # --server-url) and don't need to load HF weights/tokenizers themselves.
+    # AGENTIC_TRACES is deliberately absent despite being client-side: its
+    # SemiAnalysis Weka trace datasets are gated on the Hub, so the client
+    # itself needs a token to fetch them.
     client_side_workflows = {
         WorkflowType.BENCHMARKS,
         WorkflowType.EVALS,
@@ -782,7 +929,6 @@ def format_cli_args_summary(runtime_config):
         f"  no_auth:                    {runtime_config.no_auth}",
         f"  tt_metal_python_venv_dir:   {runtime_config.tt_metal_python_venv_dir}",
         f"  tt_metal_home:              {runtime_config.tt_metal_home}",
-        f"  vllm_dir:                   {runtime_config.vllm_dir}",
         f"  service_port:               {runtime_config.service_port}",
         f"  bind_host:                  {runtime_config.bind_host}",
         f"  docker_override_image:      {runtime_config.override_docker_image}",

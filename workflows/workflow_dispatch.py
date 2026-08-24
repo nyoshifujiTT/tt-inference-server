@@ -34,11 +34,17 @@ _ENGINE_WORKFLOW_NAMES = {
     WorkflowType.STRESS_TESTS: "stress_tests",
     WorkflowType.RELEASE: "release",
     WorkflowType.AGENTIC: "agentic",
+    WorkflowType.AGENTIC_TRACES: "agentic_traces",
     WorkflowType.SERVING_BENCH: "serving_bench",
     WorkflowType.PREFILL_DECODE: "prefill_decode",
 }
 
 _ENGINE_EVAL_WORKFLOWS = frozenset({WorkflowType.EVALS, WorkflowType.RELEASE})
+
+_ENGINE_BENCHMARK_WORKFLOWS = frozenset({WorkflowType.BENCHMARKS, WorkflowType.RELEASE})
+
+# Media/forge model types whose benchmark client is `vllm bench serve`.
+_ENGINE_VLLM_CLIENT_BENCHMARK_TYPES = frozenset({ModelType.EMBEDDING})
 
 
 _ENGINE_EVAL_VENV_BY_MODEL_TYPE = {
@@ -142,15 +148,16 @@ def _is_llm_spec_test_run(wf, model_spec) -> bool:
 
 def can_dispatch_to_engine(model_spec, runtime_config) -> bool:
     wf = WorkflowType.from_string(runtime_config.workflow)
-    # Agentic evals, serving-bench benchmark suites, the prefill/decode smoke
-    # suite, and the prefix-cache / spec-decode benchmarks are
-    # workflow-engine-only features with no v1 driver. They route to the workflow
-    # engine for ANY model, regardless of model_type. prefill_decode additionally
-    # owns its own stack.
+    # Agentic evals, agentic trace replay, serving-bench benchmark suites, the
+    # prefill/decode smoke suite, and the prefix-cache / spec-decode benchmarks
+    # are workflow-engine-only features with no v1 driver. They route to the
+    # workflow engine for ANY model, regardless of model_type. prefill_decode
+    # additionally owns its own stack.
     if (
         wf
         in (
             WorkflowType.AGENTIC,
+            WorkflowType.AGENTIC_TRACES,
             WorkflowType.SERVING_BENCH,
             WorkflowType.PREFILL_DECODE,
             WorkflowType.STRESS_TESTS,
@@ -209,6 +216,17 @@ def build_engine_commands(model_spec, runtime_config, json_fpath) -> list:
             VenvCommand(
                 None,
                 _build_agentic_cmd(
+                    repo_root, model_spec, runtime_config, json_fpath, output_dir
+                ),
+                env=_engine_env(),
+                label=engine_workflow,
+            )
+        ]
+    if wf == WorkflowType.AGENTIC_TRACES:
+        return [
+            VenvCommand(
+                None,
+                _build_agentic_traces_cmd(
                     repo_root, model_spec, runtime_config, json_fpath, output_dir
                 ),
                 env=_engine_env(),
@@ -365,9 +383,16 @@ def _engine_run_argv(
         # need the bearer token to reach a JWT-protected server; run.py mints it
         # from --jwt-secret/$JWT_SECRET.
         _forward_jwt(argv, runtime_config)
+        # --repeat-evals (v1) drives the engine's generic --repeat loop, which
+        # writes run_NN/ reports plus an aggregated summary/.
+        if wf == WorkflowType.EVALS:
+            repeat_evals = getattr(runtime_config, "repeat_evals", None)
+            if repeat_evals and int(repeat_evals) > 1:
+                argv.extend(["--repeat", str(int(repeat_evals))])
         if wf == WorkflowType.RELEASE:
             _forward_prefix_cache(argv, runtime_config)
             _forward_spec_decode(argv, runtime_config)
+            _forward_agentic_traces(argv, runtime_config)
     else:
         sdxl_n = getattr(runtime_config, "sdxl_num_prompts", None)
         if sdxl_n not in (None, "", "0"):
@@ -442,6 +467,46 @@ def _forward_prefix_cache(cmd, runtime_config) -> None:
         _extend_if_set(cmd, "--prefix-cache-metrics-url", metrics_url)
 
 
+def _forward_agentic_traces(cmd, runtime_config) -> None:
+    """Forward the release opt-in so the engine builds an agentic-traces child."""
+    if not getattr(runtime_config, "agentic_traces", False):
+        return
+    cmd.append("--agentic-traces")
+    _extend_if_set(
+        cmd,
+        "--agentic-traces-mode",
+        getattr(runtime_config, "agentic_traces_mode", None),
+    )
+    _extend_if_set(
+        cmd,
+        "--agentic-traces-sources",
+        getattr(runtime_config, "agentic_traces_sources", None),
+    )
+    _extend_if_set(
+        cmd,
+        "--agentic-traces-duration",
+        getattr(runtime_config, "agentic_traces_duration", None),
+    )
+    _extend_if_set(
+        cmd,
+        "--agentic-traces-git-ref",
+        getattr(runtime_config, "agentic_traces_git_ref", None),
+    )
+    _forward_agentic_traces_metrics_urls(cmd, runtime_config)
+
+
+def _forward_agentic_traces_metrics_urls(cmd, runtime_config) -> None:
+    """Emit one ``--agentic-traces-metrics-url`` per configured endpoint.
+
+    The flag is ``action="append"`` (a list), so stringifying the whole list
+    would forward a bogus ``"['http://...']"`` URL and leave the measured
+    hit-rate column empty.
+    """
+    urls = getattr(runtime_config, "agentic_traces_metrics_url", None) or []
+    for metrics_url in urls:
+        _extend_if_set(cmd, "--agentic-traces-metrics-url", metrics_url)
+
+
 def _forward_spec_decode(cmd, runtime_config) -> None:
     if not getattr(runtime_config, "spec_decode", False):
         return
@@ -476,6 +541,43 @@ def _build_agentic_cmd(repo_root, model_spec, runtime_config, json_fpath, output
     cmd = _base_engine_argv(
         launcher, model_spec, runtime_config, json_fpath, output_dir, "agentic"
     )
+    _extend_if_set(
+        cmd,
+        "--agentic-benchmark",
+        getattr(runtime_config, "agentic_benchmark", None),
+    )
+    _forward_jwt(cmd, runtime_config)
+    return cmd
+
+
+def _build_agentic_traces_cmd(
+    repo_root, model_spec, runtime_config, json_fpath, output_dir
+):
+    launcher = _resolve_launcher(repo_root, "run_agentic_traces.py", "agentic-traces")
+    cmd = _base_engine_argv(
+        launcher, model_spec, runtime_config, json_fpath, output_dir, "agentic_traces"
+    )
+    _extend_if_set(
+        cmd,
+        "--agentic-traces-mode",
+        getattr(runtime_config, "agentic_traces_mode", None),
+    )
+    _extend_if_set(
+        cmd,
+        "--agentic-traces-sources",
+        getattr(runtime_config, "agentic_traces_sources", None),
+    )
+    _extend_if_set(
+        cmd,
+        "--agentic-traces-duration",
+        getattr(runtime_config, "agentic_traces_duration", None),
+    )
+    _extend_if_set(
+        cmd,
+        "--agentic-traces-git-ref",
+        getattr(runtime_config, "agentic_traces_git_ref", None),
+    )
+    _forward_agentic_traces_metrics_urls(cmd, runtime_config)
     _forward_jwt(cmd, runtime_config)
     return cmd
 
@@ -629,6 +731,15 @@ def _engine_dependency_venv_types(
             venv_types.append(eval_venv)
         if model_spec.model_type in _LLM_LIKE_TYPES:
             venv_types.extend(_llm_eval_venv_types(model_spec, runtime_config))
+    if (
+        wf in _ENGINE_BENCHMARK_WORKFLOWS
+        and model_spec.model_type in _ENGINE_VLLM_CLIENT_BENCHMARK_TYPES
+    ):
+        from reference_config.benchmarking.benchmark_config import (
+            select_vllm_benchmark_venv,
+        )
+
+        venv_types.append(select_vllm_benchmark_venv(model_spec))
     # The release benchmark child runs the default perf tool (vllm) in-process
     # under WORKFLOW_RUN_SCRIPT, so its tool venv must exist up front.
     if wf == WorkflowType.RELEASE and model_spec.model_type in _LLM_LIKE_TYPES:
@@ -637,6 +748,11 @@ def _engine_dependency_venv_types(
             venv_types.append(WorkflowVenvType.PREFIX_CACHE)
         if getattr(runtime_config, "spec_decode", False):
             venv_types.append(WorkflowVenvType.SPEC_DECODE)
+        # Same for the agentic-traces release child: its client is the AIPerf
+        # fork inside the InferenceX checkout, and that clone + install is what
+        # the AGENTIC_TRACES venv setup performs.
+        if getattr(runtime_config, "agentic_traces", False):
+            venv_types.append(WorkflowVenvType.AGENTIC_TRACES)
         # The agentic release child resolves harbor/sweagent from the
         # EVALS_AGENTIC venv, so it must exist before the engine subprocess runs.
         if _llm_release_includes_agentic(model_spec):

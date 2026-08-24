@@ -7,8 +7,27 @@
 from __future__ import annotations
 
 from test_module.test_categorization_system.suite_loader import (
+    load_server_tests_config,
     load_suite_files_by_category,
 )
+
+
+def test_diffusiongemma_llm_suite_uses_model_specific_conformance_test():
+    suites = load_suite_files_by_category("llm")
+    suite = next(
+        suite for suite in suites if suite["id"] == "diffusiongemma-26b-a4b-it-p300x2"
+    )
+
+    assert suite["weights"] == ["diffusiongemma-26B-A4B-it"]
+    assert suite["device"] == "p300x2"
+    assert [case["template"] for case in suite["test_cases"]] == [
+        "VLLMDiffusionGemmaParamConformanceTest"
+    ]
+
+    templates = load_server_tests_config()["test_templates"]
+    template = templates["VLLMDiffusionGemmaParamConformanceTest"]
+    assert template["module"] == "test_module.llm_tests.vllm_param_conformance_test"
+    assert {"param", "e2e", "slow", "heavy"} <= set(template["markers"])
 
 
 class TestImageMatrixExpansionSDXL:
@@ -46,7 +65,8 @@ class TestImageMatrixExpansionSDXL:
             assert "ImageGenerationLoraLoadTest" in templates
 
     def test_sdxl_galaxy_timing_differs(self):
-        """Galaxy should have different LoadTest timing (20/28/45 vs 10/14/23)."""
+        """Per-device LoadTest timing: galaxy 20/28/45, n150 12/16/23 (Forge
+        path ~11-15s/img), t3k 10/14/23."""
         suites = load_suite_files_by_category("image")
         suite_map = {s["id"]: s for s in suites}
 
@@ -63,6 +83,15 @@ class TestImageMatrixExpansionSDXL:
         load_tests = [
             tc
             for tc in n150["test_cases"]
+            if tc["template"] == "ImageGenerationLoadTest"
+        ]
+        times = [lt["targets"]["image_generation_time"] for lt in load_tests]
+        assert times == [12, 16, 23]
+
+        t3k = suite_map["sdxl-t3k"]
+        load_tests = [
+            tc
+            for tc in t3k["test_cases"]
             if tc["template"] == "ImageGenerationLoadTest"
         ]
         times = [lt["targets"]["image_generation_time"] for lt in load_tests]

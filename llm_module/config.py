@@ -33,6 +33,13 @@ class LLMRunConfig:
     max_concurrency: int
     num_prompts: int
     targets: dict = field(default_factory=dict, compare=False)
+    # Models that commit more than one token per engine step use block-level
+    # latency/throughput as their primary benchmark semantics.
+    output_block_size: int = 1
+    # When set, the vLLM driver runs ``--dataset-name custom`` against this
+    # file instead of ``--dataset-name random``. Selection happens when the
+    # sweep is built, not inside the driver.
+    custom_dataset_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -50,14 +57,15 @@ class ServerConnection:
     # model from the spec metadata; off by default for safety.
     tokenizer_trust_remote_code: bool = False
     # Extra Prometheus ``/metrics`` endpoints (cpp_server workers) scraped
-    # by AIPerf via ``--server-metrics``, independent of the load target
-    # in ``base_url``. Used by the prefix-cache benchmark to read the
-    # worker-side ``tt_prefix_cache_*`` counters in a Dynamo deployment
-    # where the frontend (load target) does not aggregate them. Each entry
-    # is a URL, ``host:port``, or ``host:port/metrics``, optionally prefixed
-    # with a disaggregation role (``prefill=`` / ``decode=``) so the driver
-    # reports each cache's hit rate separately instead of blending them. A
-    # tuple keeps this frozen dataclass hashable.
+    # by AIPerf via ``--server-metrics``, in addition to the load target in
+    # ``base_url``. Read by both the prefix-cache and agentic-traces
+    # benchmarks (each populating its own ServerConnection from its own flag)
+    # to find the worker-side ``tt_prefix_cache_*`` / ``vllm:prefix_cache_*``
+    # counters in a Dynamo deployment, where the frontend does not aggregate
+    # them. Each entry is a URL, ``host:port``, or ``host:port/metrics``,
+    # optionally prefixed with a disaggregation role (``prefill=`` /
+    # ``decode=``) so the prefix-cache driver reports each cache separately
+    # instead of blending them. A tuple keeps this frozen dataclass hashable.
     prefix_cache_metrics_urls: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:

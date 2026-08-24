@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -18,6 +17,7 @@ enum class ModelService {
   LLM,
   EMBEDDING,
   IMAGE,
+  TTS,
 };
 
 /** String value for env MODEL_SERVICE. */
@@ -27,6 +27,8 @@ inline std::string toString(ModelService s) {
       return "embedding";
     case ModelService::IMAGE:
       return "image";
+    case ModelService::TTS:
+      return "tts";
     case ModelService::LLM:
     default:
       return "llm";
@@ -37,6 +39,7 @@ inline std::string toString(ModelService s) {
 inline ModelService modelServiceFromString(const std::string& v) {
   if (v == "embedding") return ModelService::EMBEDDING;
   if (v == "image") return ModelService::IMAGE;
+  if (v == "tts") return ModelService::TTS;
   return ModelService::LLM;
 }
 
@@ -52,6 +55,7 @@ enum class ModelType {
   GLM_5_1,
   GLM_5_2,
   DEEPSEEK_V4_PRO,
+  GEMMA_4_31B_IT,
 };
 
 enum class LLMMode {
@@ -88,6 +92,9 @@ enum class ModelRunnerType {
   TT_SDXL_GENERATE,
   TT_SDXL_IMAGE_TO_IMAGE,
   TT_SDXL_EDIT,
+  TT_TTS,
+  TT_BGE_LARGE_EN,
+  EMBEDDING_MOCK,
 };
 
 enum class Model {
@@ -101,6 +108,7 @@ enum class Model {
   GLM_5_1,
   GLM_5_2,
   DEEPSEEK_V4_PRO,
+  GEMMA_4_31B_IT,
 };
 
 struct ModelMapping {
@@ -119,6 +127,7 @@ static constexpr ModelMapping MODEL_MAPPINGS[] = {
     {Model::GLM_5_1, "zai-org/GLM-5.1"},
     {Model::GLM_5_2, "zai-org/GLM-5.2"},
     {Model::DEEPSEEK_V4_PRO, "deepseek-ai/DeepSeek-V4-Pro"},
+    {Model::GEMMA_4_31B_IT, "google/gemma-4-31B-it"},
 };
 
 inline std::string toString(Model m) {
@@ -144,6 +153,12 @@ inline std::string toString(ModelRunnerType m) {
       return "tt_sdxl_image_to_image";
     case ModelRunnerType::TT_SDXL_EDIT:
       return "tt_sdxl_edit";
+    case ModelRunnerType::TT_TTS:
+      return "tt_tts";
+    case ModelRunnerType::TT_BGE_LARGE_EN:
+      return "tt_bge_large_en";
+    case ModelRunnerType::EMBEDDING_MOCK:
+      return "embedding_mock";
   }
   return "unknown";
 }
@@ -157,10 +172,15 @@ inline std::string toClientRunnerName(ModelRunnerType m) {
       return "tt-sdxl-image-to-image";
     case ModelRunnerType::TT_SDXL_EDIT:
       return "tt-sdxl-edit";
+    case ModelRunnerType::TT_TTS:
+      return "tt-tts";
+    case ModelRunnerType::TT_BGE_LARGE_EN:
+      return "bge_large_en_v1_5";
     case ModelRunnerType::MOCK:
     case ModelRunnerType::MOCK_PIPELINE:
     case ModelRunnerType::MOCK_SCHEDULER:
     case ModelRunnerType::PIPELINE_MANAGER:
+    case ModelRunnerType::EMBEDDING_MOCK:
       return "";
   }
   return "";
@@ -172,11 +192,5 @@ inline Model modelFromString(const std::string_view& v) {
   }
   throw std::invalid_argument("Invalid model: " + std::string(v));
 }
-
-enum class ResponseFormatType : uint8_t {
-  TEXT = 0,
-  JSON_OBJECT = 1,
-  JSON_SCHEMA = 2
-};
 
 }  // namespace tt::config

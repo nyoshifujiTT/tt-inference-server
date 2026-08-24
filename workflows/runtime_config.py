@@ -89,6 +89,26 @@ class RuntimeConfig:
     spec_decode_preset: str = "full"
     spec_decode_warmup_requests: Optional[int] = None
 
+    # Agentic-traces benchmark. The benchmark parameters themselves live in
+    # reference_config/agentic_traces (per ModelSpec); these are only the
+    # mode selection and ad-hoc overrides. ``agentic_traces`` is the release
+    # opt-in (--workflow agentic_traces needs no flag).
+    # Agentic evals (--workflow agentic). ``agentic_benchmark`` selects which
+    # EVALS_AGENTIC task(s) to run (comma-separated aliases / raw task names);
+    # unset runs them all.
+    agentic_benchmark: Optional[str] = None
+
+    # Standard evals (--workflow evals). ``repeat_evals`` runs the evals
+    # workflow N times (drives the engine's generic ``--repeat`` loop).
+    repeat_evals: int = 1
+
+    agentic_traces: bool = False
+    agentic_traces_mode: str = "full"
+    agentic_traces_sources: Optional[str] = None
+    agentic_traces_duration: Optional[int] = None
+    agentic_traces_git_ref: Optional[str] = None
+    agentic_traces_metrics_url: Optional[List[str]] = None
+
     # Device configuration
     device_id: Optional[List[int]] = None
 
@@ -177,6 +197,16 @@ class RuntimeConfig:
             spec_decode_preset=getattr(args, "spec_decode_preset", "full"),
             spec_decode_warmup_requests=getattr(
                 args, "spec_decode_warmup_requests", None
+            ),
+            agentic_benchmark=getattr(args, "agentic_benchmark", None),
+            repeat_evals=getattr(args, "repeat_evals", 1) or 1,
+            agentic_traces=getattr(args, "agentic_traces", False),
+            agentic_traces_mode=getattr(args, "agentic_traces_mode", None) or "full",
+            agentic_traces_sources=getattr(args, "agentic_traces_sources", None),
+            agentic_traces_duration=getattr(args, "agentic_traces_duration", None),
+            agentic_traces_git_ref=getattr(args, "agentic_traces_git_ref", None),
+            agentic_traces_metrics_url=getattr(
+                args, "agentic_traces_metrics_url", None
             ),
             device_id=args.device_id,
             host_volume=args.host_volume,

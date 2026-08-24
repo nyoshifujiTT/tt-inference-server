@@ -15,7 +15,6 @@
 #include "domain/base_request.hpp"
 #include "domain/json_field.hpp"
 #include "domain/llm/chat_message.hpp"
-#include "domain/response_format.hpp"
 #include "domain/session.hpp"
 
 namespace tt::domain::llm {
@@ -163,9 +162,6 @@ struct LLMRequest : BaseRequest {
 
   std::optional<bool> disaggregation_override;
 
-  // Structured output constraint
-  std::optional<ResponseFormat> response_format;
-
   // When true, skip adding <bos><user> and <assistant> tags in chat template.
   bool skip_apply_chat_template = false;
 
@@ -187,6 +183,12 @@ struct LLMRequest : BaseRequest {
 
   std::optional<std::string> previousResponseId;
   std::optional<std::string> responseId;
+
+  // W3C traceparent of the decode-side Sentry transaction (internal use
+  // only, not parsed from JSON). Set by the Dynamo request handler so the
+  // disaggregated decode -> prefill ZMQ hop continues the same trace.
+  // Empty when tracing is disabled or the request carried no traceparent.
+  std::string traceparentHeader;
 
   std::string toString() const {
     std::string promptInfo;
