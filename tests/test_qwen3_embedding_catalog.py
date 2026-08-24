@@ -17,6 +17,7 @@ import pytest
 
 from workflows.utils import get_repo_root_path
 from workflows.model_spec import load_templates_from_yaml
+from workflows.workflow_types import InferenceEngine
 
 EMBEDDING_YAML = get_repo_root_path() / "workflows" / "model_specs" / "dev" / "embedding.yaml"
 
@@ -81,3 +82,26 @@ def test_qwen3_embedding_06b_p150_trace_region_size_admits_batched_prefill():
     # The value must surface in the serialized additional_config.tt that vLLM reads.
     add_cfg = json.loads(dms.vllm_args["additional_config"])
     assert int(add_cfg["tt"]["trace_region_size"]) == int(trs)
+
+
+@pytest.mark.parametrize("weight", QWEN3_EMBEDDING_P150)
+def test_qwen3_embedding_p150_inference_engine_is_vllm(weight):
+    """The P150 entries are served by vLLM, so they must declare it.
+
+    These specs run the model through vLLM's pooling runner (hence
+    ``runner: pooling`` above), but they used to be declared as
+    ``inference_engine: MEDIA``. That mismatch is not cosmetic:
+    run_docker_server only appends ``--model`` / ``--tt-device`` to the container
+    command for VLLM specs, so a MEDIA-declared spec starts the vLLM entrypoint
+    with neither, and it exits with "the following arguments are required:
+    --tt-device". MEDIA also changes the published-port mapping and suppresses
+    the vLLM default env vars. Pin the declaration so the transport matches the
+    runner.
+    """
+    specs = _p150_specs_by_weight()
+    assert weight in specs, f"{weight} P150 spec missing from dev/embedding.yaml"
+    assert specs[weight].inference_engine == InferenceEngine.VLLM.value, (
+        f"{weight} P150 is served through the vLLM pooling runner, so its "
+        f"inference_engine must be VLLM (got {specs[weight].inference_engine!r}); "
+        "otherwise the container is started without --model/--tt-device."
+    )
