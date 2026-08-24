@@ -17,15 +17,31 @@ class _FakeService:
         self.last = None
 
     async def diarized_transcription(self, request, model, language=None, prompt=None):
-        self.last = {"model": model, "language": language, "prompt": prompt,
-                     "num_speakers": request.num_speakers}
+        self.last = {
+            "model": model,
+            "language": language,
+            "prompt": prompt,
+            "num_speakers": request.num_speakers,
+        }
         return {
             "task": "transcribe",
             "text": "hello world",
             "duration": 2.0,
             "segments": [
-                {"id": 0, "speaker": "SPEAKER_00", "start": 0.0, "end": 1.0, "text": "hello"},
-                {"id": 1, "speaker": "SPEAKER_01", "start": 1.0, "end": 2.0, "text": "world"},
+                {
+                    "id": 0,
+                    "speaker": "SPEAKER_00",
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "hello",
+                },
+                {
+                    "id": 1,
+                    "speaker": "SPEAKER_01",
+                    "start": 1.0,
+                    "end": 2.0,
+                    "text": "world",
+                },
             ],
         }
 

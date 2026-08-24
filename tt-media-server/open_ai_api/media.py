@@ -18,7 +18,7 @@ The staged ``media://<object-key>`` can then be passed as
 
 from fastapi import APIRouter, HTTPException, Request, Security
 from security.api_key_checker import get_api_key
-from utils.media_storage import MediaStorageError, get_media_storage, parse_media_key
+from utils.media_storage import MediaStorageError, get_media_storage
 
 router = APIRouter()
 

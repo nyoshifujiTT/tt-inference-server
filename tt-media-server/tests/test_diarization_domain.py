@@ -17,14 +17,23 @@ def test_request_defaults_and_exclusive_true_by_default():
 
 @pytest.mark.parametrize(
     "value,expected",
-    [("true", True), ("1", True), ("on", True), ("false", False), ("0", False), ("", True)],
+    [
+        ("true", True),
+        ("1", True),
+        ("on", True),
+        ("false", False),
+        ("0", False),
+        ("", True),
+    ],
 )
 def test_exclusive_coercion(value, expected):
     assert DiarizationRequest(file=b"x", exclusive=value).exclusive is expected
 
 
 def test_speaker_count_coercion_and_validation():
-    req = DiarizationRequest(file=b"x", num_speakers="3", min_speakers="", max_speakers=None)
+    req = DiarizationRequest(
+        file=b"x", num_speakers="3", min_speakers="", max_speakers=None
+    )
     assert req.num_speakers == 3
     assert req.min_speakers is None
     assert req.max_speakers is None
@@ -35,7 +44,9 @@ def test_speaker_count_coercion_and_validation():
 def test_response_to_dict_pyannoteai_shape():
     resp = DiarizationResponse(
         segments=[DiarizationSegment(start=0.2, end=1.6, speaker="SPEAKER_00")],
-        exclusiveDiarization=[DiarizationSegment(start=0.2, end=1.6, speaker="SPEAKER_00")],
+        exclusiveDiarization=[
+            DiarizationSegment(start=0.2, end=1.6, speaker="SPEAKER_00")
+        ],
     )
     d = resp.to_dict()
     assert d["diarization"][0] == {"speaker": "SPEAKER_00", "start": 0.2, "end": 1.6}

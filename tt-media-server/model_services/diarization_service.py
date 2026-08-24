@@ -74,7 +74,9 @@ class DiarizationService:
             l1 = int(os.getenv("DIARIZATION_TT_L1_SMALL", "32768"))
             device = ttnn.open_device(device_id=int(dev_id), l1_small_size=l1)
             self._tt_device = device
-            self.logger.info(f"DiarizationService: TT NN acceleration on device {dev_id}")
+            self.logger.info(
+                f"DiarizationService: TT NN acceleration on device {dev_id}"
+            )
             return make_tt_accelerator(device)
         except Exception as e:  # noqa: BLE001 - fall back to CPU on any TT error
             self.logger.warning(
@@ -83,9 +85,7 @@ class DiarizationService:
             return None
 
     @log_execution_time("Diarization request")
-    async def process_request(
-        self, request: DiarizationRequest
-    ) -> DiarizationResponse:
+    async def process_request(self, request: DiarizationRequest) -> DiarizationResponse:
         audio_bytes = request.file
         if isinstance(audio_bytes, str):
             import base64
@@ -166,7 +166,9 @@ class DiarizationService:
         pcm = (rng.randn(n) * 0.02 * 32768.0).astype(np.int16)
         buf = io.BytesIO()
         with wave.open(buf, "wb") as w:
-            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
             w.writeframes(pcm.tobytes())
         tmp_path = None
         try:
@@ -227,9 +229,7 @@ class DiarizationService:
             import base64
 
             audio_bytes = base64.b64decode(audio_bytes)
-        wav_bytes = decode_to_wav(
-            audio_bytes, sample_rate=settings.default_sample_rate
-        )
+        wav_bytes = decode_to_wav(audio_bytes, sample_rate=settings.default_sample_rate)
         waveform = self._wav_bytes_to_waveform(wav_bytes)
 
         tmp_path = None

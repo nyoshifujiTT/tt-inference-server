@@ -19,7 +19,9 @@ def test_slice_waveform_by_sample_index():
 def test_coordinator_runs_diarize_then_asr_and_builds_diarized_json():
     wf = np.zeros(16000 * 3, dtype=np.float32)  # 3 s
 
-    def fake_diarize(audio, num_speakers=None, min_speakers=None, max_speakers=None, exclusive=True):
+    def fake_diarize(
+        audio, num_speakers=None, min_speakers=None, max_speakers=None, exclusive=True
+    ):
         assert exclusive is True
         return {
             "segments": [{"start": 0.0, "end": 3.0, "speaker": "SPEAKER_00"}],

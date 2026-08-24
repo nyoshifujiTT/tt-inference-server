@@ -10,8 +10,10 @@ from utils.diarization_warnings import (
 
 
 def _segs(*speakers):
-    return [{"speaker": sp, "start": float(i), "end": float(i) + 1.0}
-            for i, sp in enumerate(speakers)]
+    return [
+        {"speaker": sp, "start": float(i), "end": float(i) + 1.0}
+        for i, sp in enumerate(speakers)
+    ]
 
 
 def test_count_distinct_speakers():

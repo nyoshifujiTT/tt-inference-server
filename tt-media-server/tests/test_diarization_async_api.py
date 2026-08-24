@@ -67,7 +67,9 @@ def test_create_job_returns_jobcreated():
 
 def test_job_completes_with_output():
     client = _make_client(_FakeService())
-    job_id = client.post("/v1/diarize", json={"url": "media://audio.wav"}).json()["jobId"]
+    job_id = client.post("/v1/diarize", json={"url": "media://audio.wav"}).json()[
+        "jobId"
+    ]
     final = _poll(client, job_id)
     assert final["status"] == "succeeded"
     assert final["jobId"] == job_id

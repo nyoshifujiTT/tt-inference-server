@@ -14,7 +14,16 @@ base URL only. Unlike /v1/audio/transcriptions this returns speaker turns only
 from typing import Optional
 
 from domain.diarization_request import DiarizationRequest
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Security, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Security,
+    UploadFile,
+)
 from resolver.service_resolver import service_resolver
 from security.api_key_checker import get_api_key
 
@@ -86,7 +95,9 @@ def _reject_precision2_only_options(**options) -> None:
     community-1. If a client requests any of them, fail with HTTP 400 rather
     than silently ignoring the flag.
     """
-    requested = [name for name, value in options.items() if value not in (None, False, "")]
+    requested = [
+        name for name, value in options.items() if value not in (None, False, "")
+    ]
     if requested:
         raise HTTPException(
             status_code=400,
@@ -107,7 +118,9 @@ async def _read_json_body(request: Request) -> dict:
         )
     body = await request.json()
     if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="request body must be a JSON object")
+        raise HTTPException(
+            status_code=400, detail="request body must be a JSON object"
+        )
     return body
 
 

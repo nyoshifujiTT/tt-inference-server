@@ -43,7 +43,9 @@ class _FakePipeline:
 
 
 def test_annotation_to_segments_rounds_and_labels():
-    ann = _FakeAnnotation([(0.2000001, 1.6009, "SPEAKER_00"), (1.6009, 2.0, "SPEAKER_01")])
+    ann = _FakeAnnotation(
+        [(0.2000001, 1.6009, "SPEAKER_00"), (1.6009, 2.0, "SPEAKER_01")]
+    )
     segs = annotation_to_segments(ann)
     assert segs == [
         {"start": 0.2, "end": 1.601, "speaker": "SPEAKER_00"},
@@ -72,7 +74,9 @@ def test_diarize_returns_both_views_when_exclusive():
     b = _make_backend_with_fake(out)
     res = b.diarize("audio.wav", num_speakers=2, exclusive=True)
     assert res["segments"] == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
-    assert res["exclusiveDiarization"] == [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}]
+    assert res["exclusiveDiarization"] == [
+        {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"}
+    ]
     # num_speakers passed through to pipeline
     assert b._pipeline.calls[0][1] == {"num_speakers": 2}
 
@@ -98,7 +102,9 @@ def test_nn_accelerator_hook_applied_at_pipeline_load(monkeypatch):
     monkeypatch.setattr(db, "_install_torch_load_shim", lambda: None)
 
     # Fake pyannote.audio.Pipeline.from_pretrained
-    import types, sys
+    import types
+    import sys
+
     fake_mod = types.ModuleType("pyannote.audio")
     fake_mod.Pipeline = types.SimpleNamespace(from_pretrained=lambda p: _FakePipeline())
     monkeypatch.setitem(sys.modules, "pyannote.audio", fake_mod)

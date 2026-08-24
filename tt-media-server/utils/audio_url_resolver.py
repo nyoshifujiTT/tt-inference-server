@@ -18,7 +18,12 @@ from __future__ import annotations
 import urllib.request
 from typing import Optional
 
-from utils.media_storage import MEDIA_SCHEME, MediaStorage, MediaStorageError, get_media_storage
+from utils.media_storage import (
+    MEDIA_SCHEME,
+    MediaStorage,
+    MediaStorageError,
+    get_media_storage,
+)
 
 _HTTP_SCHEMES = ("http://", "https://")
 DEFAULT_MAX_BYTES = 50 * 1024 * 1024  # 50 MB, matches MAX_AUDIO_SIZE_BYTES default

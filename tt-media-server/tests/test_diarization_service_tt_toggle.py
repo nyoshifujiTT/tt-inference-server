@@ -2,11 +2,9 @@
 #
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 """DiarizationService TT-acceleration env toggle (device-independent)."""
+
 import os
 import sys
-import types
-
-import pytest
 
 
 def _load_service(monkeypatch, captured):
@@ -37,6 +35,8 @@ def test_tt_env_but_ttnn_unavailable_falls_back_to_cpu(monkeypatch):
     svc = _load_service(monkeypatch, captured)
     svc.DiarizationService()
     assert captured["nn_accelerator"] is None
+
+
 # --- warmup lifecycle tests (appended) ---
 
 

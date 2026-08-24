@@ -31,6 +31,7 @@ the thin tt-inference-server-side adapter that wires them into pyannote. ttnn /
 torch / the metal package are imported lazily so this module stays importable
 (and unit-testable) without a device or a tt-metal checkout on PYTHONPATH.
 """
+
 from __future__ import annotations
 
 import os
@@ -56,7 +57,7 @@ def make_tt_accelerator(device):
         def resnet_forward(fbank, weights=None):
             # fbank: (B, T, 80) log-mel -> (B, 1, 80, T)
             feats = fbank.permute(0, 2, 1).unsqueeze(1).float()
-            outs = [tt_emb.backbone(feats[i:i + 1]) for i in range(feats.shape[0])]
+            outs = [tt_emb.backbone(feats[i : i + 1]) for i in range(feats.shape[0])]
             # (B, C, H=freq, W=time); align time dim across chunks (conv rounding)
             minW = min(o.shape[-1] for o in outs)
             x = torch.cat([o[..., :minW] for o in outs], dim=0)
@@ -71,6 +72,7 @@ def make_tt_accelerator(device):
             from models.demos.audio.pyannote_diarization.tt.ttnn_pyannet import (
                 TTNNPyanNet,
             )
+
             seg_model = pipeline._segmentation.model
             sinc = seg_model.sincnet.conv1d[0].filterbank.filters().detach().numpy()
             tt_seg = TTNNPyanNet(seg_model.state_dict(), sinc, device)
@@ -81,7 +83,7 @@ def make_tt_accelerator(device):
                 wav_batch = waveforms.detach().cpu().numpy()
                 if wav_batch.ndim == 2:
                     wav_batch = wav_batch[:, None, :]
-                logits = tt_seg.forward_batch(wav_batch)      # (B,T,7)
+                logits = tt_seg.forward_batch(wav_batch)  # (B,T,7)
                 return F.log_softmax(torch.from_numpy(logits).float(), dim=-1)
 
             seg_model.forward = seg_forward

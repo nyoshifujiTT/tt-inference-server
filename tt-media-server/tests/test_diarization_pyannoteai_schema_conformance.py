@@ -22,7 +22,6 @@ or absent copy. Point ``PYANNOTEAI_OPENAPI_URL`` elsewhere only to pin a
 known-good mirror in a deliberately offline environment.
 """
 
-import inspect
 import json
 import os
 import urllib.request
@@ -109,8 +108,12 @@ def test_request_fields_cover_official_schema(official_schemas):
     unsupported = set(diarization.UNSUPPORTED_REQUEST_FIELDS)
 
     # we never classify a field that is not in the official schema
-    assert implemented <= official, f"non-official implemented fields: {implemented - official}"
-    assert unsupported <= official, f"non-official unsupported fields: {unsupported - official}"
+    assert implemented <= official, (
+        f"non-official implemented fields: {implemented - official}"
+    )
+    assert unsupported <= official, (
+        f"non-official unsupported fields: {unsupported - official}"
+    )
     # implemented and unsupported are disjoint
     assert not (implemented & unsupported)
     # union covers the whole official request schema
@@ -133,4 +136,6 @@ def test_response_fields_cover_official_schema(official_schemas):
     assert not_emitted <= official
     assert not (emitted & not_emitted)
     missing = official - emitted - not_emitted
-    assert not missing, f"official DiarizationJobOutput fields not classified: {missing}"
+    assert not missing, (
+        f"official DiarizationJobOutput fields not classified: {missing}"
+    )

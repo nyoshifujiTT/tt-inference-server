@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Callable, Dict, Optional
+from typing import Dict, Optional
 
 # pyannoteAI JobStatus enum values (https://docs.pyannote.ai/openapi.json)
 STATUS_CREATED = "created"
@@ -106,7 +106,9 @@ class DiarizationJobStore:
             if j:
                 j.touch(STATUS_RUNNING)
 
-    def set_succeeded(self, job_id: str, output: dict, warning: Optional[str] = None) -> None:
+    def set_succeeded(
+        self, job_id: str, output: dict, warning: Optional[str] = None
+    ) -> None:
         with self._lock:
             j = self._jobs.get(job_id)
             if j:
@@ -142,7 +144,9 @@ def get_job_store() -> DiarizationJobStore:
         import os
 
         _STORE = DiarizationJobStore(
-            retention_seconds=int(os.environ.get("DIARIZATION_JOB_RETENTION_SECONDS", "86400"))
+            retention_seconds=int(
+                os.environ.get("DIARIZATION_JOB_RETENTION_SECONDS", "86400")
+            )
         )
     return _STORE
 

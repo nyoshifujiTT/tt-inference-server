@@ -21,10 +21,10 @@ def test_parse_media_key_ok():
 @pytest.mark.parametrize(
     "bad",
     [
-        "https://x/y.wav",         # wrong scheme
-        "media://",                # empty key
-        "media://../etc/passwd",   # traversal
-        "media://a b",             # space not allowed
+        "https://x/y.wav",  # wrong scheme
+        "media://",  # empty key
+        "media://../etc/passwd",  # traversal
+        "media://a b",  # space not allowed
     ],
 )
 def test_parse_media_key_rejects(bad):

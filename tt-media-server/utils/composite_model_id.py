@@ -62,9 +62,7 @@ def parse_model_id(model: str) -> ParsedModelId:
 
     parts = [p.strip() for p in model.split(COMPOSITE_SEPARATOR)]
     if any(p == "" for p in parts):
-        raise CompositeModelIdError(
-            f"empty component in composite model id: {model!r}"
-        )
+        raise CompositeModelIdError(f"empty component in composite model id: {model!r}")
     if len(parts) == 1:
         return ParsedModelId(asr_model=parts[0])
     if len(parts) == 2:

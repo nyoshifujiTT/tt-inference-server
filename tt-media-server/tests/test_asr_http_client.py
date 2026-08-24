@@ -10,7 +10,7 @@ from utils import asr_http_client
 
 
 def test_encode_wav_pcm16_roundtrip():
-    sig = (np.arange(1600, dtype=np.float32) / 1600.0)  # 0..~1
+    sig = np.arange(1600, dtype=np.float32) / 1600.0  # 0..~1
     wav = asr_http_client.encode_wav_pcm16(sig, 16000)
     with wave.open(io.BytesIO(wav), "rb") as w:
         assert w.getnchannels() == 1
@@ -38,8 +38,11 @@ def test_transcribe_wav_bytes_posts_and_returns_text(monkeypatch):
 
     monkeypatch.setattr(asr_http_client.requests, "post", fake_post)
     text = asr_http_client.transcribe_wav_bytes(
-        "http://asr-host:9011", "Qwen3-ASR-1.7B-JA", b"WAVBYTES",
-        language="ja", timeout=42,
+        "http://asr-host:9011",
+        "Qwen3-ASR-1.7B-JA",
+        b"WAVBYTES",
+        language="ja",
+        timeout=42,
     )
     assert text == "hello world"
     assert captured["url"] == "http://asr-host:9011/v1/audio/transcriptions"

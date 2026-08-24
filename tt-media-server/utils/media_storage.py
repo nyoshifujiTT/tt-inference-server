@@ -40,7 +40,7 @@ def parse_media_key(url: str) -> str:
     """Extract and validate the object-key from a ``media://<key>`` URL."""
     if not isinstance(url, str) or not url.startswith(MEDIA_SCHEME):
         raise MediaStorageError(f"not a media:// url: {url!r}")
-    key = url[len(MEDIA_SCHEME):]
+    key = url[len(MEDIA_SCHEME) :]
     if not key or not _OBJECT_KEY_RE.match(key):
         raise MediaStorageError(f"invalid media object-key: {key!r}")
     # defense in depth against traversal even though the charset forbids '..'
