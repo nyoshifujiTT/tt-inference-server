@@ -13,6 +13,9 @@ FROM ${TT_METAL_DOCKERFILE_URL} AS builder
 # Build arguments
 ARG TT_METAL_COMMIT_SHA_OR_TAG
 ARG TT_VLLM_COMMIT_SHA_OR_TAG
+# Where to clone vLLM from. Overridable so a bring-up can build an image from a
+# fork branch whose commits are not (yet) on tenstorrent/vllm.
+ARG TT_VLLM_REPO_URL=https://github.com/tenstorrent/vllm.git
 ARG TT_SMI_COMMIT_SHA_OR_TAG=v3.1.1
 ARG CONTAINER_APP_UID=1000
 ARG DEBIAN_FRONTEND=noninteractive
@@ -103,7 +106,7 @@ RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${
 # vLLM on purpose - the plugin deliberately does not declare vllm as a
 # dependency, so that resolution can never swap the locally built empty-target
 # vLLM for the CUDA wheel on PyPI.
-RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm.git ${vllm_dir} \
+RUN /bin/bash -c "git clone ${TT_VLLM_REPO_URL} ${vllm_dir} \
     && cd ${vllm_dir} \
     && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
     && source ${PYTHON_ENV_DIR}/bin/activate \

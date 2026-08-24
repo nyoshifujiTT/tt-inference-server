@@ -24,7 +24,7 @@ DOCKERFILE = (
 def _vllm_install_step() -> str:
     text = DOCKERFILE.read_text()
     match = re.search(
-        r"RUN /bin/bash -c \"git clone https://github\.com/tenstorrent/vllm\.git.*?\"\n",
+        r"RUN /bin/bash -c \"git clone \$\{TT_VLLM_REPO_URL\}.*?\"\n",
         text,
         re.DOTALL,
     )
@@ -62,3 +62,19 @@ def test_tt_plugin_is_installed_after_vllm():
     assert step.index("VLLM_TARGET_DEVICE=empty uv pip install") < step.index(
         "-e plugins/vllm-tt-plugin"
     ), "the plugin must be installed after vLLM so resolution cannot replace it"
+
+
+def test_vllm_repo_url_is_overridable_and_defaults_to_tenstorrent():
+    """A bring-up must be able to build from a fork branch.
+
+    The commits of an in-flight bring-up are not on tenstorrent/vllm yet, so the
+    clone URL has to be a build arg; the default must stay tenstorrent/vllm so
+    ordinary builds are unchanged.
+    """
+    text = DOCKERFILE.read_text()
+    assert (
+        "ARG TT_VLLM_REPO_URL=https://github.com/tenstorrent/vllm.git" in text
+    ), "TT_VLLM_REPO_URL must exist and default to tenstorrent/vllm"
+    assert "git clone ${TT_VLLM_REPO_URL}" in _vllm_install_step(), (
+        "the clone must honour TT_VLLM_REPO_URL instead of hardcoding the URL"
+    )

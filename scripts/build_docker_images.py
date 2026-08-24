@@ -1133,6 +1133,15 @@ def build_dev_image(
         f"TT_VLLM_COMMIT_SHA_OR_TAG={vllm_commit}",
         "--build-arg",
         f"CONTAINER_APP_UID={container_app_uid}",
+    ]
+
+    # A bring-up may need a fork whose commits are not on tenstorrent/vllm yet.
+    vllm_repo_url = os.getenv("TT_VLLM_REPO_URL")
+    if vllm_repo_url:
+        logger.info(f"Overriding vLLM repository URL: {vllm_repo_url}")
+        build_command += ["--build-arg", f"TT_VLLM_REPO_URL={vllm_repo_url}"]
+
+    build_command += [
         "-f",
         "vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile",
         ".",
