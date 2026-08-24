@@ -31,7 +31,7 @@ from workflows.run_docker_server import (
     generate_docker_run_command,
 )
 from workflows.runtime_config import RuntimeConfig
-from workflows.workflow_types import DeviceTypes
+from workflows.workflow_types import DeviceTypes, InferenceEngine, ModelType
 
 
 @pytest.fixture
@@ -1003,6 +1003,64 @@ class TestOverrideArgsIntegration:
                     assert not env_setting.startswith("CACHE_ROOT=")
                     assert not env_setting.startswith("TT_MODEL_SPEC_JSON_PATH=")
                     assert not env_setting.startswith("RUNTIME_MODEL_SPEC_JSON_PATH=")
+
+    def _dev_mode_source_mounts(self, mock_setup_config, model_type, engine):
+        """Return the dev-mode source-tree mounts for a given type/engine pair."""
+        mock_model_spec = self._make_mock_model_spec()
+        mock_model_spec.model_type = model_type
+        mock_model_spec.inference_engine = engine
+        if engine != InferenceEngine.VLLM.value:
+            # the media-server branch reads device_type.name for its env vars
+            mock_model_spec.device_type = DeviceTypes.N150
+        mock_runtime_config = self._make_mock_runtime_config()
+        mock_runtime_config.dev_mode = True
+
+        with patch(
+            "workflows.run_docker_server.get_repo_root_path", return_value=Path("/tmp")
+        ), patch("workflows.run_docker_server.DeviceTypes"), patch(
+            "workflows.run_docker_server.short_uuid", return_value="test123"
+        ):
+            docker_command, _ = generate_docker_run_command(
+                mock_model_spec, mock_runtime_config, mock_setup_config
+            )
+
+        return [
+            docker_command[i + 1]
+            for i, arg in enumerate(docker_command)
+            if arg == "--mount"
+            and i + 1 < len(docker_command)
+            and (
+                "tt-media-server" in docker_command[i + 1]
+                or "vllm-tt-metal/src" in docker_command[i + 1]
+            )
+        ]
+
+    def test_dev_mode_mounts_vllm_src_for_vllm_served_audio_model(
+        self, mock_setup_config
+    ):
+        """A vLLM-served AUDIO model (e.g. Qwen3-ASR) needs vllm-tt-metal/src.
+
+        Selecting the source tree on model_type alone sent every AUDIO model down
+        the media-server branch, so the vLLM entrypoint was never mounted and
+        --dev-mode silently ran the image's own (upstream) sources.
+        """
+        mounts = self._dev_mode_source_mounts(
+            mock_setup_config, ModelType.AUDIO, InferenceEngine.VLLM.value
+        )
+
+        assert any("vllm-tt-metal/src" in m for m in mounts), mounts
+        assert not any("tt-media-server" in m for m in mounts), mounts
+
+    def test_dev_mode_mounts_media_server_for_media_served_audio_model(
+        self, mock_setup_config
+    ):
+        """A media-server-served AUDIO model keeps the tt-media-server mount."""
+        mounts = self._dev_mode_source_mounts(
+            mock_setup_config, ModelType.AUDIO, InferenceEngine.MEDIA.value
+        )
+
+        assert any("tt-media-server" in m for m in mounts), mounts
+        assert not any("vllm-tt-metal/src" in m for m in mounts), mounts
 
 
 class TestSecretsHandling:
