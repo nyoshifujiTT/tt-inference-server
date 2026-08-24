@@ -1,5 +1,8 @@
-[submodule "tt-media-server/cpp_server/tt-blaze"]
-	path = tt-media-server/cpp_server/tt-blaze
-	url = https://github.com/tenstorrent/tt-blaze.git
-	branch = asaigal/relaxed_acceptance
+[submodule "tt-media-server/cpp_server/tt-llm-engine"]
+	path = tt-media-server/cpp_server/tt-llm-engine
+	url = https://github.com/tenstorrent/tt-llm-engine.git
+	branch = main
 	ignore = dirty
+[submodule "tt-media-server/cpp_server/third_party/Mooncake"]
+	path = tt-media-server/cpp_server/third_party/Mooncake
+	url = git@github.com:kvcache-ai/Mooncake.git

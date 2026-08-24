@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+
+#include "utils/ipc_runner_factory.hpp"
+
+#include <stdexcept>
+#include <variant>
+
+#include "runtime/runners/runner_registry.hpp"
+#include "services/model_service_registration.hpp"
+#include "utils/logger.hpp"
+
+namespace tt::utils::ipc_runner_factory {
+
+namespace {
+
+config::ModelRunnerType runnerTypeFromConfig(
+    const config::RunnerConfig& config) {
+  return std::visit([](const auto& cfg) { return cfg.runner_type; }, config);
+}
+
+}  // namespace
+
+std::unique_ptr<runners::IRunner> createIpcRunner(
+    config::ModelService service, const config::RunnerConfig& config,
+    ipc::IResultQueue* resultQueue, tt::ipc::ITaskQueue* taskQueue,
+    ipc::ICancelQueue* cancelQueue) {
+  // Needed for callers bypassing service_factory (tests, exec'd worker
+  // children that don't inherit parent registration state).
+  services::registerBuiltinModelServices();
+
+  const config::ModelRunnerType runnerType = runnerTypeFromConfig(config);
+
+  auto runner = RunnerRegistry::instance().createIpc(
+      service, runnerType, config, resultQueue, taskQueue, cancelQueue);
+  if (!runner) {
+    TT_LOG_ERROR(
+        "[IpcRunnerFactory] No runner registered for service+type; refusing "
+        "to create");
+    throw std::runtime_error("No runner registered for the requested service");
+  }
+  return runner;
+}
+
+std::unique_ptr<runners::IRunner> createTtsIpcRunner(
+    const config::RunnerConfig& config, ipc::tts::TtsTaskQueue* taskQueue,
+    ipc::tts::TtsAudioChunkQueue* audioQueue, ipc::ICancelQueue* cancelQueue) {
+  services::registerBuiltinModelServices();
+
+  const config::ModelRunnerType runnerType = runnerTypeFromConfig(config);
+  auto runner = RunnerRegistry::instance().createTtsIpc(
+      config::ModelService::TTS, runnerType, config, taskQueue, audioQueue,
+      cancelQueue);
+  if (!runner) {
+    TT_LOG_ERROR(
+        "[IpcRunnerFactory] No TTS IPC runner registered for requested type");
+    throw std::runtime_error("No TTS IPC runner registered for requested type");
+  }
+  return runner;
+}
+
+}  // namespace tt::utils::ipc_runner_factory

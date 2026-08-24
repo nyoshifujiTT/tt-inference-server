@@ -33,10 +33,17 @@ AuxiliaryServices buildAuxiliaryServices(
           std::dynamic_pointer_cast<services::LLMService>(activeService)) {
     const auto mode = tt::config::llmMode();
     if (mode != tt::config::LLMMode::REGULAR) {
+      // Dynamo routing still needs InterServer ZMQ for prefill→decode slot
+      // reservation; etcd is only used to discover that a decode peer exists.
       auto socket = std::make_shared<sockets::InterServerService>();
       socket->initializeFromConfig();
       auto disagg =
           std::make_shared<services::DisaggregationService>(mode, llm, socket);
+      if (tt::config::dynamoRoutingEnabled()) {
+        TT_LOG_INFO(
+            "[ServiceFactory] DYNAMO_ROUTING=1; etcd discovery + ZMQ slot "
+            "reservation");
+      }
       return {std::move(socket), std::move(disagg)};
     }
   }
@@ -65,8 +72,26 @@ void initializeServices() {
 
   auto aux = buildAuxiliaryServices(activeService);
 
+  auto sessionManager = std::make_shared<services::SessionManager>();
+
+  if (aux.disaggregation) {
+    aux.disaggregation->setSessionManager(sessionManager);
+  }
+
   c.initialize(std::move(aux.socket), std::move(aux.disaggregation),
-               std::make_shared<services::SessionManager>());
+               std::move(sessionManager));
+
+  if (c.sessionManager()) {
+    TT_LOG_INFO("[ServiceFactory] Session manager initialized");
+  }
+
+  TT_LOG_INFO("[ServiceFactory] Active model service registered: {}",
+              tt::config::toString(active));
+}
+
+void startConfiguredService() {
+  auto& c = services::ServiceContainer::instance();
+  const auto active = tt::config::modelService();
 
   if (auto svc = c.configuredService()) {
     svc->start();
@@ -77,12 +102,6 @@ void initializeServices() {
     c.disaggregation()->start();
     TT_LOG_INFO("[ServiceFactory] Disaggregation service started");
   }
-  if (c.sessionManager()) {
-    TT_LOG_INFO("[ServiceFactory] Session manager initialized");
-  }
-
-  TT_LOG_INFO("[ServiceFactory] Active model service: {}",
-              tt::config::toString(active));
 }
 
 }  // namespace tt::utils::service_factory

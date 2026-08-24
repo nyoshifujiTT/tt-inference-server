@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import yaml
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
@@ -15,6 +16,7 @@ from workflows.utils import (
     get_repo_root_path,
     get_version,
     parse_commits_from_docker_image,
+    parse_image_version,
 )
 from workflows.utils_report import BenchmarkTaskParams, PerformanceTarget
 from workflows.workflow_types import (
@@ -23,6 +25,7 @@ from workflows.workflow_types import (
     ModelStatusTypes,
     ModelType,
     VersionMode,
+    WorkflowType,
 )
 
 if TYPE_CHECKING:
@@ -33,8 +36,14 @@ MODEL_SPECS_SCHEMA_VERSION = "0.1.0"
 
 
 def generate_docker_tag(
-    version: str, tt_metal_commit: str, vllm_commit: Optional[str]
+    version: Optional[str],
+    tt_metal_commit: Optional[str],
+    vllm_commit: Optional[str],
 ) -> str:
+    if version is None or tt_metal_commit is None:
+        raise ValueError(
+            "Cannot generate docker tag: version and tt_metal_commit are required"
+        )
     max_tag_len = 12
     if vllm_commit:
         return f"{version}-{tt_metal_commit[:max_tag_len]}-{vllm_commit[:max_tag_len]}"
@@ -42,9 +51,17 @@ def generate_docker_tag(
         return f"{version}-{tt_metal_commit[:max_tag_len]}"
 
 
+def generate_code_link(
+    repo_url: str, tt_metal_commit: Optional[str], code_path: str
+) -> str:
+    if tt_metal_commit is None:
+        raise ValueError("Cannot generate code link: tt_metal_commit is None")
+    return f"{repo_url}/tree/{tt_metal_commit}/{code_path}"
+
+
 def generate_default_docker_link(
-    version: str,
-    tt_metal_commit: str,
+    version: Optional[str],
+    tt_metal_commit: Optional[str],
     vllm_commit: Optional[str],
     inference_engine: str = "",
     multihost: bool = False,
@@ -65,6 +82,7 @@ def generate_default_docker_link(
 def read_performance_reference_json() -> Dict[DeviceTypes, List[BenchmarkTaskParams]]:
     default_filepath = (
         get_repo_root_path()
+        / "reference_config"
         / "benchmarking"
         / "benchmark_targets"
         / "model_performance_reference.json"
@@ -262,16 +280,81 @@ tt_vllm_plugin_impl = ImplSpec(
     repo_url="https://github.com/tenstorrent/tt-inference-server/tree/dev/tt-vllm-plugin",
     code_path="tt_vllm_plugin",
 )
-# Canonical path: the standalone Tenstorrent vLLM plugin (upstream vLLM 0.24,
-# tenstorrent/vllm-tt-plugin) rather than the legacy in-tree fork plugin. Images
-# built for this impl use the canonical Dockerfile (upstream vLLM + standalone
-# plugin + EXTRA_MODELS_DIR model registration, no sitecustomize monkey-patch).
-tt_vllm_plugin_canonical_impl = ImplSpec(
-    impl_id="tt_vllm_plugin_canonical",
-    impl_name="tt-vllm-plugin-canonical",
-    repo_url="https://github.com/tenstorrent/vllm-tt-plugin",
-    code_path="src/vllm_tt_plugin",
+# Distinct impl for forge SDXL so its model_id does not collide with the media
+# SDXL spec (which uses tt_transformers_impl) on shared Blackhole devices.
+sdxl_forge_impl = ImplSpec(
+    impl_id="sdxl_forge",
+    impl_name="sdxl-forge",
+    repo_url="https://github.com/tenstorrent/tt-inference-server",
+    code_path="tt-media-server/tt_model_runners/forge_runners/sdxl_forge_runner.py",
 )
+# --- Qwen3.5/3.6 on Blackhole: one tt-metal code path, several serving profiles ---
+#
+# All three impls below point at the SAME tt-metal code (repo_url + code_path are
+# identical: models/demos/blackhole/qwen36, which serves the whole Qwen3.5/3.6
+# family, text and vision, config-driven). They are NOT separate implementations.
+#
+# Why separate impl_id/impl_name entries then? Because a model spec is keyed by
+# get_model_id() = f"id_{impl_name}_{model_name}_{device}". To offer more than one
+# serving profile for the SAME (model_name, device) pair -- e.g. Qwen3.6-27B on
+# P150X4 as text-only, as vision (VLM), or as batch=8 -- each profile needs a
+# distinct impl_name so its model_id does not collide in the catalog. The impl_id
+# is therefore a selection/name-spacing key (chosen at launch via --impl), not a
+# different codebase. The per-profile differences (model_type, supported_modalities,
+# vllm_args, trace_region_size, release pins, ...) live in the dev/prod *.yaml specs,
+# not here.
+#
+# Profiles:
+#   qwen36_blackhole       -> text-only (LLM). Default profile for chat/tool use;
+#                             lighter trace / no mm processor. Kept even though the
+#                             VLM profile could also serve text, so text-only
+#                             workloads and their benchmarks/release pins stay isolated.
+#   qwen36_blackhole_vlm   -> native vision (VLM); model_type=VLM, modalities
+#                             text+image+video, larger trace_region for the vision tower.
+qwen36_blackhole_impl = ImplSpec(
+    impl_id="qwen36_blackhole",
+    impl_name="qwen36-blackhole",
+    repo_url="https://github.com/tenstorrent/tt-metal",
+    code_path="models/demos/blackhole/qwen36",
+)
+# Same tt-metal code as qwen36_blackhole; distinct impl_id only so the VLM (vision)
+# spec gets its own model_id and does not collide with the text spec on the same
+# (model_name, device). Selectable via --impl qwen36-blackhole-vlm.
+qwen36_blackhole_vlm_impl = ImplSpec(
+    impl_id="qwen36_blackhole_vlm",
+    impl_name="qwen36-blackhole-vlm",
+    repo_url="https://github.com/tenstorrent/tt-metal",
+    code_path="models/demos/blackhole/qwen36",
+)
+diffusion_gemma_impl = ImplSpec(
+    impl_id="diffusion_gemma",
+    impl_name="diffusion-gemma",
+    repo_url="https://github.com/tenstorrent/tt-metal",
+    code_path="models/experimental/diffusion_gemma",
+)
+training_lora_impl = ImplSpec(
+    impl_id="training_lora",
+    impl_name="training-lora",
+    repo_url="https://github.com/tenstorrent/tt-inference-server",
+    code_path="tt-media-server/tt_model_runners/forge_training_runners/training_lora_runner.py",
+)
+
+_IMPL_REGISTRY: Dict[str, ImplSpec] = {
+    "tt_transformers": tt_transformers_impl,
+    "llama3_70b_galaxy": llama3_70b_galaxy_impl,
+    "qwen3_32b_galaxy": qwen3_32b_galaxy_impl,
+    "gpt_oss": gpt_oss_impl,
+    "deepseek_r1_galaxy": deepseek_r1_galaxy_impl,
+    "whisper": whisper_impl,
+    "speecht5_tts": speecht5_impl,
+    "forge_vllm_plugin": forge_vllm_plugin_impl,
+    "tt_vllm_plugin": tt_vllm_plugin_impl,
+    "sdxl_forge": sdxl_forge_impl,
+    "qwen36_blackhole": qwen36_blackhole_impl,
+    "qwen36_blackhole_vlm": qwen36_blackhole_vlm_impl,
+    "diffusion_gemma": diffusion_gemma_impl,
+    "training_lora": training_lora_impl,
+}
 
 
 @dataclass(frozen=True)
@@ -291,6 +374,25 @@ class SystemRequirements:
 
 
 @dataclass(frozen=True)
+class KnownIssue:
+    workflow_type: WorkflowType
+    reason: str
+    task_name: Optional[str] = None
+
+    def __post_init__(self):
+        if not isinstance(self.workflow_type, WorkflowType):
+            coerced = WorkflowType.from_string(str(self.workflow_type))
+            object.__setattr__(self, "workflow_type", coerced)
+
+    def matches(self, workflow_type: WorkflowType, task_name: Optional[str]) -> bool:
+        if self.workflow_type != workflow_type:
+            return False
+        if self.task_name is None:
+            return True
+        return task_name is not None and self.task_name == task_name
+
+
+@dataclass(frozen=True)
 class DeviceModelSpec:
     """
     Model-specific specification for a specific device.
@@ -299,6 +401,8 @@ class DeviceModelSpec:
     device: DeviceTypes
     max_concurrency: int
     max_context: int
+    # Explicit device KV-pool token budget for benchmark concurrency; set only when the pool is decoupled from max_context*max_num_seqs (does NOT affect max_context). None => derived from max_context.
+    max_tokens_all_users_override: Optional[int] = None
     perf_targets_map: Dict[str, float] = field(default_factory=dict)
     default_impl: bool = False
     perf_reference: List[BenchmarkTaskParams] = field(default_factory=list)
@@ -307,6 +411,13 @@ class DeviceModelSpec:
     env_vars: Dict[str, str] = field(default_factory=dict)
     tensor_cache_timeout: float = 3600.0
     system_requirements: Optional[SystemRequirements] = None
+    known_issues: List[KnownIssue] = field(default_factory=list)
+    # When set, run_evals appends max_retries=<N> to lm-eval --model_args.
+    # Default 3 × exponential backoff = hours of burn on permanent 4xx.
+    eval_max_retries: Optional[int] = None
+    # num_calls = num_batches * max_concurrency.
+    # Uniform default of 3 across all image models; override per model in the YAML spec
+    image_benchmark_num_batches: int = 3
 
     def __post_init__(self):
         self.validate_data()
@@ -328,6 +439,14 @@ class DeviceModelSpec:
             # DP engines without needing to know about DP rank.
             max_concurrency = max_concurrency // data_parallel_size
             max_tokens_all_users = max_tokens_all_users * data_parallel_size
+        # Remote SUPER_CLUSTER endpoints are not bound by a single-device KV
+        # pool: the servable token budget across concurrent users is
+        # context * concurrency.
+        if self.device == DeviceTypes.SUPER_CLUSTER:
+            max_tokens_all_users = self.max_context * self.max_concurrency
+        # An explicit override is the true total device pool: used verbatim (no data_parallel scaling).
+        if self.max_tokens_all_users_override is not None:
+            max_tokens_all_users = self.max_tokens_all_users_override
         object.__setattr__(self, "max_tokens_all_users", max_tokens_all_users)
         # TODO: we should get max_num_batched_tokens from DeviceModelSpec in the future
         default_vllm_args = {
@@ -337,6 +456,7 @@ class DeviceModelSpec:
             "max_num_batched_tokens": str(self.max_context),
             "max-log-len": "32",
             "seed": "9472",
+            "additional_config": json.dumps({"tt": self.override_tt_config}),
         }
         # Only emit the TT config override when non-empty. Newer vLLM (the tt
         # plugin build) dropped the fork-only `--override_tt_config` flag in
@@ -352,6 +472,14 @@ class DeviceModelSpec:
         object.__setattr__(self, "vllm_args", merged_vllm_args)
 
         self._infer_env_vars()
+
+    def find_known_issue(
+        self, workflow_type: WorkflowType, task_name: Optional[str] = None
+    ) -> Optional[KnownIssue]:
+        for issue in self.known_issues:
+            if issue.matches(workflow_type, task_name):
+                return issue
+        return None
 
     def _infer_env_vars(self):
         inferred_env_vars = {}
@@ -387,12 +515,12 @@ class ModelSpec:
     model_name: str
     inference_engine: InferenceEngine
     device_type: DeviceTypes  # Single device, not a set
-    tt_metal_commit: str
     device_model_spec: DeviceModelSpec
 
     # Optional specification fields (WITH DEFAULTS)
     system_requirements: Optional[SystemRequirements] = None
     env_vars: Dict[str, str] = field(default_factory=dict)
+    tt_metal_commit: Optional[str] = None
     vllm_commit: Optional[str] = None
     hf_weights_repo: Optional[str] = (
         None  # HF repo to download weights from (defaults to hf_model_repo)
@@ -402,7 +530,7 @@ class ModelSpec:
     min_ram_gb: Optional[int] = None
     model_type: Optional[ModelType] = ModelType.LLM
     repacked: int = 0
-    version: str = VERSION
+    version: Optional[str] = None
     docker_image: Optional[str] = None
     status: str = ModelStatusTypes.EXPERIMENTAL
     code_link: Optional[str] = None
@@ -419,12 +547,19 @@ class ModelSpec:
     cli_args: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
-        default_env_vars = {
-            "VLLM_CONFIGURE_LOGGING": "1",
-            "VLLM_RPC_TIMEOUT": "900000",
-            "VLLM_TARGET_DEVICE": "tt",
-            "TORCHDYNAMO_DISABLE": "1",
-        }
+        # Skipped for forge/media: Forge vLLM relies on torch.compile/dynamo for its compilation pipeline; TORCHDYNAMO_DISABLE=1 breaks warmup.
+        if self.inference_engine in (
+            InferenceEngine.FORGE.value,
+            InferenceEngine.MEDIA.value,
+        ):
+            default_env_vars = {}
+        else:
+            default_env_vars = {
+                "VLLM_CONFIGURE_LOGGING": "1",
+                "VLLM_RPC_TIMEOUT": "900000",
+                "VLLM_TARGET_DEVICE": "tt",
+                "TORCHDYNAMO_DISABLE": "1",
+            }
         # order of precedence: default, env_vars, device_model_spec
         merged_env_vars = {
             **default_env_vars,
@@ -487,9 +622,13 @@ class ModelSpec:
             # assume fp16 equivalent weights, add 0.5x overhead buffer
             object.__setattr__(self, "min_ram_gb", self.param_count * 2.5)
 
-        # Generate default docker image if not provided
-        if not self.docker_image:
-            # Note: default to release image, use --dev-mode at runtime to use dev images
+        # Generate default docker image if not provided. Synthesis needs
+        # version + tt_metal_commit; dev specs omit both, so skip and leave docker_image=None
+        if (
+            not self.docker_image
+            and self.version is not None
+            and self.tt_metal_commit is not None
+        ):
             # TODO: Use ubuntu version to interpolate this string
             _default_docker_link = generate_default_docker_link(
                 self.version,
@@ -500,12 +639,14 @@ class ModelSpec:
             )
             object.__setattr__(self, "docker_image", _default_docker_link)
 
-        # Generate code link
-        if not self.code_link:
+        # Generate code link. Needs tt_metal_commit; skip when absent (dev specs).
+        if not self.code_link and self.tt_metal_commit is not None:
             object.__setattr__(
                 self,
                 "code_link",
-                f"{self.impl.repo_url}/tree/{self.tt_metal_commit}/{self.impl.code_path}",
+                generate_code_link(
+                    self.impl.repo_url, self.tt_metal_commit, self.impl.code_path
+                ),
             )
 
         data_parallel = self.device_model_spec.vllm_args.get("data_parallel_size")
@@ -683,6 +824,12 @@ class ModelSpec:
                         else:
                             deserialized_perf_ref.append(task_data)
                     value["perf_reference"] = deserialized_perf_ref
+                known_issues = value.get("known_issues", [])
+                if known_issues:
+                    value["known_issues"] = [
+                        KnownIssue(**ki) if isinstance(ki, dict) else ki
+                        for ki in known_issues
+                    ]
                 return DeviceModelSpec(**value)
             elif field_type == SystemRequirements and isinstance(value, dict):
                 for requirement_name, requirement_spec in value.items():
@@ -760,7 +907,7 @@ class ModelSpec:
             )
             merged_vllm_args = {
                 **self.device_model_spec.vllm_args,
-                "override_tt_config": json.dumps(merged_override_config),
+                "additional_config": json.dumps({"tt": merged_override_config}),
             }
             object.__setattr__(self.device_model_spec, "vllm_args", merged_vllm_args)
 
@@ -777,17 +924,28 @@ class ModelSpec:
 
             object.__setattr__(self.device_model_spec, "vllm_args", merged_vllm_args)
 
+            # Mirror overridden vllm_args into env_vars so forge/media containers,
+            # which read bare env vars (not vllm CLI args), pick up the override.
+            VLLM_ARG_TO_ENV = {
+                "max_num_seqs": "MAX_NUM_SEQS",
+                "max_model_len": "MAX_MODEL_LENGTH",
+            }
+            overridden_env = {
+                env_key: str(vllm_override_args_from_cli[vllm_key])
+                for vllm_key, env_key in VLLM_ARG_TO_ENV.items()
+                if vllm_override_args_from_cli.get(vllm_key) is not None
+            }
+            if overridden_env:
+                object.__setattr__(
+                    self, "env_vars", {**self.env_vars, **overridden_env}
+                )
+
         if runtime_config.service_port:
             merged_vllm_args = {
                 **self.device_model_spec.vllm_args,
                 "port": runtime_config.service_port,
             }
             object.__setattr__(self.device_model_spec, "vllm_args", merged_vllm_args)
-
-        if runtime_config.dev_mode:
-            object.__setattr__(
-                self, "docker_image", self.docker_image.replace("-release-", "-dev-")
-            )
 
         if runtime_config.override_docker_image:
             object.__setattr__(
@@ -798,6 +956,15 @@ class ModelSpec:
             )
             object.__setattr__(self, "tt_metal_commit", tt_metal_commit)
             object.__setattr__(self, "vllm_commit", vllm_commit)
+            # Re-parse `version` from the override tag so the pre-0.11
+            # support check (validate_runtime_args) sees the actual image
+            # being run, not the template default. Unparseable override
+            # tags (`:dev`, `:latest`) leave version untouched.
+            parsed_version = parse_image_version(runtime_config.override_docker_image)
+            if parsed_version is not None:
+                object.__setattr__(
+                    self, "version", ".".join(str(p) for p in parsed_version)
+                )
 
 
 @dataclass(frozen=True)
@@ -811,20 +978,23 @@ class ModelSpecTemplate:
     # Required fields (NO DEFAULTS) - must come first
     weights: List[str]  # List of HF model repos to create specs for
     impl: ImplSpec
-    tt_metal_commit: str
     inference_engine: InferenceEngine
     device_model_specs: List[DeviceModelSpec]
 
     # Optional template fields (WITH DEFAULTS) - must come after required fields
     system_requirements: Optional[SystemRequirements] = None
-    vllm_commit: Optional[str] = None
     status: str = ModelStatusTypes.EXPERIMENTAL
     env_vars: Dict[str, str] = field(default_factory=dict)
     supported_modalities: List[str] = field(default_factory=lambda: ["text"])
     repacked: int = 0
-    version: str = VERSION
     perf_targets_map: Dict[str, float] = field(default_factory=dict)
-    docker_image: Optional[str] = None
+    # True when the catalog explicitly pinned the image via `version` or
+    # `docker_image` (prod templates always do; dev never does). When neither is
+    # set, no docker tag is synthesized, so these specs are excluded from
+    # IMAGE_PINNED_MODEL_SPECS (the list the helm chart generator consumes).
+    # Set by _build_template from YAML key presence; defaults True for directly
+    # constructed templates so they are never dropped.
+    image_pinned: bool = True
     model_type: Optional[ModelType] = ModelType.LLM
     min_disk_gb: Optional[int] = None
     min_ram_gb: Optional[int] = None
@@ -897,6 +1067,7 @@ class ModelSpecTemplate:
                     device=device_model_spec.device,
                     max_concurrency=device_model_spec.max_concurrency,
                     max_context=device_model_spec.max_context,
+                    max_tokens_all_users_override=device_model_spec.max_tokens_all_users_override,
                     perf_targets_map=device_model_spec.perf_targets_map,
                     default_impl=device_model_spec.default_impl,
                     perf_reference=perf_reference,
@@ -905,6 +1076,8 @@ class ModelSpecTemplate:
                     env_vars=device_model_spec.env_vars,
                     tensor_cache_timeout=device_model_spec.tensor_cache_timeout,
                     system_requirements=device_model_spec.system_requirements,
+                    known_issues=device_model_spec.known_issues,
+                    eval_max_retries=device_model_spec.eval_max_retries,
                 )
                 spec = ModelSpec(
                     # Core identity
@@ -919,14 +1092,16 @@ class ModelSpecTemplate:
                     system_requirements=device_model_spec.system_requirements
                     if device_model_spec.system_requirements
                     else self.system_requirements,
-                    tt_metal_commit=self.tt_metal_commit,
-                    vllm_commit=self.vllm_commit,
+                    # Release pins live only on ProdModelSpecTemplate; dev (base)
+                    # templates omit them, so read via getattr (None for dev).
+                    tt_metal_commit=getattr(self, "tt_metal_commit", None),
+                    vllm_commit=getattr(self, "vllm_commit", None),
                     hf_weights_repo=self.hf_weights_repo,
                     # Template fields
                     env_vars=self.env_vars,
                     repacked=self.repacked,
-                    version=self.version,
-                    docker_image=self.docker_image,
+                    version=getattr(self, "version", None),
+                    docker_image=getattr(self, "docker_image", None),
                     status=self.status,
                     override_tt_config=device_model_spec.override_tt_config,
                     supported_modalities=self.supported_modalities,
@@ -942,2355 +1117,24 @@ class ModelSpecTemplate:
         return specs
 
 
-# Model specification templates - these get expanded into individual specs
-# order: spec_templates = (
-#     llm_templates
-#     + vlm_templates
-#     + video_templates
-#     + image_templates
-#     + audio_tts_templates
-#     + embedding_templates
-#     + cnn_templates
-# )
+@dataclass(frozen=True, kw_only=True)
+class ProdModelSpecTemplate(ModelSpecTemplate):
+    """Prod catalog template: carries the release pins the dev base omits.
+
+    ``version`` and ``tt_metal_commit`` are required (a prod YAML missing either
+    fails to construct); ``vllm_commit`` and ``docker_image`` are optional
+    (FORGE/MEDIA specs have no vllm_commit; most specs synthesize their image).
+    Construction enforces the prod contract directly — no separate field check.
+    """
+
+    tt_metal_commit: str
+    version: str
+    vllm_commit: Optional[str] = None
+    docker_image: Optional[str] = None
 
 
-# =============================================================================
-# llm_templates
-# =============================================================================
-llm_templates = [
-    ModelSpecTemplate(
-        weights=["openai/gpt-oss-20b"],
-        impl=gpt_oss_impl,
-        version="0.10.0",
-        tt_metal_commit="e867533",
-        vllm_commit="8f36910",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=16 * 1024,
-                default_impl=True,
-                env_vars={
-                    "VLLM_ENABLE_RESPONSES_API_STORE": 1,
-                    "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": 1,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=1,
-                max_context=16 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32 * 4,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "MESH_DEVICE": "(4, 8)",  # Override default TG->(8,4) to use (4,8) mesh grid
-                },
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        has_builtin_warmup=True,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
-        },
-        metadata={
-            "openai/gpt-oss-20b": {
-                "reasoning_parser_name": "openai_gptoss",
-                "tool_call_parser_name": "openai",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["openai/gpt-oss-120b"],
-        impl=gpt_oss_impl,
-        version="0.12.0",
-        tt_metal_commit="805f43d",
-        vllm_commit="a45c614",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=16 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                override_tt_config={
-                    "trace_region_size": 134217728,  # 128 MB; vLLM default 50 MB is too small for long prefill
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32,  # currently limiting client-side max_concurrency=32 to allow workflows to
-                # complete else they will timeout due to hitting the vLLM RPC recv 30min timeout
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                env_vars={
-                    "MESH_DEVICE": "(4, 8)",  # Override default TG->(8,4) to use (4,8) mesh grid
-                    "TT_MM_THROTTLE_PERF": 2,
-                },
-                vllm_args={
-                    "data_parallel_size": 4,
-                    "max_num_seqs": 32,  # override the default inferred by max_concurrency
-                },
-                override_tt_config={
-                    "sample_on_device_mode": "all",
-                    "trace_region_size": 134217728,  # 128 MB; vLLM default 50 MB is too small for long prefill
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        has_builtin_warmup=True,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
-        },
-        metadata={
-            "openai/gpt-oss-120b": {
-                "reasoning_parser_name": "openai_gptoss",
-                "tool_call_parser_name": "openai",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["arcee-ai/AFM-4.5B"],
-        impl=tt_transformers_impl,
-        version="0.3.0",
-        tt_metal_commit="ae65ee5",
-        vllm_commit="35f023f",
-        inference_engine=InferenceEngine.VLLM.value,
-        # need to add default sampling params here because they're
-        # not in generation_config.json
-        # see: https://github.com/tenstorrent/tt-inference-server/issues/1066
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=64 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "override_generation_config": json.dumps(
-                        {
-                            "temperature": 0.5,
-                            "top_k": 50,
-                            "top_p": 0.95,
-                        }
-                    ),
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=64 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "override_generation_config": json.dumps(
-                        {
-                            "temperature": 0.5,
-                            "top_k": 50,
-                            "top_p": 0.95,
-                        }
-                    ),
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "google/gemma-3-1b-it",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="c254ee3",
-        vllm_commit="c4f2327",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "l1_small_size": 4096,
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        has_builtin_warmup=True,
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen3-8B"],
-        impl=tt_transformers_impl,
-        version="0.10.0",
-        tt_metal_commit="e0e0500",
-        vllm_commit="409b1cd",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 51000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=40960,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 51000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=40960,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=32,
-                max_context=40960,
-                default_impl=True,
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                },
-                override_tt_config={
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32 * 4,
-                max_context=40960,
-                default_impl=True,
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "Qwen/Qwen3-8B": {
-                "reasoning_parser_name": "qwen3",
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen3-8B"],
-        impl=tt_transformers_impl,
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=19.2.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.5.0",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        version="0.10.0",
-        tt_metal_commit="e867533",
-        vllm_commit="22be241",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P300,
-                max_concurrency=32,
-                max_context=40960,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "Qwen/Qwen3-8B": {
-                "reasoning_parser_name": "qwen3",
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen3-32B"],
-        impl=qwen3_32b_galaxy_impl,
-        version="0.11.1",
-        tt_metal_commit="bac8b34",
-        vllm_commit="7c6685a",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=8 * 4,
-                # NOTE: model natively supports 40K but use this to override max_num_batched_tokens
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-                },
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-                override_tt_config={
-                    "dispatch_core_axis": "col",
-                    "sample_on_device_mode": "all",
-                    "fabric_config": "FABRIC_1D_RING",
-                    "worker_l1_size": 1344544,
-                    "trace_region_size": 184915840,
-                },
-            ),
-        ],
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=18.6.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.1.0",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        status=ModelStatusTypes.COMPLETE,
-        has_builtin_warmup=True,
-        metadata={
-            "Qwen/Qwen3-32B": {
-                "reasoning_parser_name": "qwen3",
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen3-32B"],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="e95ffa5",
-        vllm_commit="48eba14",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 54000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                },
-                override_tt_config={
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32 * 4,
-                max_context=128 * 1024,
-                default_impl=False,
-                override_tt_config={
-                    "trace_region_size": 66147328,
-                    "sample_on_device_mode": "decode_only",
-                },
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        metadata={
-            "Qwen/Qwen3-32B": {
-                "reasoning_parser_name": "qwen3",
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen3-32B"],
-        impl=tt_transformers_impl,
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=18.12.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.4.1",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        vllm_commit="22be241",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 61341696,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        metadata={
-            "Qwen/Qwen3-32B": {
-                "reasoning_parser_name": "qwen3",
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen3-32B"],
-        impl=tt_transformers_impl,
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=19.2.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.5.0",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        vllm_commit="22be241",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        metadata={
-            "Qwen/Qwen3-32B": {
-                "reasoning_parser_name": "qwen3",
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["mistralai/Mistral-7B-Instruct-v0.3"],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="9b67e09",
-        vllm_commit="a91b644",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["mistralai/Mistral-Small-3.1-24B-Instruct-2503"],
-        impl=tt_transformers_impl,
-        tt_metal_commit="9e3b1b3",
-        vllm_commit="1d0aa18",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 90000000,
-                },
-                vllm_args={
-                    "limit-mm-per-prompt": json.dumps({"image": 1}),
-                    "mm-processor-cache-gb": 0,
-                },
-            ),
-        ],
-        model_type=ModelType.VLM,
-        status=ModelStatusTypes.EXPERIMENTAL,
-        has_builtin_warmup=True,
-        supported_modalities=["text", "image"],
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/QwQ-32B"],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="e95ffa5",
-        vllm_commit="48eba14",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32 * 4,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-                override_tt_config={
-                    "trace_region_size": 27381760,
-                },
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                },
-                override_tt_config={
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        metadata={
-            "Qwen/QwQ-32B": {
-                "reasoning_parser_name": "deepseek_r1",
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen2.5-72B", "Qwen/Qwen2.5-72B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="13f44c5",
-        vllm_commit="0edd242",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                override_tt_config={
-                    "trace_region_size": 66000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32 * 4,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-                override_tt_config={
-                    "trace_region_size": 66000000,
-                },
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                override_tt_config={
-                    "trace_region_size": 40000000,
-                    "fabric_config": "FABRIC_1D",
-                },
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-            "MAX_PREFILL_CHUNK_SIZE": "16",
-        },
-        metadata={
-            "Qwen/Qwen2.5-72B": {
-                "tool_call_parser_name": "hermes",
-            },
-            "Qwen/Qwen2.5-72B-Instruct": {
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen2.5-7B", "Qwen/Qwen2.5-7B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="5b5db8a",
-        vllm_commit="e771fff",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=16,
-                max_context=32 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 60000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N150X4,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        metadata={
-            "Qwen/Qwen2.5-7B": {
-                "tool_call_parser_name": "hermes",
-            },
-            "Qwen/Qwen2.5-7B-Instruct": {
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "meta-llama/Llama-3.3-70B-Instruct",
-            "meta-llama/Llama-3.1-70B",
-            "meta-llama/Llama-3.1-70B-Instruct",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-        ],
-        impl=llama3_70b_galaxy_impl,
-        version="0.10.0",
-        tt_metal_commit="e867533",
-        vllm_commit="8f36910",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=8 * 4,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-                override_tt_config={
-                    "dispatch_core_axis": "col",
-                    "sample_on_device_mode": "all",
-                    "fabric_config": "FABRIC_1D_RING",
-                    "worker_l1_size": 1344544,
-                    "trace_region_size": 215000000,
-                },
-            ),
-        ],
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=18.6.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.1.0",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        status=ModelStatusTypes.COMPLETE,
-        has_builtin_warmup=True,
-        metadata={
-            "meta-llama/Llama-3.3-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": {
-                "reasoning_parser_name": "deepseek_r1",
-                "tool_call_parser_name": "deepseek_v3",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "deepseek-ai/DeepSeek-R1-0528",
-        ],
-        impl=deepseek_r1_galaxy_impl,
-        version="0.12.0",
-        tt_metal_commit="805f43d",
-        vllm_commit="a45c614",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32 * 8,
-                max_context=2048,
-                default_impl=True,
-                tensor_cache_timeout=6400.0,
-                vllm_args={
-                    "max_model_len": "2048",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.DUAL_GALAXY,
-                max_concurrency=32 * 8,  # 32 per DP rank * 8 ranks
-                max_context=32768,
-                default_impl=True,
-                tensor_cache_timeout=6400.0,
-                vllm_args={
-                    "data_parallel_size": 8,
-                    "block_size": "32",
-                },
-                override_tt_config={
-                    "fabric_config": "FABRIC_1D",
-                    "fabric_reliability_mode": "RELAXED_INIT",
-                    "trace_mode": "none",
-                    "env_passthrough": ["DEEPSEEK_V3_CACHE", "DEEPSEEK_V3_HF_MODEL"],
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.QUAD_GALAXY,
-                max_concurrency=32 * 16,  # 32 per DP rank * 16 ranks
-                max_context=32768,
-                default_impl=True,
-                vllm_args={
-                    "data_parallel_size": 16,
-                    "block_size": "32",
-                    "max_model_len": "2048",
-                },
-                override_tt_config={
-                    "fabric_config": "FABRIC_1D",
-                    "fabric_reliability_mode": "RELAXED_INIT",
-                    "trace_mode": "none",
-                    "env_passthrough": ["DEEPSEEK_V3_CACHE", "DEEPSEEK_V3_HF_MODEL"],
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        has_builtin_warmup=True,
-        metadata={
-            "deepseek-ai/DeepSeek-R1-0528": {
-                "reasoning_parser_name": "deepseek_r1",
-                "tool_call_parser_name": "deepseek_v3",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "meta-llama/Llama-3.3-70B-Instruct",
-            "meta-llama/Llama-3.1-70B",
-            "meta-llama/Llama-3.1-70B-Instruct",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-        ],
-        impl=tt_transformers_impl,
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=18.8.0",
-                mode=VersionMode.SUGGESTED,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.2.0",
-                mode=VersionMode.SUGGESTED,
-            ),
-        ),
-        version="0.11.1",
-        tt_metal_commit="750ca54",
-        vllm_commit="38dee8c",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-                env_vars={
-                    "MAX_PREFILL_CHUNK_SIZE": "32",
-                    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "meta-llama/Llama-3.3-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": {
-                "reasoning_parser_name": "deepseek_r1",
-                "tool_call_parser_name": "deepseek_v3",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "meta-llama/Llama-3.3-70B-Instruct",
-            "meta-llama/Llama-3.1-70B",
-            "meta-llama/Llama-3.1-70B-Instruct",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-        ],
-        impl=tt_transformers_impl,
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        vllm_commit="22be241",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P150X4,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-                system_requirements=SystemRequirements(
-                    firmware=VersionRequirement(
-                        specifier=">=18.5.0",
-                        mode=VersionMode.STRICT,
-                    ),
-                    kmd=VersionRequirement(
-                        specifier=">=2.3.0",
-                        mode=VersionMode.STRICT,
-                    ),
-                ),
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                override_tt_config={
-                    "trace_region_size": 143000000,
-                },
-                system_requirements=SystemRequirements(
-                    firmware=VersionRequirement(
-                        specifier=">=18.12.0",
-                        mode=VersionMode.STRICT,
-                    ),
-                    kmd=VersionRequirement(
-                        specifier=">=2.4.1",
-                        mode=VersionMode.STRICT,
-                    ),
-                ),
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "meta-llama/Llama-3.3-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": {
-                "reasoning_parser_name": "deepseek_r1",
-                "tool_call_parser_name": "deepseek_v3",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "meta-llama/Llama-3.3-70B-Instruct",
-            "meta-llama/Llama-3.1-70B",
-            "meta-llama/Llama-3.1-70B-Instruct",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-        ],
-        impl=tt_transformers_impl,
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=19.2.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.5.0",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        vllm_commit="22be241",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                override_tt_config={
-                    "trace_region_size": 58000000,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "meta-llama/Llama-3.3-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": {
-                "reasoning_parser_name": "deepseek_r1",
-                "tool_call_parser_name": "deepseek_v3",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "meta-llama/Llama-3.3-70B-Instruct",
-            "meta-llama/Llama-3.1-70B",
-            "meta-llama/Llama-3.1-70B-Instruct",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-        ],
-        impl=tt_transformers_impl,
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=18.6.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.1.0",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        version="0.2.0",
-        tt_metal_commit="v0.62.0-rc33",
-        vllm_commit="e7c329b",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                tensor_cache_timeout=5400.0,
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                    "MAX_PREFILL_CHUNK_SIZE": "32",
-                    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                },
-                override_tt_config={
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "meta-llama/Llama-3.3-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-70B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": {
-                "reasoning_parser_name": "deepseek_r1",
-                "tool_call_parser_name": "deepseek_v3",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-1B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.11.1",
-        tt_metal_commit="84b4c53",
-        vllm_commit="222ee06",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-        ],
-        env_vars={"VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1},
-        status=ModelStatusTypes.FUNCTIONAL,
-        has_builtin_warmup=True,
-        metadata={
-            "meta-llama/Llama-3.2-1B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.2-1B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.2-3B", "meta-llama/Llama-3.2-3B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.3.0",
-        tt_metal_commit="20edc39",
-        vllm_commit="03cb300",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                override_tt_config={"trace_region_size": 10000000},
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "meta-llama/Llama-3.2-3B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.2-3B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="25305db",
-        vllm_commit="6e67d2d",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 52000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 70000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 117000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GPU,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=False,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-        metadata={
-            "meta-llama/Llama-3.1-8B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-8B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.10.0",
-        tt_metal_commit="55fd115",
-        vllm_commit="aa4ae1e",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P100,
-                max_concurrency=32,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 90000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150,
-                max_concurrency=32,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        metadata={
-            "meta-llama/Llama-3.1-8B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-8B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        vllm_commit="22be241",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P150X4,
-                max_concurrency=32 * 4,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-                override_tt_config={
-                    "sample_on_device_mode": "decode_only",
-                    "trace_region_size": 70000000,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-        metadata={
-            "meta-llama/Llama-3.1-8B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-8B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B-Instruct"],
-        impl=tt_transformers_impl,
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=18.12.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.4.1",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        vllm_commit="22be241",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=32 * 8,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "data_parallel_size": 8,
-                },
-                override_tt_config={
-                    "sample_on_device_mode": "decode_only",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "meta-llama/Llama-3.1-8B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-8B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B-Instruct"],
-        impl=tt_transformers_impl,
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=19.2.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.5.0",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        vllm_commit="22be241",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "sample_on_device_mode": "decode_only",
-                    "trace_region_size": 105000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "sample_on_device_mode": "decode_only",
-                    "trace_region_size": 56000000,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        metadata={
-            "meta-llama/Llama-3.1-8B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-8B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.11.1",
-        tt_metal_commit="bac8b34",
-        vllm_commit="7c6685a",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32 * 4,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "data_parallel_size": 4,
-                },
-                override_tt_config={
-                    "trace_region_size": 50000000,
-                    "sample_on_device_mode": "all",
-                },
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "trace_region_size": 50000000,
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                    "TT_MM_THROTTLE_PERF": 5,
-                },
-                override_tt_config={
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-        ],
-        system_requirements=SystemRequirements(
-            firmware=VersionRequirement(
-                specifier=">=18.6.0",
-                mode=VersionMode.STRICT,
-            ),
-            kmd=VersionRequirement(
-                specifier=">=2.1.0",
-                mode=VersionMode.STRICT,
-            ),
-        ),
-        status=ModelStatusTypes.FUNCTIONAL,
-        has_builtin_warmup=True,
-        metadata={
-            "meta-llama/Llama-3.1-8B": {
-                "tool_call_parser_name": "llama3_json",
-            },
-            "meta-llama/Llama-3.1-8B-Instruct": {
-                "tool_call_parser_name": "llama3_json",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen2.5-Coder-32B-Instruct"],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="17a5973",
-        vllm_commit="aa4ae1e",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 56000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                },
-                override_tt_config={
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        metadata={
-            "Qwen/Qwen2.5-Coder-32B-Instruct": {
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-]
-
-# =============================================================================
-# vlm_templates
-# =============================================================================
-vlm_templates = [
-    ModelSpecTemplate(
-        weights=[
-            "google/gemma-3-4b-it",
-            "google/medgemma-4b-it",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="aecd1d7",
-        vllm_commit="0da90eb",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "limit-mm-per-prompt": json.dumps({"image": 10}),
-                    "mm-processor-cache-gb": 0,
-                },
-                override_tt_config={
-                    "l1_small_size": 4096,
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "limit-mm-per-prompt": json.dumps({"image": 10}),
-                    "mm-processor-cache-gb": 0,
-                },
-                override_tt_config={
-                    "l1_small_size": 4096,
-                    "fabric_config": "FABRIC_1D",
-                },
-            ),
-        ],
-        model_type=ModelType.VLM,
-        status=ModelStatusTypes.EXPERIMENTAL,
-        supported_modalities=["text", "image"],
-        has_builtin_warmup=True,
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "google/gemma-3-27b-it",
-            "google/medgemma-27b-it",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="aecd1d7",
-        vllm_commit="0da90eb",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "limit-mm-per-prompt": json.dumps({"image": 10}),
-                    "mm-processor-cache-gb": 0,
-                },
-                override_tt_config={
-                    "l1_small_size": 4096,
-                    "fabric_config": "FABRIC_1D",
-                    "sample_on_device_mode": "decode_only",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY_T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/t3k_mesh_graph_descriptor.textproto",
-                },
-                vllm_args={
-                    "limit-mm-per-prompt": json.dumps({"image": 10}),
-                    "mm-processor-cache-gb": 0,
-                },
-                override_tt_config={
-                    "l1_small_size": 4096,
-                    "fabric_config": "FABRIC_1D",
-                    "sample_on_device_mode": "decode_only",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=8 * 4,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MM_THROTTLE_PERF": 5,
-                },
-                vllm_args={
-                    "limit-mm-per-prompt": json.dumps({"image": 10}),
-                    "data_parallel_size": 4,
-                    "mm-processor-cache-gb": 0,
-                },
-                override_tt_config={
-                    "l1_small_size": 4096,
-                    "fabric_config": "FABRIC_1D_RING",
-                    "sample_on_device_mode": "decode_only",
-                },
-            ),
-        ],
-        model_type=ModelType.VLM,
-        status=ModelStatusTypes.EXPERIMENTAL,
-        supported_modalities=["text", "image"],
-        has_builtin_warmup=True,
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "Qwen/Qwen3-VL-32B-Instruct",
-        ],
-        impl=tt_transformers_impl,
-        inference_engine=InferenceEngine.VLLM.value,
-        model_type=ModelType.VLM,
-        version="0.10.0",
-        tt_metal_commit="ba32283",
-        vllm_commit="4386a82",
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "mm-processor-cache-gb": 0,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        supported_modalities=["text", "image"],
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "Qwen/Qwen2.5-VL-3B-Instruct",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="c18569e",
-        vllm_commit="b2894d3",
-        inference_engine=InferenceEngine.VLLM.value,
-        model_type=ModelType.VLM,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        supported_modalities=["text", "image"],
-        metadata={
-            "Qwen/Qwen2.5-VL-3B-Instruct": {
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "Qwen/Qwen2.5-VL-7B-Instruct",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="c18569e",
-        vllm_commit="b2894d3",
-        inference_engine=InferenceEngine.VLLM.value,
-        model_type=ModelType.VLM,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=32,
-                max_context=32 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "mm-processor-cache-gb": 0,
-                },
-                override_tt_config={
-                    "trace_region_size": 10000000,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        supported_modalities=["text", "image"],
-        metadata={
-            "Qwen/Qwen2.5-VL-7B-Instruct": {
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "Qwen/Qwen2.5-VL-32B-Instruct",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="c18569e",
-        vllm_commit="b2894d3",
-        inference_engine=InferenceEngine.VLLM.value,
-        model_type=ModelType.VLM,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "mm-processor-cache-gb": 0,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        supported_modalities=["text", "image"],
-        metadata={
-            "Qwen/Qwen2.5-VL-32B-Instruct": {
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "Qwen/Qwen2.5-VL-72B-Instruct",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="c18569e",
-        vllm_commit="b2894d3",
-        inference_engine=InferenceEngine.VLLM.value,
-        model_type=ModelType.VLM,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                vllm_args={
-                    "mm-processor-cache-gb": 0,
-                },
-                override_tt_config={
-                    "trace_region_size": 28467200,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-        supported_modalities=["text", "image"],
-        metadata={
-            "Qwen/Qwen2.5-VL-72B-Instruct": {
-                "tool_call_parser_name": "hermes",
-            },
-        },
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "meta-llama/Llama-3.2-11B-Vision",
-            "meta-llama/Llama-3.2-11B-Vision-Instruct",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="v0.61.1-rc1",
-        vllm_commit="5cbc982",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=16,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=16,
-                max_context=128 * 1024,
-                default_impl=True,
-            ),
-        ],
-        model_type=ModelType.VLM,
-        status=ModelStatusTypes.FUNCTIONAL,
-        supported_modalities=["text", "image"],
-    ),
-    ModelSpecTemplate(
-        weights=[
-            "meta-llama/Llama-3.2-90B-Vision",
-            "meta-llama/Llama-3.2-90B-Vision-Instruct",
-        ],
-        impl=tt_transformers_impl,
-        version="0.9.0",
-        tt_metal_commit="v0.61.1-rc1",
-        vllm_commit="5cbc982",
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=32,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "MAX_PREFILL_CHUNK_SIZE": 16,
-                },
-            ),
-        ],
-        model_type=ModelType.VLM,
-        status=ModelStatusTypes.FUNCTIONAL,
-        supported_modalities=["text", "image"],
-    ),
-]
-
-# =============================================================================
-# video_templates
-# =============================================================================
-video_templates = [
-    ModelSpecTemplate(
-        weights=["genmo/mochi-1-preview"],
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        impl=tt_transformers_impl,
-        min_disk_gb=60,
-        min_ram_gb=32,
-        model_type=ModelType.VIDEO,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X4,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["Wan-AI/Wan2.2-T2V-A14B-Diffusers"],
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        impl=tt_transformers_impl,
-        min_disk_gb=60,
-        min_ram_gb=32,
-        model_type=ModelType.VIDEO,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X4,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["Wan-AI/Wan2.2-I2V-A14B-Diffusers"],
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        impl=tt_transformers_impl,
-        min_disk_gb=60,
-        min_ram_gb=32,
-        model_type=ModelType.VIDEO,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X4,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                override_tt_config={
-                    "trace_region_size": 30000000,
-                },
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-]
-
-# =============================================================================
-# image_templates
-# =============================================================================
-image_templates = [
-    # For both: STABLE_DIFFUSION_XL_BASE and STABLE_DIFFUSION_XL_IMG2IMG
-    ModelSpecTemplate(
-        weights=[
-            "stabilityai/stable-diffusion-xl-base-1.0",
-            "stabilityai/stable-diffusion-xl-base-1.0-img-2-img",
-        ],
-        version="0.11.1",
-        tt_metal_commit="bac8b34",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.IMAGE,
-        inference_engine=InferenceEngine.MEDIA.value,
-        # img2img uses the same weights as base SDXL
-        hf_weights_repo="stabilityai/stable-diffusion-xl-base-1.0",
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=4,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=16,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X4,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["stabilityai/stable-diffusion-3.5-large"],
-        version="0.9.0",
-        tt_metal_commit="c180ef7",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.IMAGE,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["diffusers/stable-diffusion-xl-1.0-inpainting-0.1"],
-        version="0.12.0",
-        tt_metal_commit="fbbbd2d",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        docker_image="ghcr.io/tenstorrent/tt-media-inference-server:0.5.0-fbbbd2da8cfab49ddf43d28dd9c0813a3c3ee2bd",
-        model_type=ModelType.IMAGE,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=4,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X4,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["black-forest-labs/FLUX.1-dev", "black-forest-labs/FLUX.1-schnell"],
-        version="0.10.0",
-        tt_metal_commit="555f240",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.IMAGE,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X4,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["Motif-Technologies/Motif-Image-6B-Preview"],
-        version="0.9.0",
-        tt_metal_commit="c180ef7",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.IMAGE,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P150X8,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen-Image", "Qwen/Qwen-Image-2512"],
-        version="0.9.0",
-        tt_metal_commit="be88351",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.IMAGE,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_DIT_CACHE_DIR": "/tmp/TT_DIT_CACHE",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.FUNCTIONAL,
-    ),
-]
-
-# =============================================================================
-# audio_tts_templates
-# =============================================================================
-audio_tts_templates = [
-    ModelSpecTemplate(
-        weights=["openai/whisper-large-v3", "distil-whisper/distil-large-v3"],
-        version="0.11.1",
-        tt_metal_commit="2508216",
-        impl=whisper_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.AUDIO,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.GALAXY,
-                max_concurrency=32,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=4,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["openai/whisper-large-v3", "distil-whisper/distil-large-v3"],
-        version="0.11.1",
-        tt_metal_commit="2508216",
-        impl=whisper_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.AUDIO,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300,
-                max_concurrency=2,
-                max_context=64 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=4,
-                max_context=64 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_x2_mesh_graph_descriptor.textproto",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["microsoft/speecht5_tts"],
-        version="0.10.0",
-        tt_metal_commit="2508216",
-        impl=speecht5_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.TEXT_TO_SPEECH,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-        status=ModelStatusTypes.COMPLETE,
-    ),
-    ModelSpecTemplate(
-        weights=["microsoft/speecht5_tts"],
-        version="0.10.0",
-        tt_metal_commit="2508216",
-        impl=speecht5_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.TEXT_TO_SPEECH,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300,
-                max_concurrency=2,
-                max_context=64 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.P300X2,
-                max_concurrency=4,
-                max_context=64 * 1024,
-                default_impl=True,
-                env_vars={
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_x2_mesh_graph_descriptor.textproto",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-    ),
-]
+# Catalog data lives in workflows/model_specs/catalog.yaml.
+# spec_templates below loads from that file at import time.
 
 # =============================================================================
 # embedding_templates
@@ -3472,44 +1316,6 @@ embedding_templates = [
         ],
     ),
     ModelSpecTemplate(
-        weights=["BAAI/bge-reranker-v2-m3"],
-        # Canonical path: same tt-metal reranker device model, but served on the
-        # standalone Tenstorrent vLLM plugin (upstream vLLM 0.24) instead of the
-        # legacy in-tree fork plugin. vllm_commit pins the nyoshifujiTT/vllm-tt-plugin
-        # branch (checked out as TT_VLLM_COMMIT_SHA_OR_TAG by the canonical
-        # Dockerfile). Registration is done by the plugin via EXTRA_MODELS_DIR
-        # (vllm-tt-metal/extra_models/bge-reranker-v2-m3), not sitecustomize.
-        tt_metal_commit="ac0e105a61e",
-        vllm_commit="db8b481",
-        impl=tt_vllm_plugin_canonical_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        # docker_image left unset: auto-generated as
-        # vllm-tt-metal-src-{release,dev}-...:{VERSION}-{tt_metal}-{vllm}, matching
-        # what build_docker_images.py produces for this (tt_metal, vllm) pair.
-        model_type=ModelType.LLM,
-        inference_engine=InferenceEngine.VLLM.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.P150,
-                max_concurrency=1,
-                max_context=8 * 1024,
-                # Keep the legacy (fork) impl as the default; the canonical impl
-                # is selectable with --impl tt-vllm-plugin-canonical.
-                default_impl=False,
-                env_vars={
-                    "TT_MESH_GRAPH_DESC_PATH": "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto",
-                    "VLLM__MAX_NUM_BATCHED_TOKENS": "262144",
-                    "VLLM__MAX_MODEL_LENGTH": "8192",
-                    "VLLM__MIN_CONTEXT_LENGTH": "32",
-                    "VLLM__MAX_NUM_SEQS": "32",
-                    "MAX_BATCH_SIZE": "32",
-                    "DEFAULT_THROTTLE_LEVEL": "0",
-                },
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
         weights=["Qwen/Qwen3-Embedding-8B"],
         tt_metal_commit="555f240",
         impl=tt_transformers_impl,
@@ -3639,291 +1445,120 @@ embedding_templates = [
     ),
 ]
 
-# =============================================================================
-# cnn_templates
-# =============================================================================
-cnn_templates = [
-    ModelSpecTemplate(
-        weights=["Qwen/Qwen3-4B"],
-        tt_metal_commit="2496be4",
-        impl=forge_vllm_plugin_impl,
-        min_disk_gb=15,
-        min_ram_gb=8,
-        docker_image="ghcr.io/tenstorrent/tt-media-inference-server:0.2.0-2496be4518bca0a7a5b497a4cda3cfe7e2f59756",
-        model_type=ModelType.LLM,
-        inference_engine=InferenceEngine.FORGE.value,
-        uses_tensor_model_cache=False,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=2048,
-                default_impl=True,
-                env_vars={
-                    "VLLM__MAX_NUM_BATCHED_TOKENS": "2048",
-                    "VLLM__MAX_MODEL_LENGTH": "2048",
-                    "VLLM__MIN_MODEL_LENGTH": "32",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=2048,
-                default_impl=True,
-                env_vars={
-                    "VLLM__MAX_NUM_BATCHED_TOKENS": "2048",
-                    "VLLM__MAX_MODEL_LENGTH": "2048",
-                    "VLLM__MIN_MODEL_LENGTH": "32",
-                },
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.2-3B", "meta-llama/Llama-3.2-3B-Instruct"],
-        tt_metal_commit="2496be4",
-        impl=forge_vllm_plugin_impl,
-        min_disk_gb=15,
-        min_ram_gb=8,
-        docker_image="ghcr.io/tenstorrent/tt-media-inference-server:0.2.0-2496be4518bca0a7a5b497a4cda3cfe7e2f59756",
-        model_type=ModelType.LLM,
-        inference_engine=InferenceEngine.FORGE.value,
-        uses_tensor_model_cache=False,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=2048,
-                default_impl=False,
-                env_vars={
-                    "VLLM__MAX_NUM_BATCHED_TOKENS": "2048",
-                    "VLLM__MAX_MODEL_LENGTH": "2048",
-                    "VLLM__MIN_MODEL_LENGTH": "32",
-                },
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=2048,
-                default_impl=False,
-                env_vars={
-                    "VLLM__MAX_NUM_BATCHED_TOKENS": "2048",
-                    "VLLM__MAX_MODEL_LENGTH": "2048",
-                    "VLLM__MIN_MODEL_LENGTH": "32",
-                },
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["resnet-50"],
-        version="0.13.0",
-        tt_metal_commit="079a2c2",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.CNN,
-        inference_engine=InferenceEngine.FORGE.value,
-        status=ModelStatusTypes.FUNCTIONAL,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["vovnet"],
-        version="0.13.0",
-        tt_metal_commit="079a2c2",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.CNN,
-        inference_engine=InferenceEngine.FORGE.value,
-        status=ModelStatusTypes.COMPLETE,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["mobilenetv2"],
-        version="0.13.0",
-        tt_metal_commit="079a2c2",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.CNN,
-        inference_engine=InferenceEngine.FORGE.value,
-        status=ModelStatusTypes.COMPLETE,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["efficientnet"],
-        tt_metal_commit="2496be4",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        docker_image="ghcr.io/tenstorrent/tt-shield/tt-media-inference-server-forge:a9b09e0b611da6deb4d8972e8296148fd864e5fd_98dcf62_60920940673",
-        model_type=ModelType.CNN,
-        inference_engine=InferenceEngine.FORGE.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["segformer"],
-        version="0.13.0",
-        tt_metal_commit="079a2c2",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.CNN,
-        inference_engine=InferenceEngine.FORGE.value,
-        status=ModelStatusTypes.FUNCTIONAL,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["vit"],
-        version="0.13.0",
-        tt_metal_commit="079a2c2",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        model_type=ModelType.CNN,
-        inference_engine=InferenceEngine.FORGE.value,
-        status=ModelStatusTypes.COMPLETE,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["unet"],
-        tt_metal_commit="2496be4",
-        impl=tt_transformers_impl,
-        min_disk_gb=15,
-        min_ram_gb=6,
-        docker_image="ghcr.io/tenstorrent/tt-shield/tt-media-inference-server-forge:a9b09e0b611da6deb4d8972e8296148fd864e5fd_98dcf62_60920940673",
-        model_type=ModelType.CNN,
-        inference_engine=InferenceEngine.FORGE.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.N150,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-            DeviceModelSpec(
-                device=DeviceTypes.N300,
-                max_concurrency=1,
-                max_context=64 * 1024,
-                default_impl=True,
-            ),
-        ],
-    ),
-    ModelSpecTemplate(
-        weights=["meta-llama/Llama-3.1-70B"],
-        version="0.11.1",
-        tt_metal_commit="2496be4",
-        impl=forge_vllm_plugin_impl,
-        min_disk_gb=150,
-        min_ram_gb=80,
-        model_type=ModelType.LLM,
-        inference_engine=InferenceEngine.MEDIA.value,
-        device_model_specs=[
-            DeviceModelSpec(
-                device=DeviceTypes.T3K,
-                max_concurrency=1,
-                max_context=128 * 1024,
-                default_impl=True,
-                env_vars={
-                    "VLLM__MAX_NUM_BATCHED_TOKENS": "32768",
-                    "VLLM__MAX_MODEL_LENGTH": "131072",
-                    "VLLM__MIN_CONTEXT_LENGTH": "1024",
-                },
-            ),
-        ],
-        status=ModelStatusTypes.EXPERIMENTAL,
-        env_vars={
-            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-        },
-    ),
-]
+def _build_system_requirements(data: Optional[Dict]) -> Optional["SystemRequirements"]:
+    if data is None:
+        return None
+    kwargs: Dict = {}
+    for key in ("firmware", "kmd"):
+        if data.get(key) is not None:
+            kwargs[key] = VersionRequirement(
+                specifier=data[key]["specifier"],
+                mode=VersionMode[data[key]["mode"]],
+            )
+    return SystemRequirements(**kwargs)
 
-# make spec_templates from the templates in the correct order
-spec_templates = [
-    *llm_templates,
-    *vlm_templates,
-    *video_templates,
-    *image_templates,
-    *audio_tts_templates,
-    *embedding_templates,
-    *cnn_templates,
+
+def _build_device_model_spec(data: Dict) -> "DeviceModelSpec":
+    kwargs = dict(data)
+    kwargs["device"] = DeviceTypes.from_string(kwargs["device"])
+    if "system_requirements" in kwargs:
+        kwargs["system_requirements"] = _build_system_requirements(
+            kwargs["system_requirements"]
+        )
+    if "known_issues" in kwargs:
+        kwargs["known_issues"] = [
+            KnownIssue(
+                workflow_type=WorkflowType.from_string(ki["workflow_type"]),
+                reason=ki["reason"],
+                task_name=ki.get("task_name"),
+            )
+            for ki in kwargs["known_issues"]
+        ]
+    return DeviceModelSpec(**kwargs)
+
+
+def _build_template(data: Dict, env: str = "prod") -> "ModelSpecTemplate":
+    """Build a template from a raw catalog dict.
+
+    ``env`` selects the dataclass and thus the field contract: "prod" builds a
+    ProdModelSpecTemplate (version + tt_metal_commit required), anything else
+    builds the dev base ModelSpecTemplate (which has no pin fields, so a dev
+    entry that sets one fails to construct). Construction errors are re-raised
+    with the offending weights for a readable, catalog-scoped message.
+    """
+    kwargs = dict(data)
+    impl_id = kwargs["impl"]
+    if impl_id not in _IMPL_REGISTRY:
+        raise ValueError(
+            f"Unknown impl '{impl_id}'. Known impls: {sorted(_IMPL_REGISTRY)}"
+        )
+    kwargs["impl"] = _IMPL_REGISTRY[impl_id]
+    kwargs["inference_engine"] = InferenceEngine[kwargs["inference_engine"]].value
+    kwargs["device_model_specs"] = [
+        _build_device_model_spec(d) for d in kwargs["device_model_specs"]
+    ]
+    if "system_requirements" in kwargs:
+        kwargs["system_requirements"] = _build_system_requirements(
+            kwargs["system_requirements"]
+        )
+    if "model_type" in kwargs and kwargs["model_type"] is not None:
+        kwargs["model_type"] = ModelType[kwargs["model_type"]]
+    if "status" in kwargs:
+        kwargs["status"] = ModelStatusTypes[kwargs["status"]]
+    # An image is "pinned" when the catalog gives an explicit `version` or
+    # `docker_image`. Without either, the tag falls back to the repo-wide
+    # VERSION and is not a real published image.
+    kwargs["image_pinned"] = (
+        data.get("version") is not None or data.get("docker_image") is not None
+    )
+    cls = ProdModelSpecTemplate if env == "prod" else ModelSpecTemplate
+    try:
+        return cls(**kwargs)
+    except TypeError as exc:
+        weights = data.get("weights", ["<unknown>"])
+        raise ValueError(f"{env} template {weights}: {exc}") from exc
+
+
+def load_templates_from_yaml(path: Path) -> List["ModelSpecTemplate"]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not data or "templates" not in data:
+        raise ValueError(f"YAML file {path} is empty or missing 'templates' key")
+    env = path.parent.name
+    return [_build_template(t, env) for t in data["templates"]]
+
+
+_MODEL_SPECS_DIR = get_repo_root_path() / "workflows" / "model_specs"
+
+# Catalog environments live in sibling directories under _MODEL_SPECS_DIR.
+# Set MODEL_SPECS_ENV=dev to load the dev set instead of prod.
+_VALID_MODEL_SPECS_ENVS = ("prod", "dev")
+_MODEL_SPECS_ENV = os.getenv("MODEL_SPECS_ENV", "prod")
+if _MODEL_SPECS_ENV not in _VALID_MODEL_SPECS_ENVS:
+    raise ValueError(
+        f"MODEL_SPECS_ENV must be one of {_VALID_MODEL_SPECS_ENVS}, "
+        f"got {_MODEL_SPECS_ENV!r}"
+    )
+
+# One catalog file per model category. Load order determines spec_templates
+# order, which in turn determines MODEL_SPECS dict insertion order.
+_CATALOG_FILES = (
+    "llm.yaml",
+    "vlm.yaml",
+    "video.yaml",
+    "image.yaml",
+    "audio_tts.yaml",
+    "embedding.yaml",
+    "cnn.yaml",
+    "training.yaml",
+)
+
+spec_templates: List["ModelSpecTemplate"] = [
+    template
+    for fname in _CATALOG_FILES
+    for template in load_templates_from_yaml(
+        _MODEL_SPECS_DIR / _MODEL_SPECS_ENV / fname
+    )
 ]
 
 
@@ -3991,6 +1626,24 @@ def export_model_specs_json(model_specs: dict, output_path: Path) -> int:
 # Final model specifications generated from templates
 MODEL_SPECS = get_model_spec_map(spec_templates)
 
+# model_ids whose catalog template pins no image (set neither `version` nor
+# `docker_image`); their docker tag would be synthesized from the repo VERSION.
+_UNPINNED_IMAGE_MODEL_IDS = {
+    spec.model_id
+    for template in spec_templates
+    if not template.image_pinned
+    for spec in template.expand_to_specs()
+}
+
+# The list of "valid" specs the helm chart generator consumes: every spec EXCEPT
+# the unpinned ones above. MODEL_SPECS still holds all specs for other consumers
+# (run.py, model-support docs, the release_model_spec.json export).
+IMAGE_PINNED_MODEL_SPECS: List[ModelSpec] = [
+    spec
+    for spec in MODEL_SPECS.values()
+    if spec.model_id not in _UNPINNED_IMAGE_MODEL_IDS
+]
+
 
 def get_runtime_model_spec(
     model: str,
@@ -3998,7 +1651,13 @@ def get_runtime_model_spec(
     engine: Optional[str] = None,
     impl: Optional[str] = None,
 ) -> Tuple[ModelSpec, str, str]:
-    """Select a ModelSpec from MODEL_SPECS.
+    """Select a ModelSpec from the active catalog.
+
+    The active catalog is whatever was loaded into MODEL_SPECS at module
+    import time, controlled by MODEL_SPECS_ENV (default "prod"). Callers that
+    want the dev catalog must set MODEL_SPECS_ENV=dev in the environment
+    before importing this module -- run.py does this automatically when
+    --dev-mode is on the command line.
 
     Pure function -- does **not** mutate any external state.
 
@@ -4020,20 +1679,21 @@ def get_runtime_model_spec(
         engine_msg = f", engine={engine}" if engine else ""
         impl_msg = f", impl={impl}" if impl else ""
         raise ValueError(
-            f"Model:={model} does not support device:={device}{engine_msg}{impl_msg}"
+            f"Model:={model} does not support device:={device}{engine_msg}{impl_msg} "
+            f"in the {_MODEL_SPECS_ENV!r} catalog"
         )
 
     default_spec = next(
         (spec for spec in candidate_specs if spec.device_model_spec.default_impl),
         None,
     )
-    selected_spec = default_spec or (candidate_specs[0] if impl else None)
+    selected_spec = default_spec or (candidate_specs[0] if (impl or engine) else None)
 
     if selected_spec is None:
         raise ValueError(
             f"Model:={model} does not have a default impl for "
-            f"device:={device}, engine:={engine}; "
-            f"you must pass --impl"
+            f"device:={device}, engine:={engine} in the {_MODEL_SPECS_ENV!r} catalog; "
+            f"you must pass --impl or --engine"
         )
 
     resolved_impl = selected_spec.impl.impl_name

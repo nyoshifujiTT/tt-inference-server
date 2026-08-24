@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: (c) 2026 Tenstorrent AI ULC
+//
+// SPDX-License-Identifier: Apache-2.0
 #include "domain/llm/sampling_params.hpp"
 
 #include <json/json.h>
@@ -49,39 +52,6 @@ std::vector<T> readVector(std::istream& is) {
   is.read(reinterpret_cast<char*>(vec.data()), size * sizeof(T));
   return vec;
 }
-
-void writeString(std::ostream& os, const std::string& str) {
-  size_t len = str.size();
-  writeScalar(os, len);
-  os.write(str.data(), static_cast<std::streamsize>(len));
-}
-
-std::string readString(std::istream& is) {
-  size_t len = readScalar<size_t>(is);
-  std::string str(len, '\0');
-  is.read(str.data(), static_cast<std::streamsize>(len));
-  return str;
-}
-
-void writeJsonValue(std::ostream& os, const Json::Value& value) {
-  Json::StreamWriterBuilder writer;
-  writer["indentation"] = "";
-  std::string jsonStr = Json::writeString(writer, value);
-  writeString(os, jsonStr);
-}
-
-Json::Value readJsonValue(std::istream& is) {
-  std::string jsonStr = readString(is);
-  Json::CharReaderBuilder reader;
-  Json::Value value;
-  std::string errors;
-  std::istringstream iss(jsonStr);
-  if (!Json::parseFromStream(reader, iss, &value, &errors)) {
-    throw std::runtime_error("Failed to parse JSON: " + errors);
-  }
-  return value;
-}
-
 }  // anonymous namespace
 
 void SamplingParams::serialize(std::ostream& os) const {
@@ -112,45 +82,6 @@ void SamplingParams::serialize(std::ostream& os) const {
   writeOptional(os, prompt_logprobs);
   writeOptional(os, truncate_prompt_tokens);
   writeScalar(os, fast_mode);
-
-  writeScalar(os, static_cast<uint8_t>(response_format_type));
-  bool hasSchema = json_schema_str.has_value();
-  writeScalar(os, hasSchema);
-  if (hasSchema) {
-    size_t len = json_schema_str->size();
-    writeScalar(os, len);
-    os.write(json_schema_str->data(), static_cast<std::streamsize>(len));
-  }
-
-  // Serialize tool_choice
-  bool hasToolChoice = tool_choice.has_value();
-  writeScalar(os, hasToolChoice);
-  if (hasToolChoice) {
-    writeString(os, tool_choice->type);
-    bool hasFunction = tool_choice->function.has_value();
-    writeScalar(os, hasFunction);
-    if (hasFunction) {
-      writeString(os, tool_choice->function.value());
-    }
-  }
-
-  // Serialize tools
-  bool hasTools = tools.has_value();
-  writeScalar(os, hasTools);
-  if (hasTools) {
-    size_t toolCount = tools->size();
-    writeScalar(os, toolCount);
-    for (const auto& tool : *tools) {
-      writeString(os, tool.type);
-      writeString(os, tool.functionDefinition.name);
-      bool hasDescription = tool.functionDefinition.description.has_value();
-      writeScalar(os, hasDescription);
-      if (hasDescription) {
-        writeString(os, tool.functionDefinition.description.value());
-      }
-      writeJsonValue(os, tool.functionDefinition.parameters);
-    }
-  }
 }
 
 std::unique_ptr<SamplingParams> SamplingParams::deserialize(std::istream& is) {
@@ -168,7 +99,7 @@ std::unique_ptr<SamplingParams> SamplingParams::deserialize(std::istream& is) {
   params->min_p = readOptional<float>(is);
   params->repetition_penalty = readOptional<float>(is);
   params->length_penalty = readScalar<float>(is);
-  params->stop_token_ids = readVector<int>(is);
+  params->stop_token_ids = readVector<uint32_t>(is);
   params->include_stop_str_in_output = readScalar<bool>(is);
   params->min_tokens = readScalar<int>(is);
   params->skip_special_tokens = readScalar<bool>(is);
@@ -181,44 +112,6 @@ std::unique_ptr<SamplingParams> SamplingParams::deserialize(std::istream& is) {
   params->prompt_logprobs = readOptional<int>(is);
   params->truncate_prompt_tokens = readOptional<int>(is);
   params->fast_mode = readScalar<bool>(is);
-
-  params->response_format_type =
-      static_cast<ResponseFormatType>(readScalar<uint8_t>(is));
-  if (readScalar<bool>(is)) {
-    size_t len = readScalar<size_t>(is);
-    std::string schema(len, '\0');
-    is.read(schema.data(), static_cast<std::streamsize>(len));
-    params->json_schema_str = std::move(schema);
-  }
-
-  // Deserialize tool_choice
-  if (readScalar<bool>(is)) {
-    tool_calls::ToolChoice choice;
-    choice.type = readString(is);
-    if (readScalar<bool>(is)) {
-      choice.function = readString(is);
-    }
-    params->tool_choice = choice;
-  }
-
-  // Deserialize tools
-  if (readScalar<bool>(is)) {
-    size_t toolCount = readScalar<size_t>(is);
-    std::vector<tool_calls::Tool> toolList;
-    toolList.reserve(toolCount);
-    for (size_t i = 0; i < toolCount; ++i) {
-      tool_calls::Tool tool;
-      tool.type = readString(is);
-      tool.functionDefinition.name = readString(is);
-      if (readScalar<bool>(is)) {
-        tool.functionDefinition.description = readString(is);
-      }
-      tool.functionDefinition.parameters = readJsonValue(is);
-      toolList.push_back(std::move(tool));
-    }
-    params->tools = std::move(toolList);
-  }
-
   return params;
 }
 

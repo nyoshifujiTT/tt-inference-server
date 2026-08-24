@@ -3,17 +3,20 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
 
 from enum import Enum, IntEnum, auto
+from typing import List, Optional
 
 
 class WorkflowType(IntEnum):
     BENCHMARKS = auto()
     EVALS = auto()
     STRESS_TESTS = auto()
-    TESTS = auto()
-    REPORTS = auto()
     SERVER = auto()
     RELEASE = auto()
     SPEC_TESTS = auto()
+    AGENTIC = auto()
+    AGENTIC_TRACES = auto()
+    SERVING_BENCH = auto()
+    PREFILL_DECODE = auto()
 
     @classmethod
     def from_string(cls, name: str):
@@ -31,18 +34,22 @@ class WorkflowVenvType(IntEnum):
     TESTS_RUN_SCRIPT = auto()
     BENCHMARKS_RUN_SCRIPT = auto()
     REPORTS_RUN_SCRIPT = auto()
+    WORKFLOW_RUN_SCRIPT = auto()
+    PREFIX_CACHE = auto()
+    AGENTIC_TRACES = auto()
+    LLM_VLLM = auto()
+    LLM_GUIDELLM = auto()
+    LLM_AIPERF = auto()
+    SPEC_DECODE = auto()
     EVALS_COMMON = auto()
     EVALS_META = auto()
     EVALS_VISION = auto()
     EVALS_AUDIO = auto()
-    EVALS_VIDEO = auto()
     EVALS_EMBEDDING = auto()
-    BENCHMARKS_HTTP_CLIENT_VLLM_API = auto()
-    BENCHMARKS_EMBEDDING = auto()
-    BENCHMARKS_VIDEO = auto()
+    EVALS_AGENTIC = auto()
     BENCHMARKS_VLLM = auto()
+    BENCHMARKS_VLLM_FORGE = auto()
     BENCHMARKS_GENAI_PERF = auto()
-    BENCHMARKS_AIPERF = auto()
     HF_SETUP = auto()
     SERVER = auto()
     TT_SMI = auto()
@@ -52,9 +59,7 @@ class WorkflowVenvType(IntEnum):
 class BenchmarkTaskType(IntEnum):
     HTTP_CLIENT_VLLM_API = auto()
     HTTP_CLIENT_CNN_API = auto()
-    HTTP_CLIENT_VIDEO_API = auto()
-    GENAI_PERF = auto()
-    AIPERF = auto()
+    HTTP_CLIENT_VLLM_STRUCTURED_OUTPUT_API = auto()
 
 
 class DeviceTypes(IntEnum):
@@ -76,6 +81,7 @@ class DeviceTypes(IntEnum):
     GALAXY_T3K = auto()
     DUAL_GALAXY = auto()
     QUAD_GALAXY = auto()
+    SUPER_CLUSTER = auto()
 
     @classmethod
     def from_string(cls, name: str):
@@ -107,6 +113,7 @@ class DeviceTypes(IntEnum):
             DeviceTypes.DUAL_GALAXY: "(8,8)",
             DeviceTypes.QUAD_GALAXY: "(8,16)",
             DeviceTypes.GPU: "GPU",
+            DeviceTypes.SUPER_CLUSTER: "Super-Cluster",
         }
         if self not in mapping:
             raise ValueError(f"Invalid DeviceType: {self}")
@@ -121,7 +128,7 @@ class DeviceTypes(IntEnum):
             DeviceTypes.P150X4: "BH 4xP150",
             DeviceTypes.P150X8: "BH LoudBox",
             DeviceTypes.P300: "BH P300",
-            DeviceTypes.P300X2: "BH QuietBox GE (2xP300)",
+            DeviceTypes.P300X2: "BH QuietBox 2",
             DeviceTypes.BLACKHOLE_GALAXY: "BH Galaxy",
             DeviceTypes.N150X4: "4xn150",
             DeviceTypes.N300: "n300",
@@ -130,6 +137,7 @@ class DeviceTypes(IntEnum):
             DeviceTypes.GALAXY_T3K: "WH Galaxy",
             DeviceTypes.DUAL_GALAXY: "Dual WH Galaxy",
             DeviceTypes.QUAD_GALAXY: "Quad WH Galaxy",
+            DeviceTypes.SUPER_CLUSTER: "BH Super-Cluster",
         }
         if self not in mapping:
             raise ValueError(f"Invalid DeviceType: {self}")
@@ -168,12 +176,17 @@ class DeviceTypes(IntEnum):
             DeviceTypes.P300,
             DeviceTypes.P300X2,
             DeviceTypes.BLACKHOLE_GALAXY,
+            DeviceTypes.SUPER_CLUSTER,
         )
         return self in blackhole_devices
 
     def is_multihost(self) -> bool:
         """Check if this device type requires multi-host deployment."""
-        return self in {DeviceTypes.DUAL_GALAXY, DeviceTypes.QUAD_GALAXY}
+        return self in {
+            DeviceTypes.DUAL_GALAXY,
+            DeviceTypes.QUAD_GALAXY,
+            DeviceTypes.SUPER_CLUSTER,
+        }
 
     def get_multihost_num_hosts(self) -> int:
         """Get expected number of hosts for multi-host device types.
@@ -219,6 +232,7 @@ class DeviceTypes(IntEnum):
             (DeviceTypes.BLACKHOLE_GALAXY, 32): DeviceTypes.P150,
             (DeviceTypes.DUAL_GALAXY, 8): DeviceTypes.T3K,
             (DeviceTypes.QUAD_GALAXY, 16): DeviceTypes.T3K,
+            (DeviceTypes.SUPER_CLUSTER, 1): DeviceTypes.SUPER_CLUSTER,
         }
         if (self, data_parallel) not in data_parallel_map:
             raise ValueError(
@@ -294,6 +308,48 @@ class ModelStatusTypes(IntEnum):
             ModelStatusTypes.TOP_PERF: "🚀 Top Performance",
         }[self]
 
+    @property
+    def required_target_tiers(self) -> List[str]:
+        """Tiers that MUST pass for a model at this status level.
+
+        Tiers not in this list are still computed and reported but
+        treated as informational -- failures are accepted and do not
+        block a release. This enables programmatic masking: e.g. an
+        EXPERIMENTAL model (forge, new bring-up) can fail every
+        performance benchmark and still be released.
+        """
+        tier_map = {
+            ModelStatusTypes.EXPERIMENTAL: [],
+            ModelStatusTypes.FUNCTIONAL: ["functional"],
+            ModelStatusTypes.COMPLETE: ["functional", "complete"],
+            ModelStatusTypes.TOP_PERF: ["functional", "complete", "target"],
+        }
+        return tier_map[self]
+
+    @property
+    def evals_enforced(self) -> bool:
+        """Whether eval accuracy failures block acceptance at this status.
+
+        Reuses required_target_tiers' signal (empty only for EXPERIMENTAL) so
+        a model still in bring-up isn't blocked on eval accuracy either.
+        """
+        return bool(self.required_target_tiers)
+
+    @classmethod
+    def resolve(cls, name: Optional[str]) -> Optional["ModelStatusTypes"]:
+        """Best-effort ``name`` -> member lookup, or ``None`` if missing/unrecognized.
+
+        Unlike :meth:`EvalLimitMode.from_string`, this never raises: callers
+        use a missing/garbled status as a signal to fall back to the
+        strictest (fully-enforced) behavior rather than crash.
+        """
+        if not name:
+            return None
+        try:
+            return cls[name]
+        except KeyError:
+            return None
+
 
 class EvalLimitMode(IntEnum):
     SMOKE_TEST = auto()
@@ -309,6 +365,35 @@ class EvalLimitMode(IntEnum):
             return cls[name.upper().replace("-", "_")]
         except KeyError:
             raise ValueError(f"Invalid EvalLimitMode: {name}")
+
+
+class AgenticTracesMode(IntEnum):
+    """Duration profile for the ``agentic_traces`` workflow.
+
+    Deliberately separate from :class:`EvalLimitMode`: agentic trace replay is
+    bounded by wall-clock profiling time rather than a dataset sample count, and
+    the InferenceX scenario enforces its own duration floor (see
+    ``AGENTIC_TRACES_MIN_PROFILE_SECONDS``), so the eval limit modes do not
+    translate.
+
+    ``FULL`` is the reference run used for reportable numbers; ``CI`` is the
+    shortest run the scenario still permits.
+    """
+
+    FULL = auto()
+    CI = auto()
+
+    @classmethod
+    def from_string(cls, name: str):
+        if name is None:
+            return None
+        try:
+            return cls[name.upper().replace("-", "_")]
+        except KeyError:
+            raise ValueError(f"Invalid AgenticTracesMode: {name}")
+
+    def to_string(self) -> str:
+        return self.name.lower()
 
 
 class VersionMode(IntEnum):
@@ -354,6 +439,7 @@ class ModelType(IntEnum):
     TEXT_TO_SPEECH = auto()
     VIDEO = auto()
     VLM = auto()  # Vision-Language Models (text+image-to-text)
+    TRAINING = auto()
 
     @property
     def display_name(self) -> str:
@@ -366,6 +452,7 @@ class ModelType(IntEnum):
             ModelType.TEXT_TO_SPEECH: "Text-to-Speech",
             ModelType.VIDEO: "Video",
             ModelType.VLM: "Vision-Language Model",
+            ModelType.TRAINING: "Training",
         }
         return display_names[self]
 
@@ -380,6 +467,7 @@ class ModelType(IntEnum):
             ModelType.EMBEDDING: "Embedding",
             ModelType.TEXT_TO_SPEECH: "TTS",
             ModelType.VIDEO: "Video",
+            ModelType.TRAINING: "Training",
         }
         return short_names[self]
 
@@ -388,11 +476,12 @@ class ModelType(IntEnum):
         task_types = {
             ModelType.LLM: "text",
             ModelType.VLM: "vlm",
-            ModelType.AUDIO: "audio",
+            ModelType.AUDIO: "asr",  # Automatic Speech Recognition
             ModelType.IMAGE: "image",
             ModelType.CNN: "cnn",
             ModelType.EMBEDDING: "embedding",
-            ModelType.TEXT_TO_SPEECH: "text_to_speech",
+            ModelType.TEXT_TO_SPEECH: "tts",
             ModelType.VIDEO: "video",
+            ModelType.TRAINING: "training",
         }
         return task_types[self]

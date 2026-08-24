@@ -14,34 +14,25 @@
 
 #include "domain/llm/llm_request.hpp"
 #include "domain/llm/llm_response.hpp"
-#include "domain/tool_calls/tool_choice.hpp"
+#include "ipc/interface/task_queue.hpp"
 #include "ipc/queue_manager.hpp"
-#include "ipc/task_queue.hpp"
-#include "services/base_service.hpp"
-#include "services/reasoning_parser.hpp"
-#include "services/streamable.hpp"
-#include "services/tool_call_parser.hpp"
+#include "runtime/worker/worker_manager.hpp"
+#include "services/request_pipeline.hpp"
 #include "utils/concurrent_map.hpp"
-#include "utils/tokenizers/tokenizer.hpp"
-#include "worker/worker_manager.hpp"
 
 namespace tt::services {
 
 using namespace tt::domain::llm;
 
-class LLMService : public BaseService<LLMRequest, LLMResponse>,
-                   public Streamable<LLMRequest, LLMStreamChunk> {
+class LLMService : public BaseStreamingService<LLMRequest, LLMStreamChunk> {
  public:
   using StreamCallback = std::function<void(const LLMStreamChunk&, bool)>;
 
   LLMService();
 
-  LLMService(const tt::utils::tokenizers::Tokenizer* tokenizer,
-             std::shared_ptr<tt::ipc::ITaskQueue> taskQueue,
+  LLMService(std::shared_ptr<tt::ipc::ITaskQueue> taskQueue,
              std::unique_ptr<tt::worker::WorkerManager> workerManager,
-             std::unique_ptr<ReasoningParser> reasoningParser,
-             std::unique_ptr<IToolCallParser> toolCallParser,
-             std::unique_ptr<tt::ipc::QueueManager> queueManager = nullptr,
+             std::unique_ptr<tt::ipc::QueueManager> queueManager,
              size_t maxQueueSize = std::numeric_limits<size_t>::max());
 
   ~LLMService() override;
@@ -56,13 +47,7 @@ class LLMService : public BaseService<LLMRequest, LLMResponse>,
 
   void preProcess(LLMRequest& request) const override;
 
-  void postProcess(LLMResponse& response) const override;
-
-  void processStreamingRequest(
-      LLMRequest request,
-      std::function<void(LLMStreamChunk&, bool isFinal)> callback) override;
-
-  void abortRequest(uint32_t taskId);
+  void abortRequest(uint32_t taskId) override;
 
   tt::worker::WorkerManager* getWorkerManager() const {
     return workerManager.get();
@@ -70,16 +55,20 @@ class LLMService : public BaseService<LLMRequest, LLMResponse>,
 
  protected:
   size_t currentQueueSize() const override;
-  LLMResponse processRequest(LLMRequest request) override;
 
   std::vector<tt::worker::WorkerInfo> getWorkerInfo() const override;
 
-  void streamingPostProcess(LLMStreamChunk&) const override {}
+  void produceStream(
+      LLMRequest request,
+      std::function<void(LLMStreamChunk&, bool isFinal)> callback) override;
 
  private:
   struct StreamCallbackEntry {
     std::function<void(LLMStreamChunk&, bool)> callback;
     bool skip_special_tokens = true;
+    // Mirror of LLMRequest::skip_text_decode; lets the consumer loop
+    // skip decode for token-id-only transports.
+    bool skip_text_decode = false;
   };
 
   void startConsumers();
@@ -88,20 +77,14 @@ class LLMService : public BaseService<LLMRequest, LLMResponse>,
   std::optional<StreamCallbackEntry> resolveCallback(uint32_t taskId,
                                                      bool isFinal);
 
-  void init(const tt::utils::tokenizers::Tokenizer* tokenizer,
-            std::shared_ptr<tt::ipc::ITaskQueue> taskQueue,
+  void init(std::shared_ptr<tt::ipc::ITaskQueue> taskQueue,
             std::unique_ptr<tt::worker::WorkerManager> workerManager,
-            std::unique_ptr<ReasoningParser> reasoningParser,
-            std::unique_ptr<IToolCallParser> toolCallParser,
             std::unique_ptr<tt::ipc::QueueManager> queueManager,
             size_t maxQueueSize);
 
   std::vector<std::thread> consumerThreads;
 
   utils::ConcurrentMap<uint32_t, StreamCallbackEntry> streamCallbacks;
-  mutable utils::ConcurrentMap<uint32_t, tt::domain::tool_calls::ToolChoice>
-      toolChoiceMap;
-  utils::ConcurrentMap<uint32_t, bool> reasoningSuppressedMap;
 
   std::atomic<size_t> pendingTasks{0};
   std::atomic<bool> running{false};
@@ -109,10 +92,7 @@ class LLMService : public BaseService<LLMRequest, LLMResponse>,
   std::shared_ptr<tt::ipc::ITaskQueue> taskQueue;
   std::unique_ptr<tt::worker::WorkerManager> workerManager;
   std::unique_ptr<tt::ipc::QueueManager> queueManager;
-  const tt::utils::tokenizers::Tokenizer* tokenizer;
-  std::unordered_set<int64_t> stopTokenSet;
-  std::unique_ptr<ReasoningParser> reasoningParser;
-  std::unique_ptr<IToolCallParser> toolCallParser;
+  std::unordered_set<uint32_t> stopTokenSet;
 };
 
 }  // namespace tt::services

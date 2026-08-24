@@ -39,12 +39,6 @@ def _prepend_env_path(value: Path, existing: str) -> str:
     return os.pathsep.join(parts)
 
 
-def _append_env_path(existing: str, value: Path) -> str:
-    parts = [existing] if existing else []
-    parts.append(str(value))
-    return os.pathsep.join(parts)
-
-
 def _format_env_exports(env) -> str:
     export_lines = []
     for key in sorted(env):
@@ -63,11 +57,6 @@ def get_local_server_paths(runtime_config, repo_root=None):
         if runtime_config.tt_metal_python_venv_dir
         else tt_metal_home / "python_env"
     )
-    vllm_dir = (
-        Path(runtime_config.vllm_dir).expanduser().resolve()
-        if getattr(runtime_config, "vllm_dir", None)
-        else (tt_metal_home / "vllm").resolve()
-    )
     entrypoint_path = (
         repo_root_path / "vllm-tt-metal" / "src" / "run_vllm_api_server.py"
     )
@@ -76,7 +65,6 @@ def get_local_server_paths(runtime_config, repo_root=None):
         "app_dir": repo_root_path,
         "tt_metal_home": tt_metal_home,
         "python_env_dir": python_env_dir,
-        "vllm_dir": vllm_dir,
         "venv_python": python_env_dir / "bin" / "python",
         "entrypoint_path": entrypoint_path,
         "requirements_path": repo_root_path / "vllm-tt-metal" / "requirements.txt",
@@ -147,7 +135,6 @@ def build_local_server_env(
     app_dir = paths["app_dir"]
     tt_metal_home = paths["tt_metal_home"]
     python_env_dir = paths["python_env_dir"]
-    vllm_dir = paths["vllm_dir"]
     storage_paths = ensure_local_server_storage_paths(
         model_spec, runtime_config, setup_config
     )
@@ -159,12 +146,14 @@ def build_local_server_env(
     env["APP_DIR"] = str(app_dir)
     env["TT_METAL_HOME"] = str(tt_metal_home)
     env["PYTHON_ENV_DIR"] = str(python_env_dir)
-    env["vllm_dir"] = str(vllm_dir)
-    pythonpath = _prepend_env_path(
+    # No vllm_dir export and no vLLM source dir on PYTHONPATH: vLLM is a normal
+    # installed package in the tt-metal venv (from PyPI, via the plugin's
+    # install-vllm-tt.sh) rather than a source checkout, and vllm_tt_plugin is
+    # pip-installed too. Nothing under vllm-tt-metal/src or utils/ reads either.
+    env["PYTHONPATH"] = _prepend_env_path(
         tt_metal_home,
         _prepend_env_path(app_dir, env.get("PYTHONPATH", "")),
     )
-    env["PYTHONPATH"] = _append_env_path(pythonpath, vllm_dir)
     env["LD_LIBRARY_PATH"] = _prepend_env_path(
         tt_metal_home / "build" / "lib", env.get("LD_LIBRARY_PATH", "")
     )
@@ -258,6 +247,11 @@ def install_local_server_requirements(runtime_config, repo_root=None):
     )
     run_command(install_command, logger=logger, check=True)
 
+    # vLLM and vllm-tt-plugin are NOT installed here. The plugin lives in its own
+    # repository and its docs/install-vllm-tt.sh owns the vLLM version pin plus the
+    # dependency overrides, so installing either from here risks a mismatched pair.
+    # workflows.validate_setup probes that both are present before the server starts.
+
 
 def _terminate_process_group(process: subprocess.Popen, process_name: str):
     if process.poll() is not None:
@@ -317,7 +311,7 @@ def run_local_command(
             raise RuntimeError("Local server process failed to start.")
         time.sleep(0.1)
 
-    skip_workflows = {WorkflowType.SERVER, WorkflowType.REPORTS}
+    skip_workflows = {WorkflowType.SERVER}
     if WorkflowType.from_string(runtime_config.workflow) not in skip_workflows:
 
         def teardown_local_server():

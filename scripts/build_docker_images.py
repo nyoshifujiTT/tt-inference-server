@@ -271,31 +271,6 @@ def _format_commit_for_id(commit, fallback):
     return (commit if commit else fallback)[:16]
 
 
-# Impl IDs served by the standalone (canonical) Tenstorrent vLLM plugin
-# (upstream vLLM 0.24) rather than the legacy in-tree fork plugin. Their images
-# are built with the canonical Dockerfile (upstream vLLM + standalone plugin +
-# EXTRA_MODELS_DIR), and the plugin git ref is cloned from a canonical repo.
-_CANONICAL_PLUGIN_IMPL_IDS = frozenset({"tt_vllm_plugin_canonical"})
-
-# Dockerfile + plugin clone source per build variant.
-_DEV_DOCKERFILE_LEGACY = "vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile"
-_DEV_DOCKERFILE_CANONICAL = "vllm-tt-metal/vllm.tt-metal.src.canonical.Dockerfile"
-
-
-def _build_variant_for_impl(impl_id):
-    """Return the build variant ("canonical" or "legacy") for an impl id."""
-    return "canonical" if impl_id in _CANONICAL_PLUGIN_IMPL_IDS else "legacy"
-
-
-def _dev_dockerfile_for_variant(build_variant):
-    """Return the dev Dockerfile path for a build variant."""
-    return (
-        _DEV_DOCKERFILE_CANONICAL
-        if build_variant == "canonical"
-        else _DEV_DOCKERFILE_LEGACY
-    )
-
-
 def _build_combination_id(tt_metal_commit, vllm_commit):
     """
     Build a safe combination identifier from tt_metal and vllm commits.
@@ -423,7 +398,6 @@ def process_sha_combination(args_tuple):
     (
         tt_metal_commit,
         vllm_commit,
-        build_variant,
         ubuntu_version,
         force_build,
         release,
@@ -589,7 +563,6 @@ def process_sha_combination(args_tuple):
                         vllm_commit,
                         container_app_uid,
                         process_logger,
-                        build_variant=build_variant,
                     )
                     image_status["dev"]["build_succeeded"] = True
                 except Exception as e:
@@ -914,7 +887,7 @@ def resolve_commit_to_full_sha(tt_metal_commit):
         # Try to resolve using ls-remote to get the full SHA from origin
         # need to use shell=True and cmd string because of the pipe
         result = subprocess.run(
-            f"git ls-remote https://github.com/nyoshifujiTT/tt-metal.git | grep {tt_metal_commit}",
+            f"git ls-remote https://github.com/tenstorrent/tt-metal.git | grep {tt_metal_commit}",
             shell=True,
             capture_output=True,
             text=True,
@@ -946,7 +919,7 @@ def resolve_commit_to_full_sha(tt_metal_commit):
     # Fallback: Try GitHub API for short SHA resolution
     try:
         logger.info(f"Trying GitHub commits API fallback for {tt_metal_commit}...")
-        api_url = f"https://api.github.com/repos/nyoshifujiTT/tt-metal/commits/{tt_metal_commit}"
+        api_url = f"https://api.github.com/repos/tenstorrent/tt-metal/commits/{tt_metal_commit}"
 
         with urllib.request.urlopen(api_url, timeout=10) as response:
             if response.status == 200:
@@ -1014,7 +987,7 @@ def build_tt_metal_base_image(
                 "clone",
                 "--depth",
                 "1",
-                "https://github.com/nyoshifujiTT/tt-metal.git",
+                "https://github.com/tenstorrent/tt-metal.git",
             ],
             logger=logger,
             check=True,
@@ -1077,72 +1050,26 @@ def build_tt_metal_base_image(
             cwd=tt_metal_dir,
         )
 
-        # Build the Docker image
+        # tt-metal's Dockerfile uses Docker Buildx Bake — plain `docker build` is not
+        # supported because tool layers (cmake, zstd, openmpi) are FROM scratch stubs
+        # that Bake overrides with pre-built images (see dockerfile/docker-bake.hcl).
         logger.info("Building tt-metal Docker image...")
-        # The newer tt-metal Dockerfile declares its build tools (cmake, sfpi,
-        # openmpi, ccache, ...) as `FROM scratch AS <tool>-layer` placeholders
-        # that must be populated via BuildKit named build-contexts (see
-        # .github/workflows/build-evaluation-image.yaml). Without them the very
-        # first `COPY --from=cmake-layer` fails ("stat install/: file does not
-        # exist"). Compute the content-addressed tool image tags the same way
-        # tt-metal CI does (.github/scripts/compute-tool-tags.sh) and pass them
-        # as build-contexts. The tool images are public on ghcr under the
-        # upstream tenstorrent/tt-metal repo (a fork shares identical tool
-        # versions/hashes), so resolve them against tenstorrent/tt-metal.
-        import json as _json
-
-        tool_tags = _json.loads(
-            subprocess.check_output(
-                ["bash", ".github/scripts/compute-tool-tags.sh", "tenstorrent/tt-metal"],
-                cwd=tt_metal_dir,
-                text=True,
-            )
-        )
-        build_contexts = []
-        for _key, _tag in tool_tags.items():
-            # keys look like "cmake-tag" -> build-context name "cmake-layer"
-            _layer = _key[: -len("-tag")] + "-layer"
-            build_contexts += [
-                "--build-context",
-                f"{_layer}=docker-image://{_tag}",
-            ]
-
-        # The newer tt-metal build is orchestrated by `docker buildx bake`
-        # (dockerfile/docker-bake.hcl): the ci-build target pulls in not only the
-        # tool layers but also a Python venv layer (ci-build-venv, built from
-        # dockerfile/Dockerfile.python) that a plain `docker build --target
-        # ci-build` cannot produce (it is a `FROM scratch` placeholder wired via
-        # bake `contexts`). So drive the base build through bake: it builds the
-        # venv locally and we override the tool contexts to the pre-built public
-        # ghcr tool images (fast). The bake `ci-build` target outputs
-        # `tt-metalium-ci-build:local`, which we then tag as the expected base
-        # tag consumed by the dev Dockerfile.
-        set_overrides = []
-        for _key, _tag in tool_tags.items():
-            _layer = _key[: -len("-tag")] + "-layer"
-            set_overrides += [
-                "--set",
-                f"ci-build.contexts.{_layer}=docker-image://{_tag}",
-            ]
-
-        bake_command = [
+        build_command = [
+            "env",
+            f"UBUNTU_VERSION={ubuntu_version}",
             "docker",
             "buildx",
             "bake",
             "-f",
             "dockerfile/docker-bake.hcl",
-            "ci-build",
-            "--set",
-            f"ci-build.args.UBUNTU_VERSION={ubuntu_version}",
             "--set",
             f"ci-build.tags={tt_metal_base_tag}",
-            "--set",
-            "ci-build.output=type=docker",
-            *set_overrides,
+            "--load",
+            "ci-build",
         ]
 
         run_command_with_logging(
-            bake_command, logger=logger, check=True, cwd=tt_metal_dir
+            build_command, logger=logger, check=True, cwd=tt_metal_dir
         )
 
         logger.info(f"Successfully built tt-metal base image: {tt_metal_base_tag}")
@@ -1171,8 +1098,11 @@ def should_push_image(image_tag, force_push=False):
 
 
 def build_dev_image(
-    image_tags, tt_metal_commit, vllm_commit, container_app_uid, logger,
-    build_variant="legacy",
+    image_tags,
+    tt_metal_commit,
+    vllm_commit,
+    container_app_uid,
+    logger,
 ):
     """
     Build the dev Docker image from the Dockerfile.
@@ -1183,8 +1113,6 @@ def build_dev_image(
         vllm_commit: VLLM commit hash
         container_app_uid: Container application UID
         logger: Logger instance
-        build_variant: "legacy" (in-tree fork plugin) or "canonical" (standalone
-            upstream vLLM 0.24 plugin). Selects the dev Dockerfile.
     """
     repo_root = get_repo_root_path()
     dev_image_tag = image_tags["dev"]
@@ -1194,9 +1122,7 @@ def build_dev_image(
     model_specs_json_path = generate_model_specs_json()
     logger.info(f"Generated model specs JSON at: {model_specs_json_path}")
 
-    dev_dockerfile = _dev_dockerfile_for_variant(build_variant)
     logger.info(f"Building dev image: {dev_image_tag}")
-    logger.info(f"Build variant: {build_variant} (Dockerfile: {dev_dockerfile})")
 
     build_command = [
         "docker",
@@ -1212,7 +1138,7 @@ def build_dev_image(
         "--build-arg",
         f"CONTAINER_APP_UID={container_app_uid}",
         "-f",
-        dev_dockerfile,
+        "vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile",
         ".",
     ]
 
@@ -1286,17 +1212,10 @@ def list_image_combinations(model_configs, build_metal_commit=None):
         build_metal_commit: Only return combinations with this exact tt-metal commit
 
     Returns:
-        Set of tuples (tt_metal_commit, vllm_commit, build_variant) representing
-        unique combinations. ``build_variant`` is ``"canonical"`` when the
-        combination is owned by a canonical (standalone vLLM plugin) impl, else
-        ``"legacy"``; it selects the Dockerfile / vLLM source at build time.
+        Set of tuples (tt_metal_commit, vllm_commit) representing unique combinations
     """
     unique_sha_combinations = {
-        (
-            config.tt_metal_commit,
-            config.vllm_commit,
-            _build_variant_for_impl(config.impl.impl_id),
-        )
+        (config.tt_metal_commit, config.vllm_commit)
         for config in model_configs.values()
         if config.vllm_commit is not None
     }
@@ -1475,7 +1394,6 @@ def build_docker_images(
         (
             tt_metal_commit,
             vllm_commit,
-            build_variant,
             ubuntu_version,
             force_build,
             release,
@@ -1486,7 +1404,7 @@ def build_docker_images(
             stdout_only,
             dry_run_build_duration,
         )
-        for tt_metal_commit, vllm_commit, build_variant in unique_sha_combinations
+        for tt_metal_commit, vllm_commit in unique_sha_combinations
     ]
 
     if not args_tuples:

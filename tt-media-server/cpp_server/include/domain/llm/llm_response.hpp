@@ -9,8 +9,37 @@
 #include <string>
 
 #include "domain/base_response.hpp"
+#include "domain/llm/llm_error_reason.hpp"
 
 namespace tt::domain::llm {
+
+struct PromptTokensDetails {
+  int cached_tokens = 0;
+  int audio_tokens = 0;
+
+  Json::Value toJson() const {
+    Json::Value json;
+    json["cached_tokens"] = cached_tokens;
+    json["audio_tokens"] = audio_tokens;
+    return json;
+  }
+};
+
+struct CompletionTokensDetails {
+  int reasoning_tokens = 0;
+  int audio_tokens = 0;
+  int accepted_prediction_tokens = 0;
+  int rejected_prediction_tokens = 0;
+
+  Json::Value toJson() const {
+    Json::Value json;
+    json["reasoning_tokens"] = reasoning_tokens;
+    json["audio_tokens"] = audio_tokens;
+    json["accepted_prediction_tokens"] = accepted_prediction_tokens;
+    json["rejected_prediction_tokens"] = rejected_prediction_tokens;
+    return json;
+  }
+};
 
 /**
  * Usage statistics for the completion.
@@ -19,6 +48,8 @@ struct CompletionUsage {
   int prompt_tokens = 0;
   int completion_tokens = 0;
   int total_tokens = 0;
+  PromptTokensDetails prompt_tokens_details;
+  CompletionTokensDetails completion_tokens_details;
   std::optional<double> ttft_ms;  // Time to first token in milliseconds
   std::optional<double> tps;      // Tokens per second (excluding first token)
 
@@ -27,6 +58,8 @@ struct CompletionUsage {
     json["prompt_tokens"] = prompt_tokens;
     json["completion_tokens"] = completion_tokens;
     json["total_tokens"] = total_tokens;
+    json["prompt_tokens_details"] = prompt_tokens_details.toJson();
+    json["completion_tokens_details"] = completion_tokens_details.toJson();
     if (ttft_ms.has_value()) {
       json["ttft_ms"] = ttft_ms.value();
     }
@@ -45,9 +78,10 @@ struct LLMChoice {
   int index = 0;
   std::optional<Json::Value> logprobs;
   std::optional<std::string> finish_reason;
-  std::optional<int64_t> token_id;
-  std::optional<std::string> reasoning;
+  std::optional<uint32_t> token_id;
   std::optional<Json::Value> tool_calls;
+  uint32_t spec_accepts = 0;
+  uint32_t spec_rejects = 0;
 };
 
 /**
@@ -79,18 +113,44 @@ struct LLMStreamChunk : BaseResponse {
   std::vector<LLMChoice> choices;
   std::optional<std::string> error;
   std::optional<CompletionUsage> usage;
+
+  // In disaggregation, the decode server fills this on the first chunk with the
+  // number of prompt tokens the prefill server served from its KV cache
+  // (prefix-cache reuse), so the transport can report
+  // usage.prompt_tokens_details.cached_tokens. Unset in non-disaggregated runs.
+  std::optional<int> cached_prompt_tokens;
 };
 
 /**
- * Build a terminal error chunk carrying both `finish_reason="error"` on the
- * choice and a human-readable message in the chunk-level `error` field.
+ * Build a terminal error chunk carrying an error finish reason on the choice
+ * and a human-readable message in the chunk-level `error` field.
  */
-inline LLMStreamChunk makeErrorChunk(uint32_t taskId, std::string error) {
+inline LLMStreamChunk makeErrorChunk(
+    uint32_t taskId, std::string error,
+    LLMErrorReason reason = LLMErrorReason::GENERIC) {
   LLMStreamChunk chunk(taskId);
   LLMChoice choice;
-  choice.finish_reason = "error";
+  choice.finish_reason = finishReasonForError(reason);
   chunk.choices.push_back(std::move(choice));
   chunk.error = std::move(error);
+  return chunk;
+}
+
+inline LLMStreamChunk makeTimeoutErrorChunk(uint32_t taskId) {
+  return makeErrorChunk(taskId, "timeout", LLMErrorReason::TIMEOUT);
+}
+
+/**
+ * Build a terminal abort chunk with `finish_reason="abort"`. Used for both
+ * client-initiated aborts (LLMService::abortRequest) and runner-initiated
+ * preemptions (e.g. an EVICT that supersedes an in-flight SUBMIT), where the
+ * stream must be closed cleanly but the cause is termination, not error.
+ */
+inline LLMStreamChunk makeAbortChunk(uint32_t taskId) {
+  LLMStreamChunk chunk(taskId);
+  LLMChoice choice;
+  choice.finish_reason = "abort";
+  chunk.choices.push_back(std::move(choice));
   return chunk;
 }
 

@@ -7,22 +7,13 @@
 
 #include "api/embedding_controller.hpp"
 #include "api/error_response.hpp"
-#include "config/defaults.hpp"
 #include "config/settings.hpp"
-#include "services/base_service.hpp"
+#include "services/request_pipeline.hpp"
 #include "services/service_container.hpp"
 #include "utils/logger.hpp"
 #include "utils/thread_pool.hpp"
 
 namespace tt::api {
-
-namespace {
-tt::utils::ThreadPool& getCallbackPool() {
-  static tt::utils::ThreadPool pool(
-      tt::config::defaults::CALLBACK_POOL_THREADS);
-  return pool;
-}
-}  // namespace
 
 EmbeddingController::EmbeddingController() {
   if (!tt::config::isEmbeddingService()) {
@@ -47,7 +38,6 @@ void EmbeddingController::createEmbedding(
     std::function<void(const drogon::HttpResponsePtr&)>&& callback) {
   auto startTime = std::chrono::steady_clock::now();
 
-  // Parse request body
   auto json = req->getJsonObject();
   if (!json) {
     callback(errorResponse(drogon::k400BadRequest, "Invalid JSON body",
@@ -73,18 +63,18 @@ void EmbeddingController::createEmbedding(
   }
   auto request = std::move(*requestOpt);
 
-  // Default model if not specified
   if (request.model.empty()) {
-    request.model = "BAAI/bge-large-en-v1.5";
+    request.model = tt::config::embeddingEngineConfig().hf_model_id;
   }
 
   uint64_t reqNum = request_counter_.fetch_add(1);
 
   auto submitTime = std::chrono::steady_clock::now();
 
-  getCallbackPool().submit([service = service_, request = std::move(request),
-                            callback = std::move(callback), reqNum, startTime,
-                            submitTime]() {
+  tt::utils::controllerCallbackPool().submit([service = service_,
+                                              request = std::move(request),
+                                              callback = std::move(callback),
+                                              reqNum, startTime, submitTime]() {
     try {
       auto response = service->submitRequest(std::move(request));
       auto gotResponseTime = std::chrono::steady_clock::now();

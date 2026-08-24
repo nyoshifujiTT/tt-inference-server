@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
 
 #include <drogon/drogon.h>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 
 #include <atomic>
@@ -19,30 +21,58 @@
 
 #include "api/error_response.hpp"
 #include "api/route_registry.hpp"
+#include "config/build_info.hpp"
 #include "config/defaults.hpp"
 #include "config/settings.hpp"
+#include "dynamo/worker_server.hpp"
 #include "metrics/metrics.hpp"
 #include "profiling/tracy.hpp"
+#include "runtime/worker/blaze_worker_metrics_renderer.hpp"
+#include "runtime/worker/single_process_worker_metrics.hpp"
+#include "runtime/worker/worker_manager.hpp"
+#include "runtime/worker/worker_metrics_aggregator.hpp"
+#include "runtime/worker/worker_metrics_shm.hpp"
+#include "services/llm_pipeline.hpp"
 #include "services/llm_service.hpp"
 #include "services/service_container.hpp"
+#include "telemetry/sentry_tracing.hpp"
 #include "utils/logger.hpp"
 #include "utils/service_factory.hpp"
-#include "worker/blaze_worker_metrics_renderer.hpp"
-#include "worker/single_process_worker_metrics.hpp"
-#include "worker/worker_manager.hpp"
-#include "worker/worker_metrics_aggregator.hpp"
-#include "worker/worker_metrics_shm.hpp"
 
-// Include OpenAPI controller (defined in openapi.cpp)
-// The controller auto-registers itself with Drogon
 namespace {
 
 volatile std::sig_atomic_t gShutdownRequested = 0;
+volatile std::sig_atomic_t gSignalCount = 0;
+
+// Returns true if the port is available, false if already in use.
+bool probePort(const std::string& host, uint16_t port) {
+  int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) {
+    TT_LOG_ERROR("[Main] Failed to create probe socket: {}", strerror(errno));
+    return false;
+  }
+  int reuse = 1;
+  ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+  struct sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0)
+    addr.sin_addr.s_addr = INADDR_ANY;
+  bool available =
+      (::bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+  ::close(sock);
+  return available;
+}
 
 void signalHandler(int signal) {
-  TT_LOG_WARN("\n[Main] Received signal {}, initiating shutdown...", signal);
-  gShutdownRequested = 1;
-  drogon::app().quit();
+  bool firstSignal = (gSignalCount == 0);
+  gSignalCount = 1;
+  if (firstSignal) {
+    gShutdownRequested = 1;
+    return;
+  }
+  std::signal(signal, SIG_DFL);
+  std::raise(signal);
 }
 
 /** Map the runtime ModelService to the metrics layout this binary's runner
@@ -50,11 +80,44 @@ void signalHandler(int signal) {
 tt::worker::MetricsLayout metricsLayoutFromConfig() {
   switch (tt::config::modelService()) {
     case tt::config::ModelService::LLM:
-      return tt::worker::MetricsLayout::SP_PIPELINE_RUNNER;
+      return tt::worker::MetricsLayout::BLAZE_RUNNER;
     case tt::config::ModelService::EMBEDDING:
       return tt::worker::MetricsLayout::EMBEDDING;
+    case tt::config::ModelService::IMAGE:
+    case tt::config::ModelService::TTS:
+      return tt::worker::MetricsLayout::UNKNOWN;
   }
   return tt::worker::MetricsLayout::UNKNOWN;
+}
+
+void startWorker(int workerId) {
+  tracy_config::tracyStartupWorker(workerId);
+  tt::utils::ZeroOverheadLogger::initialize(
+      tt::config::logInstanceTag(workerId));
+
+  tt::worker::SingleProcessWorkerMetrics::instance().initialize(
+      workerId, metricsLayoutFromConfig());
+
+  tt::worker::WorkerConfig cfg =
+      tt::worker::makeWorkerConfigForProcess(workerId);
+  tt::worker::SingleProcessWorker worker(cfg);
+
+  static std::atomic<bool> workerShutdown{false};
+  std::signal(SIGTERM, [](int) { workerShutdown.store(true); });
+  std::signal(SIGINT, [](int) { workerShutdown.store(true); });
+
+  std::thread shutdownMonitor([&worker] {
+    while (!workerShutdown.load()) {
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(tt::config::defaults::SHUTDOWN_POLL_MS));
+    }
+    worker.stop();
+  });
+
+  worker.start();
+  workerShutdown.store(true);
+  if (shutdownMonitor.joinable()) shutdownMonitor.join();
+  return;
 }
 
 }  // namespace
@@ -62,31 +125,7 @@ tt::worker::MetricsLayout metricsLayoutFromConfig() {
 int main(int argc, char* argv[]) {
   if (argc >= 3 && std::strcmp(argv[1], "--worker") == 0) {
     int workerId = std::atoi(argv[2]);
-    tracy_config::tracyStartupWorker(workerId);
-    tt::utils::ZeroOverheadLogger::initialize();
-
-    tt::worker::SingleProcessWorkerMetrics::instance().initialize(
-        workerId, metricsLayoutFromConfig());
-
-    tt::worker::WorkerConfig cfg =
-        tt::worker::makeWorkerConfigForProcess(workerId);
-    tt::worker::SingleProcessWorker worker(cfg);
-
-    static std::atomic<bool> workerShutdown{false};
-    std::signal(SIGTERM, [](int) { workerShutdown.store(true); });
-    std::signal(SIGINT, [](int) { workerShutdown.store(true); });
-
-    std::thread shutdownMonitor([&worker] {
-      while (!workerShutdown.load()) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(tt::config::defaults::SHUTDOWN_POLL_MS));
-      }
-      worker.stop();
-    });
-
-    worker.start();
-    workerShutdown.store(true);
-    if (shutdownMonitor.joinable()) shutdownMonitor.join();
+    startWorker(workerId);
     return 0;
   }
 
@@ -120,11 +159,20 @@ int main(int argc, char* argv[]) {
   }
 
   // Initialize logger first
-  tt::utils::ZeroOverheadLogger::initialize();
+  tt::utils::ZeroOverheadLogger::initialize(tt::config::logInstanceTag());
 
   // Setup signal handlers
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
+
+  std::thread shutdownThread([&]() {
+    while (gShutdownRequested == 0) {
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(tt::config::defaults::SHUTDOWN_POLL_MS));
+    }
+    drogon::app().quit();
+  });
+  shutdownThread.detach();
 
   auto modelSvc = tt::config::modelService();
   std::string serviceName = tt::config::toString(modelSvc);
@@ -146,11 +194,41 @@ int main(int argc, char* argv[]) {
   // (initializeServices() starts the WorkerManager which fork+execv's
   // workers). The unique_ptr below owns the lifecycle: its destructor
   // munmaps and shm_unlinks on scope exit, so there is no explicit teardown.
+  // Pre-flight port probe: verify the port is available before forking workers.
+  // If we skip this and Drogon fails to bind later, workers are already running
+  // and the warmup signal queue gets removed mid-lifecycle — causing a crash.
+  if (!probePort(host, port)) {
+    TT_LOG_CRITICAL(
+        "[Main] Port {} is already in use. "
+        "Stop the existing server before starting a new one.",
+        port);
+    return 1;
+  }
+  TT_LOG_INFO("[Main] Port {} is available", port);
+
   const std::string shmName = tt::config::workerMetricsShmName();
   const size_t numWorkers = tt::config::numWorkers();
   auto shm = tt::worker::WorkerMetricsShm::create(shmName, numWorkers);
 
   tt::utils::service_factory::initializeServices();
+
+  // Start the configured service on the main thread. Services whose start()
+  // is slow (e.g. image warmup) own their own background thread internally;
+  // services that fork worker processes (LLM, embedding) MUST start on the
+  // main thread, because PR_SET_PDEATHSIG sends SIGTERM to the worker as
+  // soon as the *thread* that called fork() exits.
+  try {
+    tt::utils::service_factory::startConfiguredService();
+  } catch (const std::exception& e) {
+    TT_LOG_ERROR("[Main] Service start failed: {}", e.what());
+    return 1;
+  }
+
+  // Sentry distributed tracing (no-op without SENTRY_DSN). Initialized after
+  // the service fork+execv'd its workers so the SDK runs only in this node
+  // process; workers are never instrumented.
+  tt::telemetry::init(std::string(tt::config::kInferenceServerVersion),
+                      tt::config::logInstanceTag());
 
   // Wire the aggregator now that the WorkerManager exists. Workers may still
   // be attaching to the segment; renderers tolerate empty/UNKNOWN slots.
@@ -167,7 +245,7 @@ int main(int argc, char* argv[]) {
         numWorkers, metricsLayoutFromConfig());
     agg.initialize(shm.get(), mgr, std::move(layoutByWorker));
     agg.registerRenderer(
-        tt::worker::MetricsLayout::SP_PIPELINE_RUNNER,
+        tt::worker::MetricsLayout::BLAZE_RUNNER,
         std::make_unique<tt::worker::SpPipelineWorkerMetricsRenderer>());
     agg.prebuildAll();
   }
@@ -271,7 +349,8 @@ int main(int argc, char* argv[]) {
       .setClientMaxMemoryBodySize(defs::CLIENT_MAX_BODY_BYTES)
       .setStaticFilesCacheTime(0);
 
-  TT_LOG_INFO("[Main] Starting Drogon HTTP server at http://{}:{}", host, port);
+  TT_LOG_INFO("[Main] Starting Drogon HTTP server, listening at http://{}:{}",
+              host, port);
 
   TT_LOG_INFO("[Main] Endpoints for MODEL_SERVICE='{}':",
               tt::config::toString(modelSvc));
@@ -284,10 +363,108 @@ int main(int argc, char* argv[]) {
     TT_LOG_INFO("  *      {}  - always available", path);
   }
 
-  // Run the server
+  // Optional Dynamo TCP `generate` endpoint. Only spun up when explicitly
+  // enabled (it is a backend-worker plane, separate from the OpenAI HTTP
+  // surface). Routes through the same LLMPipeline as HTTP so prefix caching,
+  // session reuse, and disaggregation all apply.
+  std::unique_ptr<tt::dynamo::DynamoWorkerServer> dynamoWorkerServer;
+  if (modelSvc == tt::config::ModelService::LLM &&
+      tt::config::dynamoEndpointEnabled()) {
+    auto llmService = std::dynamic_pointer_cast<tt::services::LLMService>(
+        tt::services::ServiceContainer::instance().getService(
+            tt::config::ModelService::LLM));
+    if (!llmService) {
+      TT_LOG_ERROR(
+          "[Main] DYNAMO_ENDPOINT_ENABLED=1 but LLM service is not "
+          "registered; skipping Dynamo worker server.");
+    } else {
+      auto pipeline = std::make_shared<tt::services::LLMPipeline>(
+          llmService,
+          tt::services::ServiceContainer::instance().sessionManager(),
+          tt::services::ServiceContainer::instance().disaggregation(),
+          tt::services::ServiceContainer::instance().socket());
+
+      tt::dynamo::DynamoWorkerServer::Options opts;
+      opts.bind_host = tt::config::dynamoBindHost();
+      opts.bind_port = tt::config::dynamoBindPort();
+      opts.namespace_name = tt::config::dynamoNamespace();
+      opts.component = tt::config::dynamoComponent();
+      opts.endpoint = tt::config::dynamoEndpointName();
+      const std::string discoveryBackend = tt::config::dynamoDiscoveryBackend();
+      if (discoveryBackend == "kubernetes") {
+        opts.backend = tt::dynamo::DiscoveryBackend::KUBERNETES;
+      } else if (discoveryBackend == "etcd") {
+        opts.backend = tt::dynamo::DiscoveryBackend::ETCD;
+      } else {
+        TT_LOG_ERROR(
+            "[Main] Unknown DYNAMO_DISCOVERY_BACKEND='{}'; expected 'etcd' or "
+            "'kubernetes'. Falling back to 'etcd'.",
+            discoveryBackend);
+        opts.backend = tt::dynamo::DiscoveryBackend::ETCD;
+      }
+      // Etcd backend.
+      opts.etcd_endpoints = tt::config::dynamoEtcdEndpoints();
+      opts.etcd_lease_ttl_secs = tt::config::dynamoEtcdLeaseTtlSecs();
+      // Model Deployment Card capabilities + Dynamo-native routing (shared by
+      // both discovery backends).
+      if (const char* v = std::getenv("DYNAMO_MODEL_TYPE"); v && *v) {
+        opts.model_type = v;
+      } else if (tt::config::dynamoRoutingEnabled() &&
+                 tt::config::llmMode() == tt::config::LLMMode::PREFILL_ONLY) {
+        // Released Dynamo rejects Tokens+Empty; advertise the compatible
+        // Prefill capability while still setting worker_type=prefill.
+        opts.model_type = "Prefill";
+      }
+      if (const char* v = std::getenv("DYNAMO_MODEL_INPUT"); v && *v) {
+        opts.model_input = v;
+      }
+      if (const char* v = std::getenv("DYNAMO_WORKER_TYPE"); v && *v) {
+        opts.worker_type = v;
+      } else if (tt::config::dynamoRoutingEnabled()) {
+        switch (tt::config::llmMode()) {
+          case tt::config::LLMMode::PREFILL_ONLY:
+            opts.worker_type = "prefill";
+            opts.needs = {{"decode"}};
+            break;
+          case tt::config::LLMMode::DECODE_ONLY:
+            opts.worker_type = "decode";
+            break;
+          case tt::config::LLMMode::REGULAR:
+            opts.worker_type = "aggregated";
+            break;
+        }
+      }
+      // Kubernetes backend.
+      opts.kube_api_server = tt::config::dynamoKubeApiServer();
+      opts.kube_token_path = tt::config::dynamoKubeTokenPath();
+      opts.kube_validate_cert = tt::config::dynamoKubeValidateCert();
+      opts.pod_namespace = tt::config::dynamoPodNamespace();
+      opts.pod_name = tt::config::dynamoPodName();
+      opts.pod_uid = tt::config::dynamoPodUid();
+
+      try {
+        dynamoWorkerServer = std::make_unique<tt::dynamo::DynamoWorkerServer>(
+            pipeline,
+            tt::services::ServiceContainer::instance().disaggregation(), opts);
+        dynamoWorkerServer->start();
+      } catch (const std::exception& e) {
+        TT_LOG_ERROR("[Main] Dynamo worker server failed to start: {}",
+                     e.what());
+        dynamoWorkerServer.reset();
+      }
+    }
+  }
+
   drogon::app().run();
 
+  if (dynamoWorkerServer) {
+    dynamoWorkerServer->stop();
+    dynamoWorkerServer.reset();
+  }
+
+  tt::telemetry::shutdown();
+
   // `shm`'s destructor runs on scope exit and handles munmap + shm_unlink.
-  TT_LOG_INFO("[Main] Server shutdown complete");
+  TT_LOG_INFO("[Main] Server shutdown complete (graceful)");
   return 0;
 }

@@ -1,0 +1,29 @@
+{
+  "scenarios": {
+    "cpp_mock_pipeline": {
+      "label": "C++ Server vLLM Bench (mock_pipeline)",
+      "min_completed": 1000,
+      "max_failed": 0,
+      "max_mean_tpot_ms": 3,
+      "max_mean_ttft_ms": 395
+    },
+    "prefill_decode_split_zmq": {
+      "label": "C++ Server Prefill/Decode Split (ZMQ, 55k ISL @ c16)",
+      "min_completed": 100,
+      "max_mean_tpot_ms": 12,
+      "max_failed": 0
+    },
+    "gateway_split_zmq": {
+      "label": "C++ Server Gateway Split (ZMQ)",
+      "min_completed": 1000,
+      "max_failed": 0,
+      "max_mean_tpot_ms": 12,
+      "max_mean_ttft_ms": 2000
+    },
+    "dynamo_frontend": {
+      "label": "Dynamo Frontend + cpp_server Integration",
+      "min_completed": 1000,
+      "max_failed": 0
+    }
+  }
+}

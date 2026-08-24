@@ -5,6 +5,7 @@
 
 #include <json/json.h>
 
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -14,10 +15,7 @@
 #include "domain/base_request.hpp"
 #include "domain/json_field.hpp"
 #include "domain/llm/chat_message.hpp"
-#include "domain/response_format.hpp"
 #include "domain/session.hpp"
-#include "domain/tool_calls/tool.hpp"
-#include "domain/tool_calls/tool_choice.hpp"
 
 namespace tt::domain::llm {
 
@@ -70,7 +68,8 @@ struct LLMRequest : BaseRequest {
   std::optional<std::string> model;
 
   // Prompt can be a string or a list of token ids
-  std::variant<std::string, std::vector<int>> prompt;
+  // Can be either the original prompt or delta
+  std::variant<std::string, std::vector<uint32_t>> prompt;
 
   // Original chat messages used to derive `prompt`. Kept here so downstream
   // steps (session resolution, prefix-cache routing) don't need a separate
@@ -118,30 +117,78 @@ struct LLMRequest : BaseRequest {
   std::optional<int> prompt_logprobs;
   std::optional<int> truncate_prompt_tokens;
   int prompt_tokens_count = 0;
+  int full_prompt_tokens_count =
+      0;  // Full prompt tokens (before delta replacement)
   bool fast_mode = false;
   bool disaggregated = false;  // True if this is a disaggregated request
 
-  bool parallel_tool_calls = true;
+  // Unique 64-bit migration ID correlating a prefill request with the KV
+  // transfer / result. Generated on the prefill server and echoed back.
+  std::optional<uint64_t> migrationId;
 
-  std::optional<std::vector<tool_calls::Tool>> tools;
-  std::optional<tool_calls::ToolChoice> tool_choice;
+  // Per-request KV migration start position for disaggregated prefill. Set by
+  // the prefill server after comparing prefill-side and decode-side matched
+  // prefix lengths.
+  std::optional<uint32_t> migrationStartPosition;
 
-  // Structured output constraint
-  std::optional<ResponseFormat> response_format;
+  // First free index in the per-user KV cache: the absolute KV position where
+  // the worker writes the next token's KV, equal to the position of the first
+  // token handed to the worker. The runner forwards it verbatim as
+  // `position_id`. Set on every resolved request: continuations (prefix-cache
+  // hits, response-id hits, slot copies) get `matched_tokens +
+  // accumulated_think_tokens`, where `matched_tokens` is the trimmed prefix
+  // length; a brand-new session matches no prefix, so its first free index is
+  // 0.
+  //
+  // One intentional exception: a disaggregated decode handoff reprocesses the
+  // last prompt token (the prefill-generated token is not migrated), so it is
+  // set to `tokenIds.size() - 1` — the index that last token already occupies —
+  // rather than the next free slot.
+  std::optional<uint32_t> kv_position_id;
 
-  // When false, reasoning tokens are suppressed from the response.
-  bool enable_reasoning = true;
+  // Number of tokens already in the decode-side KV cache that the prefill
+  // prefill should not send this part of KV.
+  int decode_position_id = 0;
+
+  // Accumulated think (reasoning) tokens in the matched prefix, folded into
+  // kv_position_id during decode-side session resolution. Used to derive
+  // decode_skip_tokens. Set on a prefix-cache hit.
+  int accumulated_think_tokens = 0;
+
+  // Same leading reused prefix as decode_position_id but excluding the
+  // accumulated think tokens. Computed on the decode side and forwarded to the
+  // prefill server, which stores it on the Sequence.
+  int decode_skip_tokens = 0;
+
+  std::optional<bool> disaggregation_override;
 
   // When true, skip adding <bos><user> and <assistant> tags in chat template.
   bool skip_apply_chat_template = false;
 
+  // When true, the consumer emits chunks carrying only `token_id` and
+  // skips decode. Used by transports that forward raw
+  // token_ids and handle detokenization downstream (e.g. Dynamo).
+  bool skip_text_decode = false;
+
   // Session management (internal use only, not parsed from JSON)
   std::optional<std::string> sessionId;
   std::optional<uint32_t> slotId;
-  tt::domain::Session* session =
-      nullptr;  // Pointer to session in SessionManager
+  std::optional<uint32_t> prefillSlotId;
+  // Shared ownership of the session: SessionManager's map holds one ref;
+  // requests/callbacks hold their own, so a session can't be freed mid-use
+  // even if eviction drops the map entry.
+  std::shared_ptr<tt::domain::Session> session;
   bool continuation =
       false;  // True if this request continues an existing session
+
+  std::optional<std::string> previousResponseId;
+  std::optional<std::string> responseId;
+
+  // W3C traceparent of the decode-side Sentry transaction (internal use
+  // only, not parsed from JSON). Set by the Dynamo request handler so the
+  // disaggregated decode -> prefill ZMQ hop continues the same trace.
+  // Empty when tracing is disabled or the request carried no traceparent.
+  std::string traceparentHeader;
 
   std::string toString() const {
     std::string promptInfo;
@@ -149,7 +196,7 @@ struct LLMRequest : BaseRequest {
       promptInfo =
           "\"" + detail::truncate(*s, detail::MAX_PROMPT_LOG_LENGTH) + "\"";
     } else {
-      auto& tokens = std::get<std::vector<int>>(prompt);
+      auto& tokens = std::get<std::vector<uint32_t>>(prompt);
       promptInfo = "<" + std::to_string(tokens.size()) + " token ids>";
     }
 
@@ -165,7 +212,8 @@ struct LLMRequest : BaseRequest {
         << " frequency_penalty=" << frequency_penalty << " n=" << n
         << " stop_count=" << stop.size()
         << " sessionId=" << detail::optStr(sessionId)
-        << " slotId=" << detail::optStr(slotId);
+        << " slotId=" << detail::optStr(slotId) << " disaggregation_override="
+        << detail::optStr(disaggregation_override);
     return out.str();
   }
 };

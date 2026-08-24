@@ -2,19 +2,25 @@
 #
 # SPDX-FileCopyrightText: © 2024 Tenstorrent USA, Inc.
 
+from __future__ import annotations
+
 import logging
 import json
 import time
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 from pathlib import Path
 
 import requests
 import jwt
-from transformers import AutoTokenizer
 
-from utils.prompt_generation import generate_prompts
 from utils.prompt_configs import PromptConfig, EnvironmentConfig
 from utils.cache_monitor import CacheMonitor, get_environment_cache_dir
+
+if TYPE_CHECKING:
+    # transformers lives in the heavy ML venv; keep it out of the import path so
+    # the lightweight health-check/cache logic here can be imported (and tested)
+    # without it. Only used for type annotations.
+    from transformers import AutoTokenizer
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -131,7 +137,9 @@ class PromptClient:
             include_v1: If True, append /v1 for OpenAI-compatible endpoints.
                        If False, return root URL for vLLM-specific endpoints.
         """
-        base = f"{self.env_config.deploy_url}:{self.env_config.service_port}"
+        from utils.url_helpers import build_base_url
+
+        base = build_base_url(self.env_config.deploy_url, self.env_config.service_port)
         return f"{base}/v1" if include_v1 else base
 
     def _get_api_completions_url(self) -> str:
@@ -163,20 +171,23 @@ class PromptClient:
 
     def wait_for_healthy(
         self,
-        timeout: float = 1200.0,
+        timeout: Optional[float] = None,
         interval: int = 10,
     ) -> bool:
         """
         Wait for the vLLM service to become healthy with intelligent cache generation detection.
 
         Args:
-            timeout: Base timeout in seconds
+            timeout: Base timeout in seconds.
             interval: Health check interval in seconds
 
         Returns:
             bool: True if service becomes healthy, False if timeout exceeded
         """
-        base_timeout = float(timeout)
+        if timeout is None:
+            base_timeout = self.cache_monitor.get_tensor_cache_timeout()
+        else:
+            base_timeout = float(timeout)
         effective_timeout = base_timeout
         if self.server_ready:
             return True
@@ -237,14 +248,14 @@ class PromptClient:
                         using_tensor_cache_timeout = False
                     if has_existing_cache:
                         logger.info(
-                            "📁 Existing tensor cache detected - tracking %s file(s), %s; using standard timeout:=%ss",
+                            "📁 Existing tensor cache detected - tracking %s file(s), %s; using startup timeout:=%ss",
                             cache_status.file_count,
                             format_human_readable_bytes(cache_status.total_size_bytes),
                             effective_timeout,
                         )
                     else:
                         logger.info(
-                            "📁 No active tensor cache generation detected, using standard timeout:=%ss",
+                            "📁 No active tensor cache generation detected, using startup timeout:=%ss",
                             effective_timeout,
                         )
                 last_cache_status_log = current_time
@@ -342,14 +353,16 @@ class PromptClient:
         self,
         context_lens: List[Tuple[int, int]] = None,
         image_resolutions: List[Tuple[int, int]] = None,
-        timeout: float = 1200.0,
+        timeout: Optional[float] = None,
     ) -> None:
         """Capture traces for text and/or image inputs at different sizes.
 
         Args:
             context_lens: List of (input_seq_len, output_seq_len) tuples for text lengths
             image_resolutions: List of (width, height) tuples for image resolutions
-            timeout: startup timeout waiting for server, seconds.
+            timeout: startup timeout waiting for server, seconds. When ``None``
+                (the default), the model-spec defined ``tensor_cache_timeout``
+                is used as the full startup budget. See ``wait_for_healthy``.
         """
         logger.info("Capturing traces for input configurations...")
 
@@ -374,6 +387,10 @@ class PromptClient:
         # Check service health before starting
         if not self.wait_for_healthy(timeout=timeout):
             raise RuntimeError("vLLM did not start correctly!")
+
+        # Deferred import: prompt_generation pulls in torch/transformers (the
+        # heavy ML venv), which this module must not require just to be imported.
+        from utils.prompt_generation import generate_prompts
 
         # Import image generation only if needed
         if image_resolutions:

@@ -5,73 +5,53 @@
 
 #include <utility>
 
-#include "config/settings.hpp"
-#include "domain/llm/chat_completion_response.hpp"
-#include "utils/concurrent_queue.hpp"
 #include "utils/logger.hpp"
 
 namespace tt::api {
 
 using namespace tt::domain::llm;
 
-StreamingResponseWriter::StreamingResponseWriter(trantor::EventLoop* loop,
-                                                 ResponseWriterParams params,
-                                                 bool includeUsage)
+namespace {
+constexpr double STREAM_HEARTBEAT_INTERVAL_SECONDS = 1.0;
+constexpr const char* STREAM_HEARTBEAT_SSE = ":\n\n";
+}  // namespace
+
+StreamingResponseWriter::StreamingResponseWriter(
+    trantor::EventLoop* loop, ResponseWriterParams params, bool includeUsage,
+    std::shared_ptr<StreamEventFormatter> formatter)
     : ResponseWriter(std::move(params)),
       loop(loop),
-      includeUsage(includeUsage) {
-  if (config::enableAccumulatedStreaming()) {
-    sseBatchQueue = std::make_shared<tt::utils::ConcurrentQueue<std::string>>();
-  }
-}
+      includeUsage(includeUsage),
+      formatter(std::move(formatter)) {}
 
 std::shared_ptr<StreamingResponseWriter> StreamingResponseWriter::create(
     trantor::EventLoop* loop, ResponseWriterParams params, bool includeUsage) {
-  return std::shared_ptr<StreamingResponseWriter>(
-      new StreamingResponseWriter(loop, std::move(params), includeUsage));
+  return create(loop, std::move(params), includeUsage,
+                std::make_shared<ChatCompletionEventFormatter>());
+}
+
+std::shared_ptr<StreamingResponseWriter> StreamingResponseWriter::create(
+    trantor::EventLoop* loop, ResponseWriterParams params, bool includeUsage,
+    std::shared_ptr<StreamEventFormatter> formatter) {
+  if (!formatter) {
+    formatter = std::make_shared<ChatCompletionEventFormatter>();
+  }
+  return std::shared_ptr<StreamingResponseWriter>(new StreamingResponseWriter(
+      loop, std::move(params), includeUsage, std::move(formatter)));
 }
 
 void StreamingResponseWriter::sendSse(const std::string& sse,
                                       std::function<void()> onDisconnect) {
-  if (!sseBatchQueue) {
-    loop->queueInLoop([streamPtr = this->streamPtr,
-                       earlyBuffer = this->earlyBuffer, sse,
-                       onDisconnect = std::move(onDisconnect)]() {
-      if (*streamPtr) {
-        bool ok = (*streamPtr)->send(sse);
-        if (!ok && onDisconnect) onDisconnect();
-      } else if (earlyBuffer) {
-        earlyBuffer->push_back(sse);
-      }
-    });
-    return;
-  }
-  sseBatchQueue->push(sse);
-  if (sseBatchQueue->size() >= config::maxAccumulatedTokens()) {
-    auto accumulated = sseBatchQueue->drain();
-    std::string batch;
-    for (auto& s : accumulated) batch.append(s);
-    loop->queueInLoop(
-        [streamPtr = this->streamPtr, earlyBuffer = this->earlyBuffer,
-         batch = std::move(batch), onDisconnect = std::move(onDisconnect)]() {
-          if (*streamPtr) {
-            bool ok = (*streamPtr)->send(batch);
-            if (!ok && onDisconnect) onDisconnect();
-          } else if (earlyBuffer) {
-            earlyBuffer->push_back(batch);
-          }
-        });
-  }
-}
-
-void StreamingResponseWriter::flushAccumulated() {
-  if (!sseBatchQueue) return;
-  auto accumulated = sseBatchQueue->drain();
-  if (!accumulated.empty()) {
-    std::string batch;
-    for (auto& s : accumulated) batch.append(s);
-    if (*streamPtr) (*streamPtr)->send(batch);
-  }
+  loop->queueInLoop([streamPtr = this->streamPtr,
+                     earlyBuffer = this->earlyBuffer, sse,
+                     onDisconnect = std::move(onDisconnect)]() {
+    if (*streamPtr) {
+      bool ok = (*streamPtr)->send(sse);
+      if (!ok && onDisconnect) onDisconnect();
+    } else if (earlyBuffer) {
+      earlyBuffer->push_back(sse);
+    }
+  });
 }
 
 void StreamingResponseWriter::handleTokenChunk(const LLMStreamChunk& chunk) {
@@ -79,21 +59,20 @@ void StreamingResponseWriter::handleTokenChunk(const LLMStreamChunk& chunk) {
   if (chunk.choices.empty()) return;
 
   const auto& choice = chunk.choices[0];
-  if (!choice.text.empty() || choice.reasoning.has_value()) {
-    noteToken();
-  }
+  const int currentTokens = noteToken(choice);
 
-  auto streamChunk = ChatCompletionStreamChunk::makeContentChunk(
-      params.completionId, params.model, params.created, choice, std::nullopt);
+  const std::string accumulatedSoFar = accumulatedText;
+  accumulatedText += choice.text;
+  if (choice.finish_reason.has_value()) {
+    lastFinishReason = choice.finish_reason;
+  }
 
   std::string sse;
   if (firstContentChunk.exchange(false)) {
-    auto initialChunk = ChatCompletionStreamChunk::makeInitialChunk(
-        params.completionId, params.model, params.created, std::nullopt);
-    sse = initialChunk.toSSE() + streamChunk.toSSE();
-  } else {
-    sse = streamChunk.toSSE();
+    sse += formatter->formatInitialEvents(params, std::nullopt);
   }
+  sse += formatter->formatTokenEvents(params, chunk, std::nullopt,
+                                      currentTokens, accumulatedSoFar);
 
   if (!sse.empty()) {
     auto self =
@@ -107,37 +86,52 @@ void StreamingResponseWriter::finalize() {
       std::static_pointer_cast<StreamingResponseWriter>(shared_from_this());
   loop->queueInLoop([self]() {
     if (!self->done.exchange(true) && *self->streamPtr) {
-      self->flushAccumulated();
+      self->stopHeartbeat();
 
-      if (self->includeUsage) {
-        auto usage = self->buildUsage();
-        (*self->streamPtr)
-            ->send(ChatCompletionStreamChunk::makeUsageChunk(
-                       self->params.completionId, self->params.model,
-                       self->params.created, usage)
-                       .toSSE());
+      auto usage = self->buildUsage();
+      auto finalSse = self->formatter->formatFinalEvents(
+          self->params, usage, self->accumulatedText, self->lastFinishReason,
+          self->includeUsage);
+      if (!finalSse.empty()) {
+        (*self->streamPtr)->send(finalSse);
       }
-
-      (*self->streamPtr)->send("data: [DONE]\n\n");
       (*self->streamPtr)->close();
-
-      if (self->params.session) {
-        self->params.session->clearInFlight();
-      }
     }
   });
 }
 
 void StreamingResponseWriter::abort() {
   if (!done.exchange(true)) {
+    stopHeartbeat();
     TT_LOG_INFO(
         "[StreamingResponseWriter] Client disconnected, aborting task {}",
         params.taskId);
-    if (params.service) params.service->abortRequest(params.taskId);
-    if (params.session) {
-      params.session->clearInFlight();
+    if (params.onAbortRequest) {
+      params.onAbortRequest(params.taskId);
     }
+    if (params.onSessionRelease) params.onSessionRelease();
   }
+}
+
+void StreamingResponseWriter::startHeartbeat() {
+  if (heartbeatTimerId != trantor::InvalidTimerId) return;
+
+  auto self =
+      std::static_pointer_cast<StreamingResponseWriter>(shared_from_this());
+  heartbeatTimerId =
+      loop->runEvery(STREAM_HEARTBEAT_INTERVAL_SECONDS, [self]() {
+        if (self->done.load() || !*self->streamPtr) return;
+
+        bool ok = (*self->streamPtr)->send(STREAM_HEARTBEAT_SSE);
+        if (!ok) self->abort();
+      });
+}
+
+void StreamingResponseWriter::stopHeartbeat() {
+  if (heartbeatTimerId == trantor::InvalidTimerId) return;
+
+  loop->invalidateTimer(heartbeatTimerId);
+  heartbeatTimerId = trantor::InvalidTimerId;
 }
 
 drogon::HttpResponsePtr StreamingResponseWriter::buildResponse() {
@@ -152,6 +146,10 @@ drogon::HttpResponsePtr StreamingResponseWriter::buildResponse() {
         self->earlyBuffer->clear();
         if (self->done.load()) {
           (*self->streamPtr)->close();
+          return;
+        }
+        if (self->params.enableDisconnectHeartbeat) {
+          self->startHeartbeat();
         }
       });
 

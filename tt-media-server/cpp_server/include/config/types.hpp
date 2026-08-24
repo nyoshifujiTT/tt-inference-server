@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -17,13 +16,19 @@ namespace tt::config {
 enum class ModelService {
   LLM,
   EMBEDDING,
+  IMAGE,
+  TTS,
 };
 
-/** String value for env MODEL_SERVICE (e.g. "llm", "embedding"). */
+/** String value for env MODEL_SERVICE. */
 inline std::string toString(ModelService s) {
   switch (s) {
     case ModelService::EMBEDDING:
       return "embedding";
+    case ModelService::IMAGE:
+      return "image";
+    case ModelService::TTS:
+      return "tts";
     case ModelService::LLM:
     default:
       return "llm";
@@ -33,22 +38,25 @@ inline std::string toString(ModelService s) {
 /** Parse MODEL_SERVICE; empty or unknown -> LLM. Expects lowercase input. */
 inline ModelService modelServiceFromString(const std::string& v) {
   if (v == "embedding") return ModelService::EMBEDDING;
+  if (v == "image") return ModelService::IMAGE;
+  if (v == "tts") return ModelService::TTS;
   return ModelService::LLM;
 }
 
-/** Model type: drives tokenizer strategy + model-specific config. Derived from
- * LLM_DEVICE_BACKEND env var. */
+/** Model type: drives tokenizer strategy + model-specific config. */
 enum class ModelType {
   DEEPSEEK_R1_0528,
   LLAMA_3_1_8B_INSTRUCT,
+  KIMI_K2_6,
+  KIMI_K2_7_CODE,
+  GPT_OSS_120B,
+  MINIMAX_M2_7,
+  MINIMAX_M3,
+  GLM_5_1,
+  GLM_5_2,
+  DEEPSEEK_V4_PRO,
+  GEMMA_4_31B_IT,
 };
-
-/** Map LLM_DEVICE_BACKEND env string to ModelType; "llama" ->
- * LLAMA_3_1_8B_INSTRUCT, else DEEPSEEK_R1_0528. Expects lowercase input. */
-inline ModelType modelTypeFromDeviceBackend(const std::string& v) {
-  if (v == "llama") return ModelType::LLAMA_3_1_8B_INSTRUCT;
-  return ModelType::DEEPSEEK_R1_0528;
-}
 
 enum class LLMMode {
   REGULAR,
@@ -78,15 +86,29 @@ inline LLMMode llmModeFromString(const std::string& v) {
 
 enum class ModelRunnerType {
   MOCK,
-  LLAMA,
   MOCK_PIPELINE,
+  MOCK_SCHEDULER,
   PIPELINE_MANAGER,
-  PREFILL
+  TT_SDXL_GENERATE,
+  TT_SDXL_IMAGE_TO_IMAGE,
+  TT_SDXL_EDIT,
+  TT_TTS,
+  TT_BGE_LARGE_EN,
+  EMBEDDING_MOCK,
 };
 
 enum class Model {
   DEEPSEEK_R1_0528,
   LLAMA_3_1_8B_INSTRUCT,
+  KIMI_K2_6,
+  KIMI_K2_7_CODE,
+  GPT_OSS_120B,
+  MINIMAX_M2_7,
+  MINIMAX_M3,
+  GLM_5_1,
+  GLM_5_2,
+  DEEPSEEK_V4_PRO,
+  GEMMA_4_31B_IT,
 };
 
 struct ModelMapping {
@@ -97,6 +119,15 @@ struct ModelMapping {
 static constexpr ModelMapping MODEL_MAPPINGS[] = {
     {Model::DEEPSEEK_R1_0528, "deepseek-ai/DeepSeek-R1-0528"},
     {Model::LLAMA_3_1_8B_INSTRUCT, "meta-llama/Llama-3.1-8B-Instruct"},
+    {Model::KIMI_K2_6, "moonshotai/Kimi-K2.6"},
+    {Model::KIMI_K2_7_CODE, "moonshotai/Kimi-K2.7-Code"},
+    {Model::GPT_OSS_120B, "openai/gpt-oss-120b"},
+    {Model::MINIMAX_M2_7, "MiniMaxAI/MiniMax-M2.7"},
+    {Model::MINIMAX_M3, "MiniMaxAI/MiniMax-M3"},
+    {Model::GLM_5_1, "zai-org/GLM-5.1"},
+    {Model::GLM_5_2, "zai-org/GLM-5.2"},
+    {Model::DEEPSEEK_V4_PRO, "deepseek-ai/DeepSeek-V4-Pro"},
+    {Model::GEMMA_4_31B_IT, "google/gemma-4-31B-it"},
 };
 
 inline std::string toString(Model m) {
@@ -110,16 +141,49 @@ inline std::string toString(ModelRunnerType m) {
   switch (m) {
     case ModelRunnerType::MOCK:
       return "mock";
-    case ModelRunnerType::LLAMA:
-      return "llama";
     case ModelRunnerType::MOCK_PIPELINE:
       return "mock_pipeline";
+    case ModelRunnerType::MOCK_SCHEDULER:
+      return "mock_scheduler";
     case ModelRunnerType::PIPELINE_MANAGER:
       return "pipeline_manager";
-    case ModelRunnerType::PREFILL:
-      return "prefill";
+    case ModelRunnerType::TT_SDXL_GENERATE:
+      return "tt_sdxl_generate";
+    case ModelRunnerType::TT_SDXL_IMAGE_TO_IMAGE:
+      return "tt_sdxl_image_to_image";
+    case ModelRunnerType::TT_SDXL_EDIT:
+      return "tt_sdxl_edit";
+    case ModelRunnerType::TT_TTS:
+      return "tt_tts";
+    case ModelRunnerType::TT_BGE_LARGE_EN:
+      return "tt_bge_large_en";
+    case ModelRunnerType::EMBEDDING_MOCK:
+      return "embedding_mock";
   }
   return "unknown";
+}
+
+// Matches the `ModelRunners` enum values in tt-media-server/config/constants.py
+inline std::string toClientRunnerName(ModelRunnerType m) {
+  switch (m) {
+    case ModelRunnerType::TT_SDXL_GENERATE:
+      return "tt-sdxl-trace";
+    case ModelRunnerType::TT_SDXL_IMAGE_TO_IMAGE:
+      return "tt-sdxl-image-to-image";
+    case ModelRunnerType::TT_SDXL_EDIT:
+      return "tt-sdxl-edit";
+    case ModelRunnerType::TT_TTS:
+      return "tt-tts";
+    case ModelRunnerType::TT_BGE_LARGE_EN:
+      return "bge_large_en_v1_5";
+    case ModelRunnerType::MOCK:
+    case ModelRunnerType::MOCK_PIPELINE:
+    case ModelRunnerType::MOCK_SCHEDULER:
+    case ModelRunnerType::PIPELINE_MANAGER:
+    case ModelRunnerType::EMBEDDING_MOCK:
+      return "";
+  }
+  return "";
 }
 
 inline Model modelFromString(const std::string_view& v) {
@@ -127,24 +191,6 @@ inline Model modelFromString(const std::string_view& v) {
     if (entry.name == v) return entry.model;
   }
   throw std::invalid_argument("Invalid model: " + std::string(v));
-}
-
-enum class ResponseFormatType : uint8_t {
-  TEXT = 0,
-  JSON_OBJECT = 1,
-  JSON_SCHEMA = 2
-};
-
-enum class SchedulingPolicy {
-  PREFILL_FIRST,
-  MAX_OCCUPANCY,
-};
-
-/** Parse SCHEDULING_POLICY; empty or unknown -> PREFILL_FIRST. Expects
- * lowercase input. */
-inline SchedulingPolicy schedulingPolicyFromString(const std::string& v) {
-  if (v == "max_occupancy") return SchedulingPolicy::MAX_OCCUPANCY;
-  return SchedulingPolicy::PREFILL_FIRST;
 }
 
 }  // namespace tt::config

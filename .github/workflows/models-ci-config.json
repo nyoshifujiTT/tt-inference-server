@@ -3,46 +3,78 @@
     "DeepSeek-R1-0528": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
             "QUAD_GALAXY"
           ]
         }
       }
     },
-    "Llama-3.1-8B-Instruct": {
+    "diffusiongemma-26B-A4B-it": {
       "inference_engine": "vLLM",
       "ci": {
         "nightly": {
           "devices": [
-            "GALAXY",
-            "N150",
-            "N300",
-            "P100",
-            "P150X4",
-            "P150X8",
-            "P300X2",
-            "T3K"
-          ]
-        },
-        "weekly": {
-          "devices": [
-            "GALAXY"
+            "P300X2"
           ]
         },
         "release": {
           "devices": [
-            "GALAXY",
-            "P150X8",
             "P300X2"
           ]
         }
       }
     },
+    "Falcon3-7B-Instruct": {
+      "inference_engine": "FORGE",
+      "ci": {
+        "nightly": {
+          "devices": [
+            "P150"
+          ]
+        }
+      }
+    },
+    "Llama-3.1-8B-Instruct": {
+      "implementations": [
+        {
+          "inference_engine": "vLLM",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "N150",
+                "P150",
+                "P300",
+                "P300X2"
+              ]
+            },
+            "weekly": {
+              "devices": [
+                "GALAXY",
+                "N300",
+                "P100",
+                "P150X4",
+                "T3K"
+              ]
+            }
+          }
+        },
+        {
+          "inference_engine": "FORGE",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "P150"
+              ]
+            }
+          }
+        }
+      ]
+    },
     "Llama-3.2-11B-Vision-Instruct": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
             "N300",
             "T3K"
@@ -53,7 +85,7 @@
     "Llama-3.2-1B-Instruct": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
             "N150",
             "N300",
@@ -67,7 +99,7 @@
         {
           "inference_engine": "vLLM",
           "ci": {
-            "nightly": {
+            "weekly": {
               "devices": [
                 "N150",
                 "N300",
@@ -79,10 +111,9 @@
         {
           "inference_engine": "FORGE",
           "ci": {
-            "nightly": {
+            "weekly": {
               "devices": [
-                "N150",
-                "N300"
+                "P150"
               ]
             }
           }
@@ -92,7 +123,7 @@
     "Llama-3.2-90B-Vision-Instruct": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
             "T3K"
           ]
@@ -105,23 +136,15 @@
         "nightly": {
           "devices": [
             "GALAXY",
-            "GALAXY_BH",
-            "P150X4",
-            "P150X8",
-            "P300X2",
-            "T3K"
+            "BH_GALAXY",
+            "P300X2"
           ]
         },
         "weekly": {
           "devices": [
-            "GALAXY"
-          ]
-        },
-        "release": {
-          "devices": [
             "GALAXY",
-            "P150X8",
-            "P300X2"
+            "P150X4",
+            "T3K"
           ]
         }
       }
@@ -129,7 +152,7 @@
     "Mistral-7B-Instruct-v0.3": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
             "N150",
             "N300"
@@ -138,27 +161,36 @@
       }
     },
     "Mistral-Small-3.1-24B-Instruct-2503": {
-      "inference_engine": "vLLM",
-      "ci": {
-        "nightly": {
-          "devices": [
-            "T3K"
-          ]
+      "implementations": [
+        {
+          "inference_engine": "vLLM",
+          "ci": {
+            "weekly": {
+              "devices": [
+                "T3K"
+              ]
+            }
+          }
+        },
+        {
+          "inference_engine": "FORGE",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "BH_GALAXY"
+              ]
+            }
+          }
         }
-      }
+      ]
     },
     "QwQ-32B": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
             "GALAXY",
             "T3K"
-          ]
-        },
-        "weekly": {
-          "devices": [
-            "GALAXY"
           ]
         }
       }
@@ -166,15 +198,10 @@
     "Qwen2.5-72B-Instruct": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
             "GALAXY",
             "T3K"
-          ]
-        },
-        "weekly": {
-          "devices": [
-            "GALAXY"
           ]
         }
       }
@@ -233,54 +260,83 @@
     "Qwen2.5-VL-7B-Instruct": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
-            "N150",
             "N300"
           ]
         }
       }
     },
     "Qwen3-32B": {
-      "inference_engine": "vLLM",
-      "ci": {
-        "nightly": {
-          "devices": [
-            "GALAXY",
-            "GALAXY_BH",
-            "P150X8",
-            "P300X2",
-            "T3K"
-          ]
+      "implementations": [
+        {
+          "inference_engine": "vLLM",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "GALAXY",
+                "BH_GALAXY",
+                "P300X2"
+              ]
+            },
+            "release": {
+              "devices": [
+                "GALAXY"
+              ]
+            },
+            "weekly": {
+              "devices": [
+                "GALAXY",
+                "T3K"
+              ]
+            }
+          }
         },
-        "weekly": {
-          "devices": [
-            "GALAXY"
-          ]
-        },
-        "release": {
-          "devices": [
-            "GALAXY",
-            "P150X8",
-            "P300X2"
-          ]
+        {
+          "inference_engine": "FORGE",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "P300X2"
+              ]
+            }
+          }
         }
-      }
+      ]
     },
     "Qwen3-8B": {
+      "implementations": [
+        {
+          "inference_engine": "vLLM",
+          "ci": {
+            "weekly": {
+              "devices": [
+                "GALAXY",
+                "N150",
+                "N300",
+                "T3K"
+              ]
+            }
+          }
+        },
+        {
+          "inference_engine": "FORGE",
+          "ci": {
+            "weekly": {
+              "devices": [
+                "P150"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Qwen3.6-27B": {
       "inference_engine": "vLLM",
       "ci": {
         "nightly": {
           "devices": [
-            "GALAXY",
-            "N150",
-            "N300",
-            "T3K"
-          ]
-        },
-        "weekly": {
-          "devices": [
-            "GALAXY"
+            "P300X2"
           ]
         }
       }
@@ -288,9 +344,9 @@
     "Qwen3-4B": {
       "inference_engine": "FORGE",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
-            "N150"
+            "P150"
           ]
         }
       }
@@ -300,7 +356,22 @@
       "ci": {
         "nightly": {
           "devices": [
+            "P300X2"
+          ]
+        },
+        "weekly": {
+          "devices": [
             "N150"
+          ]
+        }
+      }
+    },
+    "Qwen3-Embedding-0.6B": {
+      "inference_engine": "FORGE",
+      "ci": {
+        "nightly": {
+          "devices": [
+            "P300X2"
           ]
         }
       }
@@ -313,26 +384,35 @@
             "GALAXY",
             "N150"
           ]
-        },
-        "release": {
-          "devices": [
-            "GALAXY"
-          ]
         }
       }
     },
     "bge-m3": {
-      "inference_engine": "MEDIA",
-      "ci": {
-        "nightly": {
-          "devices": [
-            "GALAXY",
-            "N150",
-            "N300",
-            "T3K"
-          ]
+      "implementations": [
+        {
+          "inference_engine": "MEDIA",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "GALAXY",
+                "N150",
+                "N300",
+                "T3K"
+              ]
+            }
+          }
+        },
+        {
+          "inference_engine": "FORGE",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "P300X2"
+              ]
+            }
+          }
         }
-      }
+      ]
     },
     "Wan2.2-T2V-A14B-Diffusers": {
       "inference_engine": "MEDIA",
@@ -340,18 +420,10 @@
         "nightly": {
           "devices": [
             "GALAXY",
-            "GALAXY_BH",
+            "BH_GALAXY",
             "P150X4",
-            "P150X8",
             "P300X2",
             "T3K"
-          ]
-        },
-        "release": {
-          "devices": [
-            "GALAXY",
-            "P150X8",
-            "P300X2"
           ]
         }
       }
@@ -362,18 +434,10 @@
         "nightly": {
           "devices": [
             "GALAXY",
-            "GALAXY_BH",
+            "BH_GALAXY",
             "P150X4",
-            "P150X8",
             "P300X2",
             "T3K"
-          ]
-        },
-        "release": {
-          "devices": [
-            "GALAXY",
-            "P150X8",
-            "P300X2"
           ]
         }
       }
@@ -385,11 +449,6 @@
           "devices": [
             "GALAXY",
             "N150"
-          ]
-        },
-        "release": {
-          "devices": [
-            "GALAXY"
           ]
         }
       }
@@ -410,16 +469,9 @@
         "nightly": {
           "devices": [
             "GALAXY",
-            "P150X8",
             "P300X2",
             "P150X4",
             "T3K"
-          ]
-        },
-        "release": {
-          "devices": [
-            "P150X8",
-            "P300X2"
           ]
         }
       }
@@ -430,7 +482,6 @@
         "nightly": {
           "devices": [
             "GALAXY",
-            "P150X8",
             "P300X2",
             "P150X4",
             "T3K"
@@ -444,7 +495,6 @@
         "nightly": {
           "devices": [
             "GALAXY",
-            "P150X8",
             "P300X2",
             "T3K"
           ]
@@ -454,7 +504,7 @@
     "gemma-3-1b-it": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
+        "weekly": {
           "devices": [
             "N150"
           ]
@@ -464,14 +514,11 @@
     "gemma-3-27b-it": {
       "inference_engine": "vLLM",
       "ci": {
-        "nightly": {
-          "devices": [
-            "T3K"
-          ]
-        },
         "weekly": {
           "devices": [
-            "GALAXY"
+            "GALAXY",
+            "T3K",
+            "P300X2"
           ]
         }
       }
@@ -481,8 +528,44 @@
       "ci": {
         "nightly": {
           "devices": [
+            "T3K"
+          ]
+        },
+        "weekly": {
+          "devices": [
+            "N150",
             "N300",
-            "N150"
+            "P150"
+          ]
+        }
+      }
+    },
+    "gemma-4-31B-it": {
+      "inference_engine": "vLLM",
+      "ci": {
+        "nightly": {
+          "devices": [
+            "P300X2"
+          ]
+        }
+      }
+    },
+    "gemma-4-31b-it": {
+      "inference_engine": "FORGE",
+      "ci": {
+        "nightly": {
+          "devices": [
+            "P300X2"
+          ]
+        }
+      }
+    },
+    "gemma-4-12B-it": {
+      "inference_engine": "vLLM",
+      "ci": {
+        "nightly": {
+          "devices": [
+            "P300X2"
           ]
         }
       }
@@ -493,12 +576,8 @@
         "nightly": {
           "devices": [
             "GALAXY",
+            "P300X2",
             "T3K"
-          ]
-        },
-        "release": {
-          "devices": [
-            "GALAXY"
           ]
         }
       }
@@ -524,31 +603,36 @@
         }
       }
     },
-    "mochi-1-preview": {
-      "inference_engine": "MEDIA",
+    "yolox_nano": {
+      "inference_engine": "FORGE",
       "ci": {
         "nightly": {
           "devices": [
-            "GALAXY",
-            "GALAXY_BH",
-            "P150X4",
-            "P150X8",
-            "P300X2",
-            "T3K"
-          ]
-        },
-        "release": {
-          "devices": [
-            "GALAXY"
+            "P150"
           ]
         }
       }
     },
-    "openai-whisper-large-v3": {
+    "mochi-1-preview": {
       "inference_engine": "MEDIA",
       "ci": {
         "weekly": {
           "devices": [
+            "GALAXY",
+            "BH_GALAXY",
+            "P150X4",
+            "P300X2",
+            "T3K"
+          ]
+        }
+      }
+    },
+    "distil-large-v3": {
+      "inference_engine": "MEDIA",
+      "ci": {
+        "nightly": {
+          "devices": [
+            "P150",
             "GALAXY"
           ]
         }
@@ -580,7 +664,9 @@
         "nightly": {
           "devices": [
             "N150",
-            "N300"
+            "N300",
+            "P150",
+            "P300X2"
           ]
         }
       }
@@ -602,36 +688,49 @@
       }
     },
     "stable-diffusion-xl-base-1.0": {
-      "inference_engine": "MEDIA",
-      "ci": {
-        "nightly": {
-          "devices": [
-            "GALAXY",
-            "GALAXY_BH",
-            "N150",
-            "N300",
-            "P150X8",
-            "P300X2"
-          ]
-        },
-        "weekly": {
-          "devices": [
-            "GALAXY",
-            "T3K"
-          ],
-          "device-args": {
-            "T3K": {
-              "additional-args": "--sdxl_num_prompts 5000",
-              "throttle-perf": "5"
+      "implementations": [
+        {
+          "inference_engine": "MEDIA",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "GALAXY",
+                "BH_GALAXY",
+                "N150",
+                "N300",
+                "P300X2"
+              ]
+            },
+            "weekly": {
+              "devices": [
+                "GALAXY",
+                "T3K"
+              ],
+              "device-args": {
+                "T3K": {
+                  "additional-args": "--sdxl_num_prompts 5000",
+                  "throttle-perf": "5"
+                }
+              }
             }
           }
         },
-        "release": {
-          "devices": [
-            "GALAXY"
-          ]
+        {
+          "inference_engine": "FORGE",
+          "ci": {
+            "nightly": {
+              "devices": [
+                "N150"
+              ],
+              "device-args": {
+                "N150": {
+                  "additional-args": "--impl sdxl-forge"
+                }
+              }
+            }
+          }
         }
-      }
+      ]
     },
     "unet": {
       "inference_engine": "FORGE",
@@ -669,13 +768,24 @@
         "nightly": {
           "devices": [
             "GALAXY",
-            "GALAXY_BH",
-            "N150"
+            "BH_GALAXY",
+            "N150",
+            "P150"
           ]
         },
-        "release": {
+        "weekly": {
           "devices": [
             "GALAXY"
+          ]
+        }
+      }
+    },
+    "Z-Image-Turbo": {
+      "inference_engine": "MEDIA",
+      "ci": {
+        "nightly": {
+          "devices": [
+            "P300X2"
           ]
         }
       }

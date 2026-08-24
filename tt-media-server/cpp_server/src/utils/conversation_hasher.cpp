@@ -6,6 +6,8 @@
 #include <algorithm>
 
 #define XXH_INLINE_ALL
+#include "config/settings.hpp"
+#include "utils/logger.hpp"
 #include "utils/tokenizers/tokenizer.hpp"
 #include "xxhash.h"
 
@@ -78,7 +80,8 @@ uint64_t hashConversationPrefix(const std::vector<ChatMessage>& prefix) {
   return XXH64(rendered.data(), rendered.size(), 0);
 }
 
-std::string renderLastUserTurn(const std::vector<ChatMessage>& messages) {
+std::string renderLastUserTurn(const std::vector<ChatMessage>& messages,
+                               bool hasPriorTurn) {
   auto it =
       std::find_if(messages.rbegin(), messages.rend(),
                    [](const ChatMessage& msg) { return msg.role == "user"; });
@@ -86,33 +89,151 @@ std::string renderLastUserTurn(const std::vector<ChatMessage>& messages) {
     return "";
   }
   const auto& tokenizer = tokenizers::activeTokenizer();
-  return tokenizer.applyChatTemplate({*it}, true);
+  std::string rendered = tokenizer.applyChatTemplate({*it}, true);
+
+  // applyChatTemplate prepends BOS based on the tokenizer config. For
+  // continuations BOS is already in the slot's KV cache and must not be
+  // duplicated in the delta; for fresh conversations keep it so the model
+  // sees the start-of-sequence marker. The BOS string is fixed for the
+  // process lifetime, so cache it to avoid copying TokenizerConfig on every
+  // call.
+  static const std::string bosToken =
+      tokenizers::getTokenizerConfig().bos_token;
+  if (hasPriorTurn && !bosToken.empty() &&
+      rendered.compare(0, bosToken.size(), bosToken) == 0) {
+    rendered.erase(0, bosToken.size());
+  }
+  return rendered;
 }
 
-PrefixCachingInfo computePrefixCachingInfo(
-    const std::vector<ChatMessage>& messages) {
+uint64_t hashTokenPrefix(std::span<const uint32_t> tokens) {
+  if (tokens.empty()) {
+    return 0;
+  }
+  return XXH64(tokens.data(), tokens.size_bytes(), 0);
+}
+
+PrefixCachingInfo computePrefixCachingInfoFromTokens(
+    std::span<const uint32_t> tokens) {
   PrefixCachingInfo info;
 
-  // Drop tool/function turns before hashing; system/developer messages stay
-  // as part of the stable prefix identity.
-  auto turns = stripToolMessages(messages);
+  // Hash non-thinking tokens into per-block hashes, tracking think counts.
+  auto [thinkStart, thinkEnd] = tokenizers::thinkTokenIds();
+  info.blocks =
+      getPrefixCacheHashesByBlocksWithThinking(tokens, thinkStart, thinkEnd);
 
-  // deltaPrompt is the last user turn
-  info.deltaPrompt = renderLastUserTurn(turns);
-
-  // registrationHash = always hash of full current conversation
-  info.registrationHash = hashConversationPrefix(turns);
-
-  // Try to extract prior turn prefix (excluding last [assistant, user] pair)
-  auto priorPrefix = extractPriorTurnPrefix(messages);
-  if (priorPrefix.has_value()) {
-    info.hasPriorTurn = true;
-    info.lookupHash = hashConversationPrefix(*priorPrefix);
-  } else {
-    info.hasPriorTurn = false;
-  }
+  TT_LOG_INFO("[TokenHasher] tokens={} blocks={}", tokens.size(),
+              info.blocks.size());
 
   return info;
+}
+
+std::vector<uint64_t> getPrefixCacheHashesByBlocks(
+    std::span<const uint32_t> tokens, uint64_t parentHash) {
+  const size_t firstBlockSize = tt::config::prefixCacheFirstBlockSize();
+  const size_t blockSize = tt::config::prefixCacheBlockSize();
+
+  // When continuing from a parent hash, use standard block size for all blocks
+  if (parentHash != 0) {
+    if (blockSize == 0 || tokens.size() < blockSize) {
+      return {};
+    }
+
+    std::vector<uint64_t> hashes;
+    size_t offset = 0;
+    while (offset + blockSize <= tokens.size()) {
+      const uint32_t* blockStart = tokens.data() + offset;
+      const size_t blockBytes = blockSize * sizeof(uint32_t);
+      parentHash = XXH64(blockStart, blockBytes, parentHash);
+      hashes.push_back(parentHash);
+      offset += blockSize;
+    }
+
+    return hashes;
+  }
+
+  // Fresh hashing: first block uses larger size
+  if (firstBlockSize == 0 || blockSize == 0 || tokens.size() < firstBlockSize) {
+    return {};
+  }
+
+  std::vector<uint64_t> hashes;
+
+  // vLLM-style chained hashing: each block's hash uses the previous block's
+  // hash as the xxHash seed. This guarantees that two sequences sharing a
+  // common token prefix produce identical hashes for their shared blocks.
+  // The first block uses a larger size (e.g. system prompt) to capture the
+  // common prefix shared across conversations with the same model config.
+
+  // First block (larger, covers system prompt / preamble)
+  const size_t firstBlockBytes = firstBlockSize * sizeof(uint32_t);
+  parentHash = XXH64(tokens.data(), firstBlockBytes, parentHash);
+  hashes.push_back(parentHash);
+
+  // Remaining blocks use the standard block size
+  size_t offset = firstBlockSize;
+  while (offset + blockSize <= tokens.size()) {
+    const uint32_t* blockStart = tokens.data() + offset;
+    const size_t blockBytes = blockSize * sizeof(uint32_t);
+    parentHash = XXH64(blockStart, blockBytes, parentHash);
+    hashes.push_back(parentHash);
+    offset += blockSize;
+  }
+
+  return hashes;
+}
+
+std::vector<BlockHashInfo> getPrefixCacheHashesByBlocksWithThinking(
+    std::span<const uint32_t> tokens, uint32_t thinkStartId,
+    uint32_t thinkEndId, uint64_t parentHash, uint32_t parentThinkCount) {
+  const bool filterThinking = (thinkStartId != tokenizers::kNoTokenId &&
+                               thinkEndId != tokenizers::kNoTokenId);
+  const size_t firstBlockSize = tt::config::prefixCacheFirstBlockSize();
+  const size_t blockSize = tt::config::prefixCacheBlockSize();
+
+  if (firstBlockSize == 0 || blockSize == 0) {
+    return {};
+  }
+
+  std::vector<BlockHashInfo> result;
+  std::vector<uint32_t> currentBlock;
+  currentBlock.reserve(std::max(firstBlockSize, blockSize));
+
+  bool inThinking = false;
+  uint32_t thinkCount = parentThinkCount;
+  size_t targetBlockSize = (parentHash == 0) ? firstBlockSize : blockSize;
+
+  for (uint32_t token : tokens) {
+    if (filterThinking) {
+      // Mirror the session-side think marker state machine.
+      if (token == thinkStartId) {
+        inThinking = true;
+        continue;  // Skip marker, don't count
+      }
+      if (token == thinkEndId) {
+        inThinking = false;
+        continue;  // Skip marker, don't count
+      }
+      if (inThinking) {
+        ++thinkCount;  // Count content token, don't hash
+        continue;
+      }
+    }
+
+    // Non-thinking token: add to current block
+    currentBlock.push_back(token);
+
+    if (currentBlock.size() == targetBlockSize) {
+      // Block complete: hash it
+      parentHash = XXH64(currentBlock.data(),
+                         currentBlock.size() * sizeof(uint32_t), parentHash);
+      result.push_back({parentHash, thinkCount});
+      currentBlock.clear();
+      targetBlockSize = blockSize;  // All subsequent blocks use standard size
+    }
+  }
+
+  return result;  // Partial block at end is not hashed
 }
 
 }  // namespace tt::utils
