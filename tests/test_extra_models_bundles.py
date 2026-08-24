@@ -75,7 +75,11 @@ class TestRerankerBuildingDoc:
 
     def test_documented_patch_still_applies(self, tmp_path):
         # The placeholder stands in for the reader's own fork; any owner works.
-        patch = self._documented_patch().replace("<you>", "someorg")
+        patch = (
+            self._documented_patch()
+            .replace("<you>", "someorg")
+            .replace("<your-branch>", "some-branch")
+        )
         patch_file = tmp_path / "fork.diff"
         patch_file.write_text(patch)
 
@@ -99,6 +103,22 @@ class TestRerankerBuildingDoc:
         for line in clone_lines:
             assert "nyoshifuji" not in line.lower(), (
                 f"fork clone URL committed to the Dockerfile: {line.strip()}"
+            )
+
+    def test_documented_patch_switches_branch_too(self):
+        # `git clone --depth 1` only fetches the default branch, and GitHub does
+        # not serve arbitrary SHAs, so pointing the clone at a fork without also
+        # selecting the branch leaves the pinned commit unreachable
+        # ("couldn't find remote ref"). The patch must set --branch.
+        added = [
+            ln
+            for ln in self._documented_patch().splitlines()
+            if ln.startswith("+") and "git clone" in ln
+        ]
+        assert added, "the documented patch no longer changes any clone line"
+        for line in added:
+            assert "--branch" in line, (
+                f"documented clone line does not select a branch: {line.strip()}"
             )
 
 

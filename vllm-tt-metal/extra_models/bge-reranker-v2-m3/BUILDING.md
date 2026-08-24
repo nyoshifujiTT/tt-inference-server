@@ -17,10 +17,23 @@ describing what actually ran.
 
 ## 1. Patch
 
+The Dockerfile does `git clone --depth 1 <repo>`, which fetches only the
+**default branch**. A commit that lives on a topic branch is therefore not in
+the clone, and the following `git fetch --depth 1 origin <sha>` cannot reach it
+either, because GitHub does not serve arbitrary SHAs by default:
+
+```
+fatal: couldn't find remote ref <sha>
+error: pathspec '<sha>' did not match any file(s) known to git
+```
+
+So the patch must switch the branch as well as the repository. Add
+`--branch <your branch>` to each clone.
+
 ```bash
 git apply <<'PATCH'
 diff --git a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile b/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
-index e65aa4121..a3a6567ec 100644
+index dafb609aa..2154e4cbc 100644
 --- a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 +++ b/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 @@ -86,7 +86,7 @@ ENV UV_HTTP_RETRIES=10
@@ -28,7 +41,7 @@ index e65aa4121..a3a6567ec 100644
  # EOF"). Only the pinned commit is needed, so fetch just that (matches the shallow
  # clone already used by tt-media-server/Dockerfile).
 -RUN /bin/bash -c "git clone --depth 1 https://github.com/tenstorrent-metal/tt-metal.git ${TT_METAL_HOME} \
-+RUN /bin/bash -c "git clone --depth 1 https://github.com/<you>/tt-metal.git ${TT_METAL_HOME} \
++RUN /bin/bash -c "git clone --depth 1 --branch <your-branch> https://github.com/<you>/tt-metal.git ${TT_METAL_HOME} \
      && cd ${TT_METAL_HOME} \
      && git fetch --depth 1 origin ${TT_METAL_COMMIT_SHA_OR_TAG} \
      && git checkout ${TT_METAL_COMMIT_SHA_OR_TAG} \
@@ -37,7 +50,7 @@ index e65aa4121..a3a6567ec 100644
  # The plugin owns the vLLM version pin and its dependency overrides, so the
  # install is delegated to its own docs/install-vllm-tt.sh rather than restated here
 -RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
-+RUN /bin/bash -c "git clone https://github.com/<you>/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
++RUN /bin/bash -c "git clone --branch <your-branch> https://github.com/<you>/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
      && cd ${vllm_tt_plugin_dir} \
      && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
      && source ${PYTHON_ENV_DIR}/bin/activate \
