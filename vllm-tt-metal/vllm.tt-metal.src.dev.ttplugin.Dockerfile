@@ -11,11 +11,7 @@
 #
 # --no-deps is used so the plugin does not drag in pypi vllm==0.10.1.1 and
 # clobber the fork's editable vLLM install already present in the image.
-# Base src-dev image to layer the plugin on. Defaults to the last published
-# pin, but override with --build-arg BASE_IMAGE=<tag> to layer on a locally
-# built src-dev image (e.g. one built from a fork via build_single_docker.sh).
-ARG BASE_IMAGE=ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.10.0-555f240-22be241
-FROM ${BASE_IMAGE}
+FROM ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.10.0-555f240-22be241
 USER root
 COPY tt-vllm-plugin ${TT_METAL_HOME}/tt-vllm-plugin
 RUN /bin/bash -c "source ${PYTHON_ENV_DIR}/bin/activate \

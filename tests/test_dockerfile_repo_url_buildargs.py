@@ -58,30 +58,3 @@ def test_build_script_forwards_repo_url_build_args():
     assert "--tt-vllm-repo-url" in text
     assert '--build-arg TT_METAL_REPO_URL="${TT_METAL_REPO_URL}"' in text
     assert '--build-arg TT_VLLM_REPO_URL="${TT_VLLM_REPO_URL}"' in text
-
-
-# ---------------------------------------------------------------------------
-# The ttplugin layer image (installs the in-repo tt-vllm-plugin on top of a
-# src-dev base) must let the base image be overridden, so it can layer on a
-# src-dev image built from a fork rather than only the last published GHCR pin.
-# ---------------------------------------------------------------------------
-TTPLUGIN_DOCKERFILE = (
-    get_repo_root_path()
-    / "vllm-tt-metal"
-    / "vllm.tt-metal.src.dev.ttplugin.Dockerfile"
-)
-
-
-def test_ttplugin_dockerfile_base_image_is_overridable():
-    text = TTPLUGIN_DOCKERFILE.read_text(encoding="utf-8")
-    assert "ARG BASE_IMAGE=" in text, "ttplugin image must expose a BASE_IMAGE arg"
-    assert "FROM ${BASE_IMAGE}" in text, "ttplugin FROM must use the BASE_IMAGE arg"
-    # The default must still be a concrete published tag (not left empty).
-    for line in text.splitlines():
-        if line.startswith("ARG BASE_IMAGE="):
-            default = line.split("=", 1)[1].strip()
-            assert default, "BASE_IMAGE arg must keep a concrete default tag"
-            assert ":" in default, "BASE_IMAGE default should be a tagged image ref"
-            break
-    else:
-        raise AssertionError("ARG BASE_IMAGE line not found")
