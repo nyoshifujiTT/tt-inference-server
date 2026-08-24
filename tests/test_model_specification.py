@@ -1113,60 +1113,40 @@ if __name__ == "__main__":
     pytest.main([__file__])
 
 
-class TestBgeRerankerCanonicalImpl:
-    """The bge-reranker ships two impls: legacy fork plugin (default) and the
-    canonical standalone vLLM 0.24 plugin (selectable). Both must resolve."""
+class TestBgeRerankerSpec:
+    """bge-reranker-v2-m3 is served by the standalone TT vLLM plugin. It is a
+    cross-encoder (one relevance logit per query/document pair), catalogued in
+    the embedding YAML alongside the other bge models."""
 
-    def _reranker_specs(self):
-        return {
-            model_id: spec
-            for model_id, spec in MODEL_SPECS.items()
-            if "bge-reranker-v2-m3" in model_id.lower()
-        }
+    MODEL_ID = "id_tt-vllm-plugin_bge-reranker-v2-m3_p150"
 
-    def test_both_reranker_impls_present(self):
-        ids = set(self._reranker_specs())
-        assert "id_tt-vllm-plugin_bge-reranker-v2-m3_p150" in ids
-        assert "id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150" in ids
+    def test_reranker_spec_is_registered(self):
+        assert self.MODEL_ID in MODEL_SPECS
 
-    def test_canonical_impl_points_at_standalone_plugin_repo(self):
-        spec = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
-        assert spec.impl.impl_id == "tt_vllm_plugin_canonical"
-        assert spec.impl.repo_url == "https://github.com/tenstorrent/vllm-tt-plugin"
+    def test_reranker_uses_the_standalone_plugin_impl(self):
+        spec = MODEL_SPECS[self.MODEL_ID]
+        assert spec.impl.impl_id == "tt_vllm_plugin"
 
-    def test_legacy_impl_remains_default(self):
-        legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
-        canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
-        assert legacy.device_model_spec.default_impl is True
-        assert canonical.device_model_spec.default_impl is False
+    def test_reranker_is_the_default_impl_for_its_device(self):
+        spec = MODEL_SPECS[self.MODEL_ID]
+        assert spec.device_model_spec.default_impl is True
 
-    def test_both_impls_share_tt_metal_commit(self):
-        legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
-        canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
-        assert legacy.tt_metal_commit == canonical.tt_metal_commit
+    def test_image_tag_embeds_the_commits_it_was_built_from(self):
+        # docker_image is derived from (VERSION, tt_metal_commit, vllm_commit).
+        # That derivation is what makes an image traceable to a revision, and
+        # why bind-mounting sources over a prebuilt image is never a substitute
+        # for rebuilding it: once code is overlaid the tag stops describing what
+        # actually ran.
+        spec = MODEL_SPECS[self.MODEL_ID]
+        assert spec.tt_metal_commit
+        assert spec.vllm_commit
+        assert spec.tt_metal_commit in spec.docker_image
+        assert spec.vllm_commit in spec.docker_image
 
-    def test_impls_are_distinguished_by_their_vllm_commit(self):
-        # The two impls share the tt-metal device model but not the serving
-        # stack: legacy pins the in-tree fork, canonical pins the standalone
-        # plugin branch. If these ever collapsed to one value, both impls would
-        # resolve to the SAME generated image tag
-        # (VERSION-{tt_metal}-{vllm}) and "testing the canonical path" would
-        # silently exercise the legacy image instead.
-        legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
-        canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
-        assert legacy.vllm_commit != canonical.vllm_commit
-
-    def test_each_impl_resolves_to_its_own_docker_image_tag(self):
-        # docker_image is left unset in the spec so it is derived from
-        # (VERSION, tt_metal_commit, vllm_commit). Assert the derivation
-        # actually yields two distinct tags, and that each tag embeds the
-        # commits it was built from -- that is what makes an image traceable to
-        # a revision, and why bind-mounting sources over a pre-built image is
-        # never an acceptable substitute for rebuilding it.
-        legacy = MODEL_SPECS["id_tt-vllm-plugin_bge-reranker-v2-m3_p150"]
-        canonical = MODEL_SPECS["id_tt-vllm-plugin-canonical_bge-reranker-v2-m3_p150"]
-
-        assert legacy.docker_image != canonical.docker_image
-        for spec in (legacy, canonical):
-            assert spec.tt_metal_commit in spec.docker_image
-            assert spec.vllm_commit in spec.docker_image
+    def test_commit_pins_point_at_upstream_not_a_fork(self):
+        # Fork pins must never be committed: they are applied as a local patch
+        # at build time and reverted afterwards. Nothing here should reference a
+        # personal fork.
+        spec = MODEL_SPECS[self.MODEL_ID]
+        assert "nyoshifuji" not in spec.docker_image.lower()
+        assert "nyoshifuji" not in spec.impl.repo_url.lower()

@@ -286,3 +286,36 @@ templates:
         USE_DYNAMIC_BATCHER: "false"
         DEFAULT_THROTTLE_LEVEL: "0"
         TT_METAL_INSPECTOR_RPC: "0"
+
+# =============================================================================
+# Cross-encoder reranker templates
+# =============================================================================
+# bge-reranker-v2-m3 is a cross-encoder: it scores (query, document) pairs and
+# returns one relevance logit per pair, so it is served through /score and
+# /rerank rather than as an embedding model. It reuses the bge-m3 XLM-RoBERTa
+# encoder backbone on device (models/demos/bge_reranker_v2_m3 in tt-metal) and
+# is registered with the standalone TT vLLM plugin through the EXTRA_MODELS_DIR
+# bundle in vllm-tt-metal/extra_models/bge-reranker-v2-m3.
+- weights:
+    - BAAI/bge-reranker-v2-m3
+  # Dev specs omit tt_metal_commit/vllm_commit (base ModelSpecTemplate rejects
+  # them; only prod specs carry commits). The image is supplied at runtime via
+  # --override-docker-image; the prod reranker spec pins the build commits.
+  impl: tt_vllm_plugin
+  min_disk_gb: 15
+  min_ram_gb: 6
+  model_type: LLM
+  inference_engine: VLLM
+  device_model_specs:
+    - device: P150
+      max_concurrency: 1
+      max_context: 8192
+      default_impl: true
+      env_vars:
+        TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+        VLLM__MAX_NUM_BATCHED_TOKENS: "262144"
+        VLLM__MAX_MODEL_LENGTH: "8192"
+        VLLM__MIN_CONTEXT_LENGTH: "32"
+        VLLM__MAX_NUM_SEQS: "32"
+        MAX_BATCH_SIZE: "32"
+        DEFAULT_THROTTLE_LEVEL: "0"
