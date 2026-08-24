@@ -11,6 +11,7 @@ plugin can register them without editing plugin source.
 """
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -57,3 +58,45 @@ def test_reranker_bundle_targets_expected_arch_and_class():
     assert meta["main_class"] == (
         "models.demos.bge_reranker_v2_m3.demo.generator_vllm:BgeRerankerV2M3"
     )
+
+
+class TestRerankerBuildingDoc:
+    """BUILDING.md carries the patch used to build the image from an unmerged
+    branch. A patch in prose rots silently, so check it still applies and that
+    no fork pin has leaked into the committed catalog."""
+
+    DOC = BUNDLE_ROOT / "bge-reranker-v2-m3" / "BUILDING.md"
+    REPO_ROOT = BUNDLE_ROOT.parents[1]
+
+    def _documented_patch(self) -> str:
+        text = self.DOC.read_text()
+        start = text.index("git apply <<'PATCH'\n") + len("git apply <<'PATCH'\n")
+        return text[start : text.index("\nPATCH\n", start) + 1]
+
+    def test_documented_patch_still_applies(self, tmp_path):
+        # The placeholder stands in for the reader's own fork; any owner works.
+        patch = self._documented_patch().replace("<you>", "someorg")
+        patch_file = tmp_path / "fork.diff"
+        patch_file.write_text(patch)
+
+        result = subprocess.run(
+            ["git", "apply", "--check", str(patch_file)],
+            cwd=self.REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            "BUILDING.md's patch no longer applies to "
+            f"vllm.tt-metal.src.dev.Dockerfile:\n{result.stderr}"
+        )
+
+    def test_dockerfile_clones_upstream_not_a_fork(self):
+        dockerfile = (
+            self.REPO_ROOT / "vllm-tt-metal" / "vllm.tt-metal.src.dev.Dockerfile"
+        ).read_text()
+        clone_lines = [ln for ln in dockerfile.splitlines() if "git clone" in ln]
+        assert clone_lines
+        for line in clone_lines:
+            assert "nyoshifuji" not in line.lower(), (
+                f"fork clone URL committed to the Dockerfile: {line.strip()}"
+            )
