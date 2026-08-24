@@ -15,7 +15,11 @@ from unittest.mock import patch
 import config.settings
 
 with patch.object(config.settings.settings, "model_service", None):
-    from utils.audio_manager import AudioManager, _installLegacyTorchLoadDefault
+    from utils.audio_manager import (
+        AudioManager,
+        _installLegacyTorchLoadDefault,
+        _installPyannoteAuthTokenShim,
+    )
 
 
 class DummySettings:
@@ -169,3 +173,52 @@ def test_legacy_default_preserves_return_value():
     fakeTorch, _ = _makeFakeTorchModule()
     _installLegacyTorchLoadDefault(fakeTorch)
     assert fakeTorch.load("/tmp/model.pt") == "loaded"
+
+
+def _makeFakePipelineClass(parameterNames, callLog):
+    """Minimal stand-in for pyannote's Pipeline with a chosen from_pretrained signature."""
+    parameters = ", ".join(f"{name}=None" for name in parameterNames)
+    namespace = {"callLog": callLog}
+    exec(
+        f"def from_pretrained(checkpoint, {parameters}):\n"
+        f"    callLog.append((checkpoint, {{{', '.join(f'{chr(39)}{n}{chr(39)}: {n}' for n in parameterNames)}}}))\n"
+        f"    return 'pipeline'\n",
+        namespace,
+    )
+
+    class FakePipeline:
+        from_pretrained = staticmethod(namespace["from_pretrained"])
+
+    return FakePipeline
+
+
+def test_auth_token_shim_translates_use_auth_token_to_token():
+    """whisperx passes the pyannote 3.x name; 4.x only accepts `token`."""
+    callLog = []
+    FakePipeline = _makeFakePipelineClass(["token"], callLog)
+    _installPyannoteAuthTokenShim(FakePipeline)
+
+    assert FakePipeline.from_pretrained("model", use_auth_token="hf_x") == "pipeline"
+    assert callLog[0] == ("model", {"token": "hf_x"})
+
+
+def test_auth_token_shim_leaves_explicit_token_alone():
+    callLog = []
+    FakePipeline = _makeFakePipelineClass(["token"], callLog)
+    _installPyannoteAuthTokenShim(FakePipeline)
+
+    FakePipeline.from_pretrained("model", token="hf_real", use_auth_token="hf_old")
+    assert callLog[0] == ("model", {"token": "hf_real"})
+
+
+def test_auth_token_shim_is_a_noop_on_pyannote_3x():
+    """A pyannote that already accepts use_auth_token must not be wrapped."""
+    callLog = []
+    FakePipeline = _makeFakePipelineClass(["use_auth_token"], callLog)
+    original = FakePipeline.from_pretrained
+
+    _installPyannoteAuthTokenShim(FakePipeline)
+
+    assert FakePipeline.from_pretrained is original
+    FakePipeline.from_pretrained("model", use_auth_token="hf_x")
+    assert callLog[0] == ("model", {"use_auth_token": "hf_x"})

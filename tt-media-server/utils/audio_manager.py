@@ -55,10 +55,44 @@ def _installLegacyTorchLoadDefault(torchModule):
     return _torchLoadLegacyDefault
 
 
+def _installPyannoteAuthTokenShim(pipelineClass):
+    """Accept `use_auth_token=` on `Pipeline.from_pretrained` under pyannote 4.x.
+
+    `whisperx==3.4.3` calls `Pipeline.from_pretrained(..., use_auth_token=...)`,
+    the name pyannote-audio 3.x used. pyannote-audio 4.x renamed that parameter
+    to `token` and rejects the old name with TypeError, so the audio worker
+    cannot build its diarization pipeline. The media-server image now installs
+    pyannote 4.x, which the speaker-diarization service requires, so translate
+    the old kwarg here instead of pinning whisperx's transitive dependency back.
+
+    A no-op when the running pyannote already accepts `use_auth_token`.
+
+    Returns the installed wrapper so callers (and tests) can invoke it directly.
+    """
+    import inspect
+
+    original = pipelineClass.from_pretrained
+    parameters = inspect.signature(original).parameters
+    if "use_auth_token" in parameters or "token" not in parameters:
+        return original
+
+    def _fromPretrainedWithLegacyToken(*args, **kwargs):
+        if "use_auth_token" in kwargs:
+            kwargs.setdefault("token", kwargs.pop("use_auth_token"))
+        return original(*args, **kwargs)
+
+    pipelineClass.from_pretrained = _fromPretrainedWithLegacyToken
+    return _fromPretrainedWithLegacyToken
+
+
 if settings.model_service == ModelServices.AUDIO.value:
     import torch
 
     _installLegacyTorchLoadDefault(torch)
+
+    from pyannote.audio import Pipeline as _PyannotePipeline
+
+    _installPyannoteAuthTokenShim(_PyannotePipeline)
 
     from silero_vad import get_speech_timestamps, load_silero_vad
     from whisperx.diarize import DiarizationPipeline
