@@ -54,15 +54,22 @@ index dafb609aa..2154e4cbc 100644
      && cd ${vllm_tt_plugin_dir} \
      && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
      && source ${PYTHON_ENV_DIR}/bin/activate \
+diff --git a/workflows/model_specs/prod/embedding.yaml b/workflows/model_specs/prod/embedding.yaml
+index dbd01d8cb..5e580925c 100644
+--- a/workflows/model_specs/prod/embedding.yaml
++++ b/workflows/model_specs/prod/embedding.yaml
+@@ -258,8 +258,8 @@ templates:
+ # both with git checkout -- never commit the fork pins.
+ - weights:
+     - BAAI/bge-reranker-v2-m3
+-  tt_metal_commit: "ad499a943ab"
+-  vllm_commit: "8157b17"
++  tt_metal_commit: "<tt-metal sha>"
++  vllm_commit: "<vllm-tt-plugin sha>"
+   version: "0.20.0"
+   impl: tt_vllm_plugin
+   min_disk_gb: 15
 PATCH
-```
-
-Then point the prod pins at the two branch tips, in the bge-reranker-v2-m3
-template of `workflows/model_specs/prod/embedding.yaml`:
-
-```yaml
-  tt_metal_commit: "<tt-metal sha>"
-  vllm_commit: "<vllm-tt-plugin sha>"
 ```
 
 Both branches must be pushed: the Dockerfile clones them from GitHub by SHA, so

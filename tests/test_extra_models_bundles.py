@@ -79,6 +79,8 @@ class TestRerankerBuildingDoc:
             self._documented_patch()
             .replace("<you>", "someorg")
             .replace("<your-branch>", "some-branch")
+            .replace("<tt-metal sha>", "abc1234")
+            .replace("<vllm-tt-plugin sha>", "def5678")
         )
         patch_file = tmp_path / "fork.diff"
         patch_file.write_text(patch)
@@ -120,6 +122,21 @@ class TestRerankerBuildingDoc:
             assert "--branch" in line, (
                 f"documented clone line does not select a branch: {line.strip()}"
             )
+
+    def test_documented_patch_covers_the_commit_pins(self):
+        # Repointing the clones is only half of it: the build still resolves
+        # whatever SHA the prod catalog pins, so the pins have to move with the
+        # branch. Keeping them in the same patch means one `git apply` and one
+        # `git checkout` cover everything, and no fork pin can be left behind in
+        # a committed file.
+        patch = self._documented_patch()
+        assert "workflows/model_specs/prod/embedding.yaml" in patch, (
+            "the documented patch does not touch the prod commit pins"
+        )
+        for key in ("tt_metal_commit", "vllm_commit"):
+            assert any(
+                ln.startswith("+") and key in ln for ln in patch.splitlines()
+            ), f"the documented patch does not set {key}"
 
 
 class TestBundlesReachTheImage:
