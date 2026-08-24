@@ -3136,7 +3136,14 @@ audio_tts_templates = [
         weights=["Qwen/Qwen3-ASR-1.7B", "neosophie/Qwen3-ASR-1.7B-JA"],
         version="0.1.0",
         tt_metal_commit="97b36e1",
-        vllm_commit="e1a3825",
+        # Bring-up branch head (nyoshifujiTT/vllm, nyoshifujiTT/qwen3-asr-17b_p150x1).
+        # e1a3825 is its upstream base and lacks the Qwen3-ASR fixes this model
+        # needs (thinker_config ordering in the HF config, the TT adapter
+        # registration, and the audio/transcription wiring in TTModelRunner), so
+        # a --docker-server build pinned to the base cannot serve this model.
+        # Build with TT_VLLM_REPO_URL=https://github.com/nyoshifujiTT/vllm.git
+        # until these land on tenstorrent/vllm.
+        vllm_commit="5e69638",
         impl=tt_vllm_plugin_impl,
         min_disk_gb=15,
         min_ram_gb=6,
