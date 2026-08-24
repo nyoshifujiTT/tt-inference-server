@@ -90,12 +90,18 @@ RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${
 # Build vllm - clone with minimal history and clean
 # Use uv pip to match tt-metal's package manager (see tt-metal commit 29d59d1)
 # Use --index-strategy unsafe-best-match to allow uv to find packages across all indexes
+# Build with VLLM_TARGET_DEVICE=empty, NOT the image-wide "tt": since
+# tenstorrent/vllm ae0f073 ("Fully separate TT code to vllm_tt_plugin") the
+# fork's setup.py only knows empty/cuda/hip/tpu/cpu/xpu, so "tt" falls through
+# to `raise RuntimeError("Unknown runtime environment")` in get_vllm_version().
+# "tt" remains the correct *runtime* platform value (the TT platform is supplied
+# by the plugin), so the ENV above is intentionally left as-is.
 RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm.git ${vllm_dir} \
     && cd ${vllm_dir} \
     && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
     && source ${PYTHON_ENV_DIR}/bin/activate \
     && uv pip install --upgrade pip \
-    && uv pip install --index-strategy unsafe-best-match -e . --extra-index-url https://download.pytorch.org/whl/cpu \
+    && VLLM_TARGET_DEVICE=empty uv pip install --index-strategy unsafe-best-match -e . --extra-index-url https://download.pytorch.org/whl/cpu \
     && rm -rf ${vllm_dir}/.git"
 
 # Build tt-smi in separate venv to avoid conflicts with tt-metal venv
