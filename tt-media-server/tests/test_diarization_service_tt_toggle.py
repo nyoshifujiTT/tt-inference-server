@@ -43,6 +43,11 @@ def test_tt_env_but_ttnn_unavailable_falls_back_to_cpu(monkeypatch):
 def _load_service_capturing_backend(monkeypatch, calls):
     import model_services.diarization_service as svc
 
+    # In a full-suite run conftest may have left settings.default_sample_rate as
+    # a Mock, which makes warmup()'s int() conversion raise and get swallowed by
+    # start_workers. Pin it so the warmup path is actually exercised.
+    monkeypatch.setattr(svc.settings, "default_sample_rate", 16000, raising=False)
+
     class _FakeBackend:
         def __init__(self, model_path, device="cpu", nn_accelerator=None):
             self.model_path = model_path
