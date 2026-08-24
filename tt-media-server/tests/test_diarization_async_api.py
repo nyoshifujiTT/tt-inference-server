@@ -11,7 +11,7 @@ import pytest
 from domain.diarization_response import DiarizationResponse, DiarizationSegment
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from open_ai_api import diarization
+from open_ai_api import diarization, media
 from resolver.service_resolver import service_resolver
 
 
@@ -120,3 +120,34 @@ def test_webhook_is_called(monkeypatch):
     assert calls.get("url") == "http://example/hook"
     assert calls["payload"]["jobId"] == job_id
     assert calls["payload"]["status"] == "succeeded"
+
+
+def test_media_staged_audio_flows_through_the_job_api(tmp_path, monkeypatch):
+    """The documented flow: stage via the media API, then diarize by media:// url.
+
+    The other tests pre-seed the storage directly, so nothing covers the handoff
+    from POST /v1/media/input + PUT to a job created against that url.
+    """
+    monkeypatch.setenv("MEDIA_INPUT_DIR", str(tmp_path))
+    import utils.diarization_jobs as dj
+    import utils.media_storage as ms
+
+    ms._STORAGE = None
+    dj._STORE = None
+    app = FastAPI()
+    app.include_router(media.router, prefix="/v1/media")
+    app.include_router(diarization.async_router, prefix="/v1")
+    app.dependency_overrides[service_resolver] = lambda: _FakeService()
+    client = TestClient(app)
+
+    declared = client.post("/v1/media/input", json={"url": "media://sess/staged.wav"})
+    assert declared.status_code == 201, declared.text
+    put_path = declared.json()["url"].replace("http://testserver", "")
+    assert client.put(put_path, content=b"RIFFxxxxWAVE").status_code == 200
+
+    created = client.post("/v1/diarize", json={"url": "media://sess/staged.wav"})
+    assert created.status_code == 201, created.text
+
+    job = _poll(client, created.json()["jobId"])
+    assert job["status"] == "succeeded", job
+    assert "diarization" in job["output"], job["output"]
