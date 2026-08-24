@@ -228,6 +228,7 @@ USER ${CONTAINER_APP_USERNAME}
 ENV TT_METAL_LOGS_PATH=/home/container_app_user/logs \
     CACHE_ROOT=/home/container_app_user/cache_root \
     MODEL_SPECS_JSON_PATH=/home/container_app_user/model_specs/model_spec.json \
+    EXTRA_MODELS_DIR=/home/container_app_user/extra_models \
     VLLM_TARGET_DEVICE=tt \
     WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml
 
@@ -238,6 +239,13 @@ RUN mkdir -p ${CACHE_ROOT}
 RUN mkdir -p /home/container_app_user/model_specs
 COPY --chown=container_app_user:container_app_user \
     model_spec.json ${MODEL_SPECS_JSON_PATH}
+
+# Copy EXTRA_MODELS_DIR bundles. Each subdirectory holds a vllm_metadata.json
+# naming an architecture and the class implementing it; the plugin scans this
+# directory at startup and registers TT<arch> -> module:Class. Models wired up
+# this way (bge-reranker-v2-m3) need no edit to the plugin's own model registry.
+COPY --chown=container_app_user:container_app_user \
+    "vllm-tt-metal/extra_models" ${EXTRA_MODELS_DIR}
 
 # Set working directory and entrypoint
 WORKDIR "${APP_DIR}/src"

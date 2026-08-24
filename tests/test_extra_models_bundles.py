@@ -100,3 +100,29 @@ class TestRerankerBuildingDoc:
             assert "nyoshifuji" not in line.lower(), (
                 f"fork clone URL committed to the Dockerfile: {line.strip()}"
             )
+
+
+class TestBundlesReachTheImage:
+    """A bundle only registers a model if it is actually in the image and
+    EXTRA_MODELS_DIR points at it. Shipping the directory without the wiring
+    fails at serve time with 'No TT model architecture is registered', long
+    after the build looked fine."""
+
+    DOCKERFILE = (
+        BUNDLE_ROOT.parents[1] / "vllm-tt-metal" / "vllm.tt-metal.src.dev.Dockerfile"
+    )
+
+    def _dockerfile(self) -> str:
+        return self.DOCKERFILE.read_text()
+
+    def test_extra_models_dir_is_set_in_the_image(self):
+        assert "EXTRA_MODELS_DIR=" in self._dockerfile(), (
+            "EXTRA_MODELS_DIR is not set in the image; the plugin will not scan "
+            "for bundles and every bundled model stays unregistered"
+        )
+
+    def test_bundles_are_copied_into_the_image(self):
+        text = self._dockerfile()
+        assert 'COPY --chown=container_app_user:container_app_user \\\n    "vllm-tt-metal/extra_models" ${EXTRA_MODELS_DIR}' in text, (
+            "the extra_models directory is not COPYed into the image"
+        )
