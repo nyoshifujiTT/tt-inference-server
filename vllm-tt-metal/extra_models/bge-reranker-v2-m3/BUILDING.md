@@ -52,29 +52,17 @@ template of `workflows/model_specs/prod/embedding.yaml`:
   vllm_commit: "<vllm-tt-plugin sha>"
 ```
 
-Use **full 40-character SHAs**, here and for `--build-metal-commit`. The
-Dockerfile does `git clone --depth 1` and then
-`git fetch --depth 1 origin ${TT_METAL_COMMIT_SHA_OR_TAG}`, and `git fetch`
-cannot resolve an abbreviated SHA — it is not a ref on the remote. An
-abbreviated SHA appears to work while it happens to be the branch tip (the
-shallow clone already contains it) and then fails with
-`fatal: couldn't find remote ref <sha>` as soon as another commit lands.
-
 Both branches must be pushed: the Dockerfile clones them from GitHub by SHA, so
 a local-only commit cannot end up in the image.
 
 ## 2. Build
 
 ```bash
-python3 scripts/build_docker_images.py --build-metal-commit <full tt-metal sha>
+python3 scripts/build_docker_images.py --build-metal-commit <tt-metal sha>
 ```
 
 This produces
 `ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:<VERSION>-<tt_metal>-<vllm>`.
-
-If that tag already exists locally the build is skipped ("Skipping dev image
-build"), so remove it first when rebuilding after a Dockerfile change:
-`docker rmi <tag>`.
 
 ## 3. Revert
 

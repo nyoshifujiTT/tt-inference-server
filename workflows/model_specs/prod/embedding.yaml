@@ -258,8 +258,8 @@ templates:
 # both with git checkout -- never commit the fork pins.
 - weights:
     - BAAI/bge-reranker-v2-m3
-  tt_metal_commit: "ad499a943ab9273c5482bc71c7d7ee866a30aaa4"
-  vllm_commit: "8157b17cd9d766ec8e5e5bce6598789bb7ca8c52"
+  tt_metal_commit: "ad499a943ab"
+  vllm_commit: "8157b17"
   version: "0.20.0"
   impl: tt_vllm_plugin
   min_disk_gb: 15
