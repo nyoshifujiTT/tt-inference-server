@@ -11,6 +11,7 @@ import pytest
 from domain.diarization_response import DiarizationResponse, DiarizationSegment
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from tests.diarization_auth import auth_headers
 from open_ai_api import diarization, media
 from resolver.service_resolver import service_resolver
 
@@ -27,7 +28,9 @@ def _make_client(fake):
     app = FastAPI()
     app.include_router(diarization.async_router, prefix="/v1")
     app.dependency_overrides[service_resolver] = lambda: fake
-    return TestClient(app)
+    # Authenticate every request: NO_AUTH is only honoured when this module wins
+    # the import race against security.api_key_checker (see diarization_auth).
+    return TestClient(app, headers=auth_headers())
 
 
 @pytest.fixture(autouse=True)
@@ -129,7 +132,6 @@ def test_media_staged_audio_flows_through_the_job_api(tmp_path, monkeypatch):
     from POST /v1/media/input + PUT to a job created against that url.
     """
     monkeypatch.setenv("MEDIA_INPUT_DIR", str(tmp_path))
-    import security.api_key_checker as akc
     import utils.diarization_jobs as dj
     import utils.media_storage as ms
 
@@ -139,30 +141,20 @@ def test_media_staged_audio_flows_through_the_job_api(tmp_path, monkeypatch):
     app.include_router(media.router, prefix="/v1/media")
     app.include_router(diarization.async_router, prefix="/v1")
     app.dependency_overrides[service_resolver] = lambda: _FakeService()
-    client = TestClient(app)
-    # api_key_checker captured NO_AUTH at import time, which may have happened
-    # before this module set it, so authenticate explicitly instead of relying
-    # on import order.
-    auth = {"Authorization": f"Bearer {akc.API_KEY}"}
+    client = TestClient(app, headers=auth_headers())
 
-    declared = client.post(
-        "/v1/media/input", json={"url": "media://sess/staged.wav"}, headers=auth
-    )
+    declared = client.post("/v1/media/input", json={"url": "media://sess/staged.wav"})
     assert declared.status_code == 201, declared.text
     put_path = declared.json()["url"].replace("http://testserver", "")
-    assert (
-        client.put(put_path, content=b"RIFFxxxxWAVE", headers=auth).status_code == 200
-    )
+    assert client.put(put_path, content=b"RIFFxxxxWAVE").status_code == 200
 
-    created = client.post(
-        "/v1/diarize", json={"url": "media://sess/staged.wav"}, headers=auth
-    )
+    created = client.post("/v1/diarize", json={"url": "media://sess/staged.wav"})
     assert created.status_code == 201, created.text
 
     job_id = created.json()["jobId"]
     deadline = time.time() + 5.0
     while time.time() < deadline:
-        polled = client.get(f"/v1/jobs/{job_id}", headers=auth)
+        polled = client.get(f"/v1/jobs/{job_id}")
         assert polled.status_code == 200, polled.text
         job = polled.json()
         if job["status"] in ("succeeded", "failed", "canceled"):

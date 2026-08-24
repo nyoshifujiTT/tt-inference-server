@@ -8,6 +8,7 @@ os.environ["NO_AUTH"] = "1"
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from tests.diarization_auth import auth_headers
 from open_ai_api import diarization
 from resolver.service_resolver import service_resolver
 
@@ -50,7 +51,9 @@ def _client(fake):
     app = FastAPI()
     app.include_router(diarization.router, prefix="/v1/audio")
     app.dependency_overrides[service_resolver] = lambda: fake
-    return TestClient(app)
+    # Authenticate every request: NO_AUTH is only honoured when this module wins
+    # the import race against security.api_key_checker (see diarization_auth).
+    return TestClient(app, headers=auth_headers())
 
 
 def test_diarized_transcriptions_returns_diarized_json():
