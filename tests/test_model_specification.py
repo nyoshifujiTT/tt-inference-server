@@ -1140,8 +1140,10 @@ class TestBgeRerankerSpec:
         spec = MODEL_SPECS[self.MODEL_ID]
         assert spec.tt_metal_commit
         assert spec.vllm_commit
-        assert spec.tt_metal_commit in spec.docker_image
-        assert spec.vllm_commit in spec.docker_image
+        # The tag abbreviates each pin, so match on the prefix rather than the
+        # full SHA.
+        assert spec.tt_metal_commit[:12] in spec.docker_image
+        assert spec.vllm_commit[:12] in spec.docker_image
 
     def test_commit_pins_point_at_upstream_not_a_fork(self):
         # Fork pins must never be committed: they are applied as a local patch
@@ -1150,3 +1152,19 @@ class TestBgeRerankerSpec:
         spec = MODEL_SPECS[self.MODEL_ID]
         assert "nyoshifuji" not in spec.docker_image.lower()
         assert "nyoshifuji" not in spec.impl.repo_url.lower()
+
+    def test_commit_pins_are_full_shas(self):
+        # The Dockerfile shallow-clones and then runs
+        # `git fetch --depth 1 origin <pin>`, which cannot resolve an
+        # abbreviated SHA. A short pin builds fine while it is the branch tip
+        # (the shallow clone already has it) and then breaks with
+        # "couldn't find remote ref" as soon as another commit lands, so the
+        # breakage shows up long after the change that caused it.
+        spec = MODEL_SPECS[self.MODEL_ID]
+        for name, pin in (
+            ("tt_metal_commit", spec.tt_metal_commit),
+            ("vllm_commit", spec.vllm_commit),
+        ):
+            assert len(pin) == 40 and all(c in "0123456789abcdef" for c in pin), (
+                f"{name}={pin!r} must be a full 40-character SHA"
+            )
