@@ -150,7 +150,9 @@ def test_media_staged_audio_flows_through_the_job_api(tmp_path, monkeypatch):
     )
     assert declared.status_code == 201, declared.text
     put_path = declared.json()["url"].replace("http://testserver", "")
-    assert client.put(put_path, content=b"RIFFxxxxWAVE", headers=auth).status_code == 200
+    assert (
+        client.put(put_path, content=b"RIFFxxxxWAVE", headers=auth).status_code == 200
+    )
 
     created = client.post(
         "/v1/diarize", json={"url": "media://sess/staged.wav"}, headers=auth
