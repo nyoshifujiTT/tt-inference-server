@@ -24,5 +24,29 @@
 #    declares numpy>=2.0.2, which would force a venv-wide numpy upgrade and
 #    break tt-metal's pin. whisperx is observed to run fine on numpy<2;
 #    overriding here keeps the venv consistent with tt-metal.
+#
+# 3) pyannote-audio major version
+#    whisperx==3.4.3 declares `pyannote-audio<4.0.0,>=3.3.2`, so a plain resolve
+#    installs 3.x. The diarization service (MODEL_SERVICE=diarization) serves
+#    pyannote/speaker-diarization-community-1, which only loads under
+#    pyannote.audio 4.x -- on 3.x the pipeline fails to construct. The
+#    diarization backend calls pyannote directly and never goes through
+#    whisperx, and whisperx's own alignment/ASR paths do not depend on the 4.x
+#    API changes, so overriding to 4.x keeps both services working.
+#
+# 4) torch/torchaudio floor for pyannote 4.x
+#    pyannote-audio>=4.0 requires torchaudio>=2.8.0, while requirements.txt
+#    pins torch/torchaudio to 2.7.1+cpu. Raise the pins here rather than in
+#    requirements.txt so the change is scoped to this resolve, and keep them on
+#    the CPU index (the media server runs the torch side on CPU; the neural
+#    nets go to the Tenstorrent device through ttnn). torchvision is pinned
+#    alongside them because tt-metal's venv ships a build compiled against the
+#    old torch; leaving it behind makes `import torchvision` fail with a
+#    circular-import error from its C extension. The combination below is the
+#    one the p150 bring-up validated.
 numpy>=1.24.4,<2
+torch>=2.8.0
+torchaudio>=2.8.0
+torchvision>=0.23.0
 lightning @ https://files.pythonhosted.org/packages/0f/dd/86bb3bebadcdbc6e6e5a63657f0a03f74cd065b5ea965896679f76fec0b4/lightning-2.5.5.tar.gz
+pyannote.audio>=4.0,<5
