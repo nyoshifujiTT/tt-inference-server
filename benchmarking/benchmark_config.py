@@ -88,6 +88,15 @@ class BenchmarkTaskAudio(BenchmarkTask):
 
 
 @dataclass(frozen=True)
+class BenchmarkTaskDiarization(BenchmarkTask):
+    param_map: Dict[DeviceTypes, List[BenchmarkTaskParams]]
+    task_type: BenchmarkTaskType = BenchmarkTaskType.HTTP_CLIENT_CNN_API
+    workflow_venv_type: WorkflowVenvType = (
+        None  # no workflow venv needed for diarization benchmarks
+    )
+
+
+@dataclass(frozen=True)
 class BenchmarkTaskStructuredOutput(BenchmarkTask):
     param_map: Dict[DeviceTypes, List[BenchmarkTaskParams]]
     task_type: BenchmarkTaskType = (
@@ -583,6 +592,10 @@ def build_benchmark_config(model_spec) -> BenchmarkConfig:
         perf_ref_task = BenchmarkTaskImage(param_map={device: capped_perf_reference})
     elif model_spec.model_type == ModelType.AUDIO:
         perf_ref_task = BenchmarkTaskAudio(param_map={device: capped_perf_reference})
+    elif model_spec.model_type == ModelType.DIARIZATION:
+        perf_ref_task = BenchmarkTaskDiarization(
+            param_map={device: capped_perf_reference}
+        )
     else:
         perf_ref_task = BenchmarkTask(
             param_map={device: capped_perf_reference},
@@ -629,6 +642,18 @@ def build_benchmark_config(model_spec) -> BenchmarkConfig:
         elif model_spec.model_type == ModelType.AUDIO:
             benchmark_task_runs = BenchmarkTaskAudio(
                 param_map={device: [BenchmarkTaskParams()]}
+            )
+        elif model_spec.model_type == ModelType.DIARIZATION:
+            benchmark_task_runs = BenchmarkTaskDiarization(
+                param_map={
+                    device: [
+                        BenchmarkTaskParams(
+                            max_concurrency=model_max_concurrency,
+                            num_prompts=8,
+                            task_type="diarization",
+                        )
+                    ]
+                }
             )
         else:
             benchmark_task_runs = BenchmarkTask(
