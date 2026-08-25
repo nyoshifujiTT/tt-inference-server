@@ -146,3 +146,37 @@ class VideoGenerationTestStatus(BaseTestStatus):
             "job_id": self.job_id,
             "video_path": self.video_path,
         }
+
+
+class DiarizationTestStatus(BaseTestStatus):
+    """Test status for speaker-diarization models.
+
+    ``rtr`` is the real-time ratio (audio duration / processing time), which is
+    the meaningful throughput figure for diarization: the request carries a
+    recording of a known length, not a token count.
+    """
+
+    def __init__(
+        self,
+        status: bool,
+        elapsed: float,
+        latency: Optional[float] = None,
+        rtr: Optional[float] = None,
+        num_speakers: Optional[int] = None,
+        num_turns: Optional[int] = None,
+    ):
+        super().__init__(status, elapsed)
+        self.latency = latency
+        self.rtr = rtr
+        self.num_speakers = num_speakers
+        self.num_turns = num_turns
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "elapsed": self.elapsed,
+            "latency": self.latency,
+            "rtr": self.rtr,
+            "num_speakers": self.num_speakers,
+            "num_turns": self.num_turns,
+        }
