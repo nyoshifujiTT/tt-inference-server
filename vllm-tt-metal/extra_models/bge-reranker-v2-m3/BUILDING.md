@@ -17,23 +17,26 @@ describing what actually ran.
 
 ## 1. Patch
 
-The Dockerfile does `git clone --depth 1 <repo>`, which fetches only the
-**default branch**. A commit that lives on a topic branch is therefore not in
-the clone, and the following `git fetch --depth 1 origin <sha>` cannot reach it
-either, because GitHub does not serve arbitrary SHAs by default:
+Pin the commits by **full 40-character SHA**. The Dockerfile shallow-clones the
+default branch and then runs `git fetch --depth 1 origin <pin>`; GitHub serves
+any full SHA that way, including one that only exists on a topic branch, but it
+cannot resolve an abbreviated one because that is not a ref:
 
 ```
-fatal: couldn't find remote ref <sha>
-error: pathspec '<sha>' did not match any file(s) known to git
+$ git fetch --depth 1 origin ad499a943ab            # abbreviated
+fatal: couldn't find remote ref ad499a943ab
+$ git fetch --depth 1 origin ad499a943ab9273c...    # full
+ * branch  ad499a943ab9273c... -> FETCH_HEAD
 ```
 
-So the patch must switch the branch as well as the repository. Add
-`--branch <your branch>` to each clone.
+Most pins in the prod catalog are abbreviated, which works only because those
+commits sit on the default branch and are already in the shallow clone. A
+branch that is not upstream yet has no such luck, so use the full SHA.
 
 ```bash
 git apply <<'PATCH'
 diff --git a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile b/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
-index dafb609aa..2154e4cbc 100644
+index dafb609aa..2f51cb793 100644
 --- a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 +++ b/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 @@ -86,7 +86,7 @@ ENV UV_HTTP_RETRIES=10
@@ -41,7 +44,7 @@ index dafb609aa..2154e4cbc 100644
  # EOF"). Only the pinned commit is needed, so fetch just that (matches the shallow
  # clone already used by tt-media-server/Dockerfile).
 -RUN /bin/bash -c "git clone --depth 1 https://github.com/tenstorrent-metal/tt-metal.git ${TT_METAL_HOME} \
-+RUN /bin/bash -c "git clone --depth 1 --branch <your-branch> https://github.com/<you>/tt-metal.git ${TT_METAL_HOME} \
++RUN /bin/bash -c "git clone --depth 1 https://github.com/<you>/tt-metal.git ${TT_METAL_HOME} \
      && cd ${TT_METAL_HOME} \
      && git fetch --depth 1 origin ${TT_METAL_COMMIT_SHA_OR_TAG} \
      && git checkout ${TT_METAL_COMMIT_SHA_OR_TAG} \
@@ -50,12 +53,12 @@ index dafb609aa..2154e4cbc 100644
  # The plugin owns the vLLM version pin and its dependency overrides, so the
  # install is delegated to its own docs/install-vllm-tt.sh rather than restated here
 -RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
-+RUN /bin/bash -c "git clone --branch <your-branch> https://github.com/<you>/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
++RUN /bin/bash -c "git clone https://github.com/<you>/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
      && cd ${vllm_tt_plugin_dir} \
      && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
      && source ${PYTHON_ENV_DIR}/bin/activate \
 diff --git a/workflows/model_specs/prod/embedding.yaml b/workflows/model_specs/prod/embedding.yaml
-index dbd01d8cb..5e580925c 100644
+index dbd01d8cb..a8ff370f5 100644
 --- a/workflows/model_specs/prod/embedding.yaml
 +++ b/workflows/model_specs/prod/embedding.yaml
 @@ -258,8 +258,8 @@ templates:
@@ -64,8 +67,8 @@ index dbd01d8cb..5e580925c 100644
      - BAAI/bge-reranker-v2-m3
 -  tt_metal_commit: "ad499a943ab"
 -  vllm_commit: "8157b17"
-+  tt_metal_commit: "<tt-metal sha>"
-+  vllm_commit: "<vllm-tt-plugin sha>"
++  tt_metal_commit: "<full 40-char tt-metal sha>"
++  vllm_commit: "<full 40-char vllm-tt-plugin sha>"
    version: "0.20.0"
    impl: tt_vllm_plugin
    min_disk_gb: 15

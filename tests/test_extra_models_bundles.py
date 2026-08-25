@@ -78,9 +78,8 @@ class TestRerankerBuildingDoc:
         patch = (
             self._documented_patch()
             .replace("<you>", "someorg")
-            .replace("<your-branch>", "some-branch")
-            .replace("<tt-metal sha>", "abc1234")
-            .replace("<vllm-tt-plugin sha>", "def5678")
+            .replace("<full 40-char tt-metal sha>", "a" * 40)
+            .replace("<full 40-char vllm-tt-plugin sha>", "b" * 40)
         )
         patch_file = tmp_path / "fork.diff"
         patch_file.write_text(patch)
@@ -107,20 +106,21 @@ class TestRerankerBuildingDoc:
                 f"fork clone URL committed to the Dockerfile: {line.strip()}"
             )
 
-    def test_documented_patch_switches_branch_too(self):
-        # `git clone --depth 1` only fetches the default branch, and GitHub does
-        # not serve arbitrary SHAs, so pointing the clone at a fork without also
-        # selecting the branch leaves the pinned commit unreachable
-        # ("couldn't find remote ref"). The patch must set --branch.
+    def test_documented_patch_pins_full_shas(self):
+        # The build resolves the pin with `git fetch --depth 1 origin <pin>`.
+        # GitHub serves any full SHA that way, including one reachable only from
+        # a topic branch, but an abbreviated SHA is not a ref and fails with
+        # "couldn't find remote ref". Verified against this repo: 7, 8 and 12
+        # character forms all fail; the 40 character form fetches and checks out.
         added = [
             ln
             for ln in self._documented_patch().splitlines()
-            if ln.startswith("+") and "git clone" in ln
+            if ln.startswith("+") and ("tt_metal_commit" in ln or "vllm_commit" in ln)
         ]
-        assert added, "the documented patch no longer changes any clone line"
+        assert len(added) == 2, "the documented patch no longer sets both pins"
         for line in added:
-            assert "--branch" in line, (
-                f"documented clone line does not select a branch: {line.strip()}"
+            assert "full 40-char" in line, (
+                f"documented pin does not call for a full SHA: {line.strip()}"
             )
 
     def test_documented_patch_covers_the_commit_pins(self):
