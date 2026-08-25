@@ -34,6 +34,32 @@ from utils.ffmpeg_utils import decode_to_wav
 from utils.logger import TTLogger
 
 
+def _wav_bytes_to_waveform(wav_bytes: bytes) -> dict:
+    """Decode in-memory WAV into pyannote's ``{"waveform", "sample_rate"}`` input.
+
+    Handing pyannote a path makes it decode the file itself through torchcodec,
+    whose wheels are built per torch release; the image pins torch to the version
+    tt-vllm-plugin requires, so the installed torchcodec fails to load its
+    extension and every request errors with "torchcodec is not available".
+    Decoding here with the standard library sidesteps that dependency entirely --
+    the audio is already normalized 16 kHz mono PCM at this point.
+    """
+    import io
+    import wave
+
+    import numpy as np
+    import torch
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+        channels = w.getnchannels()
+        sample_rate = w.getframerate()
+        frames = w.readframes(w.getnframes())
+
+    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    samples = samples.reshape(-1, channels).T  # (channel, time)
+    return {"waveform": torch.from_numpy(samples.copy()), "sample_rate": sample_rate}
+
+
 class DiarizationService:
     """CPU speaker-diarization service (not a device/runner-backed BaseService)."""
 
@@ -96,24 +122,13 @@ class DiarizationService:
         # sample-count crops; compressed inputs otherwise raise length errors).
         wav_bytes = decode_to_wav(audio_bytes, sample_rate=settings.default_sample_rate)
 
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                f.write(wav_bytes)
-                tmp_path = f.name
-            result = self._backend.diarize(
-                tmp_path,
-                num_speakers=request.num_speakers,
-                min_speakers=request.min_speakers,
-                max_speakers=request.max_speakers,
-                exclusive=request.exclusive,
-            )
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+        result = self._backend.diarize(
+            _wav_bytes_to_waveform(wav_bytes),
+            num_speakers=request.num_speakers,
+            min_speakers=request.min_speakers,
+            max_speakers=request.max_speakers,
+            exclusive=request.exclusive,
+        )
 
         segments = [DiarizationSegment(**s) for s in result["segments"]]
         exclusive = None
@@ -170,20 +185,9 @@ class DiarizationService:
             w.setsampwidth(2)
             w.setframerate(sr)
             w.writeframes(pcm.tobytes())
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fobj:
-                fobj.write(buf.getvalue())
-                tmp_path = fobj.name
-            self.logger.info("DiarizationService: warming up pipeline...")
-            self._backend.diarize(tmp_path, exclusive=True)
-            self.logger.info("DiarizationService: warmup complete")
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+        self.logger.info("DiarizationService: warming up pipeline...")
+        self._backend.diarize(_wav_bytes_to_waveform(buf.getvalue()), exclusive=True)
+        self.logger.info("DiarizationService: warmup complete")
 
     def check_is_model_ready(self) -> dict:
         """Readiness for /health and /tt-liveness.

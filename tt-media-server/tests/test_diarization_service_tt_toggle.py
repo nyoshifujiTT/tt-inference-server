@@ -3,7 +3,6 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 """DiarizationService TT-acceleration env toggle (device-independent)."""
 
-import os
 import sys
 
 
@@ -68,8 +67,13 @@ def test_start_workers_warms_up_with_one_diarize(monkeypatch):
     assert calls == []  # constructing the service must not run inference
     service.start_workers()
     assert len(calls) == 1  # exactly one warmup diarization
-    assert calls[0].endswith(".wav")
-    assert not os.path.exists(calls[0])  # temp warmup wav is cleaned up
+    # Audio is handed to pyannote as an in-memory waveform, not a path, so the
+    # pipeline never decodes a file through torchcodec. (torch is stubbed by
+    # conftest here, so only the mapping shape is asserted.)
+    warmup_audio = calls[0]
+    assert isinstance(warmup_audio, dict)
+    assert set(warmup_audio) == {"waveform", "sample_rate"}
+    assert warmup_audio["sample_rate"] == 16000
 
 
 def test_start_workers_warmup_failure_is_non_fatal(monkeypatch):
@@ -86,3 +90,27 @@ def test_start_workers_warmup_failure_is_non_fatal(monkeypatch):
     monkeypatch.setattr(svc, "DiarizationBackend", _BoomBackend)
     service = svc.DiarizationService()
     assert service.start_workers() is None  # warmup failure must be swallowed
+
+
+def test_wav_bytes_to_waveform_decodes_without_torchcodec():
+    """The helper must decode PCM itself; torchcodec cannot load on this torch pin."""
+    import io
+    import wave
+
+    import numpy as np
+
+    sample_rate = 16000
+    pcm = (np.linspace(-0.5, 0.5, 800) * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate)
+        writer.writeframes(pcm.tobytes())
+
+    import model_services.diarization_service as svc
+
+    got = svc._wav_bytes_to_waveform(buf.getvalue())
+
+    assert set(got) == {"waveform", "sample_rate"}
+    assert got["sample_rate"] == sample_rate
