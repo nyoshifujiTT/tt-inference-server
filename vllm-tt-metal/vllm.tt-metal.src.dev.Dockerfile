@@ -106,6 +106,14 @@ RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${
 # vLLM on purpose - the plugin deliberately does not declare vllm as a
 # dependency, so that resolution can never swap the locally built empty-target
 # vLLM for the CUDA wheel on PyPI.
+# torchaudio is installed explicitly because the empty target resolves
+# requirements/common.txt, which omits it (only cpu/cuda/rocm/xpu list it), yet
+# vllm/transformers_utils/processors/__init__.py imports funasr_processor
+# unconditionally, and that module imports torchaudio at module scope. Without
+# it every model-architecture inspection fails with
+# "ModuleNotFoundError: No module named 'torchaudio'", so even non-FunASR models
+# (here Qwen3-ASR) cannot be resolved. Pin it to the torch already installed by
+# tt-metal so resolution cannot pull a different torch build.
 RUN /bin/bash -c "git clone ${TT_VLLM_REPO_URL} ${vllm_dir} \
     && cd ${vllm_dir} \
     && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
@@ -113,6 +121,8 @@ RUN /bin/bash -c "git clone ${TT_VLLM_REPO_URL} ${vllm_dir} \
     && uv pip install --upgrade pip \
     && VLLM_TARGET_DEVICE=empty uv pip install --index-strategy unsafe-best-match -e . --extra-index-url https://download.pytorch.org/whl/cpu \
     && uv pip install --index-strategy unsafe-best-match -e plugins/vllm-tt-plugin --extra-index-url https://download.pytorch.org/whl/cpu \
+    && TORCH_VERSION=\$(python -c 'import torch, sys; sys.stdout.write(torch.__version__.split(chr(43))[0])') \
+    && uv pip install --index-strategy unsafe-best-match torchaudio==\${TORCH_VERSION} --extra-index-url https://download.pytorch.org/whl/cpu \
     && rm -rf ${vllm_dir}/.git"
 
 # Build tt-smi in separate venv to avoid conflicts with tt-metal venv

@@ -78,3 +78,19 @@ def test_vllm_repo_url_is_overridable_and_defaults_to_tenstorrent():
     assert "git clone ${TT_VLLM_REPO_URL}" in _vllm_install_step(), (
         "the clone must honour TT_VLLM_REPO_URL instead of hardcoding the URL"
     )
+
+
+def test_torchaudio_is_installed_and_pinned_to_the_installed_torch():
+    """The empty target does not pull torchaudio, but vLLM imports it anyway.
+
+    vllm/transformers_utils/processors/__init__.py imports funasr_processor
+    unconditionally and that module imports torchaudio at module scope, so
+    without it *every* architecture inspection fails with
+    "ModuleNotFoundError: No module named 'torchaudio'".
+    """
+    step = _vllm_install_step()
+    assert "torchaudio==" in step, "torchaudio must be installed explicitly"
+    assert "TORCH_VERSION" in step, (
+        "torchaudio must be pinned to the torch tt-metal already installed, so "
+        "resolution cannot swap in a different torch build"
+    )
