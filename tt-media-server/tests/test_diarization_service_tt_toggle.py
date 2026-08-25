@@ -162,3 +162,32 @@ def test_diarized_transcription_also_avoids_file_paths(monkeypatch):
     assert len(calls) == 1
     assert isinstance(calls[0], dict)  # never a filesystem path
     assert set(calls[0]) == {"waveform", "sample_rate"}
+
+
+def test_readiness_reports_worker_info_for_the_liveness_gate(monkeypatch):
+    """/tt-liveness must carry worker_info or the model cannot be benchmarked.
+
+    ``server_tests/test_cases/device_liveness_test.py`` aborts with "No
+    worker_info found in response" and then counts entries with ``is_ready``,
+    so the benchmark client's health gate fails outright when the field is
+    missing. This service has no Scheduler, so it reports its single
+    in-process pipeline itself.
+    """
+    import model_services.diarization_service as svc
+
+    class _FakeBackend:
+        def __init__(self, model_path, device="cpu", nn_accelerator=None):
+            pass
+
+    monkeypatch.setattr(svc, "DiarizationBackend", _FakeBackend)
+    status = svc.DiarizationService().check_is_model_ready()
+
+    assert status["model_ready"] is True
+    worker_info = status["worker_info"]
+    assert worker_info, "liveness gate rejects an empty worker_info"
+    ready = [w for w in worker_info.values() if w.get("is_ready")]
+    assert len(ready) == 1  # one in-process pipeline; pyannote is serialized
+    entry = ready[0]
+    # Same shape Scheduler.get_worker_info() emits, so the gate can read it.
+    assert set(entry) >= {"pid", "is_alive", "is_ready", "start_time"}
+    assert entry["is_alive"] is True

@@ -14,6 +14,9 @@ and just construct the CPU backend. Concurrency safety (pyannote pipeline is not
 thread-safe) is handled inside DiarizationBackend via a lock.
 """
 
+import os
+import time
+
 from config.constants import SupportedModels
 from config.settings import settings
 from domain.diarization_request import DiarizationRequest
@@ -62,6 +65,7 @@ class DiarizationService:
 
     def __init__(self):
         self.logger = TTLogger()
+        self._start_time = time.time()
         model_path = (
             settings.model_weights_path
             or settings.preprocessing_model_weights_path
@@ -80,8 +84,6 @@ class DiarizationService:
         NNs onto a p150 via ttnn (see tt_port/tt_nn_accelerator). When the env var
         is unset, returns None and the service runs pure-CPU.
         """
-        import os
-
         dev_id = os.getenv("DIARIZATION_TT_DEVICE_ID")
         if dev_id is None or dev_id == "":
             return None
@@ -191,8 +193,30 @@ class DiarizationService:
 
         The CPU backend has no device to probe; it is ready as soon as the
         service is constructed. Weights load lazily on first diarize call.
+
+        ``worker_info`` is reported even though this service runs in-process
+        rather than through the Scheduler: the benchmark client's liveness gate
+        (``server_tests/test_cases/device_liveness_test.py``) counts ready
+        workers and aborts with "No worker_info found in response" without it,
+        so omitting it makes the model impossible to benchmark. One entry stands
+        for the single in-process pipeline, which is also the real concurrency:
+        the pyannote pipeline is not thread-safe and calls are serialized.
         """
-        return {"model_ready": True, "runner_in_use": "diarization-cpu"}
+        return {
+            "model_ready": True,
+            "runner_in_use": "diarization-cpu",
+            "worker_info": {
+                "diarization-0": {
+                    "pid": os.getpid(),
+                    "is_alive": True,
+                    "is_ready": True,
+                    "start_time": self._start_time,
+                    "ready_time": self._start_time,
+                    "restart_count": 0,
+                    "error_count": 0,
+                }
+            },
+        }
 
     def _wav_bytes_to_samples(self, wav_bytes):
         """Decode 16-bit PCM mono WAV bytes to a float32 numpy waveform."""
