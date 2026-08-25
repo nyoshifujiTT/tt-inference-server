@@ -14,9 +14,6 @@ and just construct the CPU backend. Concurrency safety (pyannote pipeline is not
 thread-safe) is handled inside DiarizationBackend via a lock.
 """
 
-import os
-import tempfile
-
 from config.constants import SupportedModels
 from config.settings import settings
 from domain.diarization_request import DiarizationRequest
@@ -197,7 +194,7 @@ class DiarizationService:
         """
         return {"model_ready": True, "runner_in_use": "diarization-cpu"}
 
-    def _wav_bytes_to_waveform(self, wav_bytes):
+    def _wav_bytes_to_samples(self, wav_bytes):
         """Decode 16-bit PCM mono WAV bytes to a float32 numpy waveform."""
         import wave
 
@@ -234,43 +231,31 @@ class DiarizationService:
 
             audio_bytes = base64.b64decode(audio_bytes)
         wav_bytes = decode_to_wav(audio_bytes, sample_rate=settings.default_sample_rate)
-        waveform = self._wav_bytes_to_waveform(wav_bytes)
+        samples = self._wav_bytes_to_samples(wav_bytes)
 
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                f.write(wav_bytes)
-                tmp_path = f.name
-
-            def transcribe_slice(chunk, sr):
-                wb = encode_wav_pcm16(chunk, sr)
-                return transcribe_wav_bytes(
-                    settings.asr_url,
-                    parsed.asr_model,
-                    wb,
-                    language=language,
-                    prompt=prompt,
-                    timeout=settings.asr_timeout_s,
-                )
-
-            coordinator = DiarizedAsrCoordinator(
-                diarize_fn=self._backend.diarize,
-                transcribe_slice=transcribe_slice,
-                sample_rate=settings.default_sample_rate,
+        def transcribe_slice(chunk, sr):
+            wb = encode_wav_pcm16(chunk, sr)
+            return transcribe_wav_bytes(
+                settings.asr_url,
+                parsed.asr_model,
+                wb,
+                language=language,
+                prompt=prompt,
+                timeout=settings.asr_timeout_s,
             )
-            return coordinator.run(
-                tmp_path,
-                waveform,
-                num_speakers=request.num_speakers,
-                min_speakers=request.min_speakers,
-                max_speakers=request.max_speakers,
-            )
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+
+        coordinator = DiarizedAsrCoordinator(
+            diarize_fn=self._backend.diarize,
+            transcribe_slice=transcribe_slice,
+            sample_rate=settings.default_sample_rate,
+        )
+        return coordinator.run(
+            _wav_bytes_to_waveform(wav_bytes),
+            samples,
+            num_speakers=request.num_speakers,
+            min_speakers=request.min_speakers,
+            max_speakers=request.max_speakers,
+        )
 
     def stop_workers(self):
         """No background workers to stop (CPU backend is in-process)."""
