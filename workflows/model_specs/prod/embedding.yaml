@@ -271,6 +271,15 @@ templates:
       max_concurrency: 1
       max_context: 8192
       default_impl: true
+      vllm_args:
+        # The reranker is prefill-only and the device model batches a whole
+        # request in one pass, so the scheduler must be allowed to put every
+        # sequence of a request into a single step. Both defaults derived from
+        # max_context would cap a step at one 8192-token sequence, which
+        # serialises an 8-document rerank into 8 device passes (measured: 7.3 s
+        # -> 58.6 s at B=8, and 15.8x at B=32).
+        max_num_seqs: 32
+        max_num_batched_tokens: 262144
       env_vars:
         TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
         VLLM__MAX_NUM_BATCHED_TOKENS: "262144"

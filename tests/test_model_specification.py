@@ -1150,3 +1150,23 @@ class TestBgeRerankerSpec:
         spec = MODEL_SPECS[self.MODEL_ID]
         assert "nyoshifuji" not in spec.docker_image.lower()
         assert "nyoshifuji" not in spec.impl.repo_url.lower()
+
+    def test_a_whole_rerank_request_fits_in_one_scheduler_step(self):
+        # The device model scores a whole batch in one pass, but the scheduler
+        # decides how much of a request reaches it at a time. Both scheduler
+        # defaults are derived from max_context (8192), which caps a step at a
+        # single full-length sequence and turns an 8-document rerank into 8
+        # device passes. Measured on p150: 7.3 s -> 58.6 s at B=8 (8.0x, i.e.
+        # exactly serialised) and 15.8x at B=32, against a demo path that runs
+        # B=8 in the same time as B=1.
+        spec = MODEL_SPECS[self.MODEL_ID]
+        vllm_args = spec.device_model_spec.vllm_args
+        max_seqs = int(vllm_args["max_num_seqs"])
+        max_batched = int(vllm_args["max_num_batched_tokens"])
+
+        assert max_seqs > 1, "a step limited to one sequence serialises every rerank"
+        assert max_batched >= spec.device_model_spec.max_context * max_seqs, (
+            f"max_num_batched_tokens={max_batched} cannot hold {max_seqs} "
+            f"sequences of {spec.device_model_spec.max_context} tokens, so full-length "
+            "requests will still be split across steps"
+        )
