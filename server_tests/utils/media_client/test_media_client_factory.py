@@ -60,8 +60,11 @@ class TestStrategyMap(unittest.TestCase):
     def test_strategy_map_contains_text_to_speech(self):
         assert "TEXT_TO_SPEECH" in STRATEGY_MAP
 
+    def test_strategy_map_contains_diarization(self):
+        assert "DIARIZATION" in STRATEGY_MAP
+
     def test_strategy_map_size(self):
-        assert len(STRATEGY_MAP) == 4
+        assert len(STRATEGY_MAP) == 5
 
 
 class TestMediaClientFactoryCreateStrategy(unittest.TestCase):

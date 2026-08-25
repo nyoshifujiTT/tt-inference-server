@@ -59,6 +59,7 @@ BENCHMARKS_TASK_TYPES = [
     ModelType.IMAGE,
     ModelType.CNN,
     ModelType.AUDIO,
+    ModelType.DIARIZATION,
     ModelType.EMBEDDING,
     ModelType.TEXT_TO_SPEECH,
     ModelType.VIDEO,
