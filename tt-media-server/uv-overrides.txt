@@ -34,19 +34,13 @@
 #    whisperx, and whisperx's own alignment/ASR paths do not depend on the 4.x
 #    API changes, so overriding to 4.x keeps both services working.
 #
-# 4) torch/torchaudio floor for pyannote 4.x
-#    pyannote-audio>=4.0 requires torchaudio>=2.8.0, while requirements.txt
-#    pins torch/torchaudio to 2.7.1+cpu. Raise the pins here rather than in
-#    requirements.txt so the change is scoped to this resolve, and keep them on
-#    the CPU index (the media server runs the torch side on CPU; the neural
-#    nets go to the Tenstorrent device through ttnn). torchvision is pinned
-#    alongside them because tt-metal's venv ships a build compiled against the
-#    old torch; leaving it behind makes `import torchvision` fail with a
-#    circular-import error from its C extension. The combination below is the
-#    one the p150 bring-up validated.
+#    pyannote-audio 4.x declares `torch>=2.8.0` / `torchaudio>=2.8.0`, which the
+#    image cannot satisfy: tt-vllm-plugin pins `torch>=2.7.1,<2.8` and is
+#    installed into the same venv. The declared floor is not a hard runtime
+#    requirement -- on the 2.7.1 wheels this image ships, pyannote 4.0.7 imports,
+#    builds the community-1 pipeline, and the WeSpeaker/PyanNet ports match torch
+#    on a p150 (verified). So only the major version is overridden here; the
+#    torch pins are left to tt-vllm-plugin.
 numpy>=1.24.4,<2
-torch>=2.8.0
-torchaudio>=2.8.0
-torchvision>=0.23.0
 lightning @ https://files.pythonhosted.org/packages/0f/dd/86bb3bebadcdbc6e6e5a63657f0a03f74cd065b5ea965896679f76fec0b4/lightning-2.5.5.tar.gz
 pyannote.audio>=4.0,<5

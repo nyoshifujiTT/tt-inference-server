@@ -23,10 +23,6 @@ whisperx==3.4.3
 # resolves the conflict; see the note there.
 pyannote.audio>=4.0,<5
 soundfile
-# tt-metal's venv ships a torchvision built against the old torch pin; it must be
-# reinstalled together with the newer torch (see uv-overrides.txt) or importing it
-# fails with a circular-import error from its C extension.
-torchvision
 torch==2.7.1+cpu
 torchaudio==2.7.1+cpu
 requests
