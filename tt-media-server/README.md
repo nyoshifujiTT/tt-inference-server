@@ -565,6 +565,12 @@ curl -s http://127.0.0.1:8000/v1/jobs/$JOB -H 'Authorization: Bearer your-secret
 
 `POST /v1/media/input` with `{"url":"media://<object-key>"}` returns a PUT url; `PUT` the file bytes there, then pass `media://<object-key>` as the diarize `url`. This mirrors the pyannoteAI temporary media storage (https://docs.pyannote.ai/api-reference/upload-media). Objects expire after `MEDIA_INPUT_RETENTION_SECONDS` (default 24h); the storage dir is `MEDIA_INPUT_DIR` (default `/tmp/tt_media_input`).
 
+## Benchmarking and accuracy
+
+`benchmarking/run_benchmarks.py` covers the served endpoint: `ModelType.DIARIZATION` selects `BenchmarkTaskDiarization`, so the sweep is a single diarization-typed run rather than the LLM prompt-length sweep.
+
+There is no `evals/run_evals.py` entry for diarization, and that is deliberate: the eval workflow drives `lm-evaluation-harness`, whose `--model` classes cover text, ASR and embeddings but have no diarization task. Speaker diarization is scored with the diarization error rate (`pyannote.metrics`) instead, which is what the device port is gated on: `models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py` asserts `DER < 0.05` for the on-device pipeline against the all-CPU one, plus an exact speaker-count match. `run_evals.py` raises `No evaluation tasks defined for model:` if pointed at this model, rather than running something meaningless.
+
 
 
 # Speaker-diarized transcription test call
