@@ -65,8 +65,8 @@ index dbd01d8cb..a8ff370f5 100644
  # both with git checkout -- never commit the fork pins.
  - weights:
      - BAAI/bge-reranker-v2-m3
--  tt_metal_commit: "ad499a943ab"
--  vllm_commit: "8157b17"
+-  tt_metal_commit: "f32a181affd"
+-  vllm_commit: "e3fc849"
 +  tt_metal_commit: "<full 40-char tt-metal sha>"
 +  vllm_commit: "<full 40-char vllm-tt-plugin sha>"
    version: "0.20.0"

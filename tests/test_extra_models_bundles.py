@@ -106,6 +106,45 @@ class TestRerankerBuildingDoc:
                 f"fork clone URL committed to the Dockerfile: {line.strip()}"
             )
 
+    def test_committed_pins_are_abbreviated_upstream_shas(self):
+        # The clone-URL check above guards only half of the patch. The pins are
+        # the other half, and a fork pin leaks just as badly: the build resolves
+        # whatever SHA the catalog names, so a committed branch SHA silently
+        # ships a fork build. That is exactly what happened once -- the pins were
+        # refreshed to this branch's merge commits, which are not on upstream's
+        # default branch, while the URL check kept passing.
+        #
+        # A committed pin cannot be resolved offline, so this checks the property
+        # that distinguishes the two cases without the network: BUILDING.md
+        # requires a *full 40-char* SHA precisely because an abbreviated one only
+        # resolves when the commit is already in the Dockerfile's shallow clone of
+        # the default branch. So an abbreviated pin is by construction an upstream
+        # default-branch commit, and a full 40-char pin in a committed file is the
+        # signature of a fork pin that should have stayed a local patch.
+        pins = self._committed_reranker_pins()
+        assert pins, "no reranker pins found in the prod catalog"
+        for key, value in pins.items():
+            assert len(value) < 40, (
+                f"{key} is pinned by full SHA ({value}) in a committed file. "
+                "Full SHAs are only needed for commits that are not on the "
+                "upstream default branch, i.e. fork pins, which BUILDING.md says "
+                "must be applied as a local patch and reverted after the build."
+            )
+
+    def _committed_reranker_pins(self) -> dict[str, str]:
+        spec = (
+            self.REPO_ROOT / "workflows" / "model_specs" / "prod" / "embedding.yaml"
+        ).read_text()
+        start = spec.index("BAAI/bge-reranker-v2-m3")
+        pins = {}
+        for line in spec[start:].splitlines():
+            match = re.match(r'\s*(tt_metal_commit|vllm_commit):\s*"([^"]+)"', line)
+            if match:
+                pins[match.group(1)] = match.group(2)
+            if len(pins) == 2:
+                break
+        return pins
+
     def test_documented_patch_pins_full_shas(self):
         # The build resolves the pin with `git fetch --depth 1 origin <pin>`.
         # GitHub serves any full SHA that way, including one reachable only from
