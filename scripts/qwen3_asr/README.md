@@ -1,5 +1,69 @@
 # Qwen3-ASR TT p150 server supervisor
 
+## Serving with `run.py --docker-server`
+
+`--docker-server` is the standard delivery path, but Qwen3-ASR has no published
+GHCR image yet, and its code is not upstream. The image must therefore be built
+locally from the bring-up forks.
+
+### 1. Base image
+
+tt-metal's `dockerfile/Dockerfile` declares its tool/venv layers as
+`FROM scratch` stubs that Bake substitutes; a plain `docker build` fails with
+`COPY --from=cmake-layer /install/: lstat /install: no such file or directory`.
+`scripts/build_docker_images.py` issues a plain `docker build` for the base, so
+build the base with Bake first and tag it the way the script expects:
+
+```
+cd $TT_METAL_HOME
+docker buildx bake -f dockerfile/docker-bake.hcl \
+  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:d53d8d7 \
+  --set ci-build.output=type=docker \
+  ci-build
+```
+
+The script then sees the base locally and only builds the dev image.
+
+### 2. Dev image (from the bring-up forks)
+
+The spec pins the bring-up branch heads, which live on the forks until they land
+upstream, so both clone URLs have to be overridden:
+
+```
+cd $TT_INFERENCE_SERVER
+TT_VLLM_REPO_URL=https://github.com/nyoshifujiTT/vllm.git \
+TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git \
+  python3 scripts/build_docker_images.py --build-metal-commit d53d8d7 --single-threaded
+```
+
+Without `TT_METAL_REPO_URL` the image lacks the vLLM adapter and the server dies
+with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`;
+without `TT_VLLM_REPO_URL` it lacks the HF-config fix and dies with
+`AttributeError: 'Qwen3ASRConfig' object has no attribute 'thinker_config'`.
+
+Disk: the dev image is ~21 GB and a rebuild keeps the previous generation until
+it is replaced, so keep at least 60 GB free.
+
+### 3. Run
+
+```
+python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 --workflow server \
+  --docker-server --dev-mode --no-auth --service-port 8110 --host-hf-cache \
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-d53d8d7-5e69638
+```
+
+`/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the
+spec's model name:
+
+```
+curl -X POST http://127.0.0.1:8110/v1/audio/transcriptions \
+  -F file=@clip.wav -F model=neosophie/Qwen3-ASR-1.7B-JA -F language=ja
+```
+
+The very first transcription JIT-compiles kernels into the container's cache and
+can take minutes; subsequent ones settle at ~2 s for an 11 s clip. Do not mistake
+that first request for a hang.
+
 The tt-metal decode path has a **non-deterministic device hang** in the same
 SDPA/decode class tracked upstream (tt-metal issues #40592, #45052, #4752, also
 seen for Mistral / gpt-oss / Falcon3). It is a platform-level bug, not specific
