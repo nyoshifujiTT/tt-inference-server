@@ -12,8 +12,11 @@ import pytest
 from utils.media_clients.diarization_client import (
     DiarizationClientStrategy,
     _audio_duration_seconds,
+    _load_reference_annotation,
+    _turns_to_annotation,
 )
 from utils.media_clients.test_status import DiarizationTestStatus
+from workflows.workflow_types import ReportCheckTypes
 
 
 class MockAsyncResponse:
@@ -149,10 +152,136 @@ class TestDiarizeOnce(unittest.TestCase):
         assert status.status is False
 
 
+class TestReferenceAnnotation(unittest.TestCase):
+    """The DER reference is the RTTM shipped beside pyannote's sample."""
+
+    def test_rttm_is_parsed_into_segments_per_speaker(self):
+        import tempfile
+
+        rttm = (
+            "SPEAKER sample 1 6.690 0.430 <NA> <NA> speaker90 <NA> <NA>\n"
+            "SPEAKER sample 1 7.550 0.800 <NA> <NA> speaker91 <NA> <NA>\n"
+            "\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".rttm") as handle:
+            handle.write(rttm)
+            handle.flush()
+            annotation = _load_reference_annotation(handle.name)
+
+        assert sorted(annotation.labels()) == ["speaker90", "speaker91"]
+        # RTTM stores start + duration; the annotation must hold start + end.
+        first = next(iter(annotation.itertracks(yield_label=True)))
+        assert first[0].start == pytest.approx(6.690)
+        assert first[0].end == pytest.approx(7.120)
+
+    def test_served_turns_become_a_comparable_annotation(self):
+        annotation = _turns_to_annotation(
+            [
+                {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0},
+                {"speaker": "SPEAKER_01", "start": 1.0, "end": 2.5},
+            ]
+        )
+        assert sorted(annotation.labels()) == ["SPEAKER_00", "SPEAKER_01"]
+
+
+class TestAccuracyCheck(unittest.TestCase):
+    """DER alone is not enough: a wrong speaker count must fail."""
+
+    def test_low_der_with_matching_speaker_count_passes(self):
+        assert (
+            _strategy()._calculate_accuracy_check(0.01, True) == ReportCheckTypes.PASS
+        )
+
+    def test_high_der_fails(self):
+        assert (
+            _strategy()._calculate_accuracy_check(0.9, True) == ReportCheckTypes.FAIL
+        )
+
+    def test_wrong_speaker_count_fails_even_with_a_low_der(self):
+        assert (
+            _strategy()._calculate_accuracy_check(0.0, False) == ReportCheckTypes.FAIL
+        )
+
+
 class TestRunEval(unittest.TestCase):
-    def test_eval_is_refused_rather_than_scoring_nothing(self):
-        with pytest.raises(NotImplementedError):
-            _strategy().run_eval()
+    """run_eval must score a real DER against the reference annotation."""
+
+    def test_eval_writes_a_der_scored_report(self):
+        import json
+        import pathlib
+        import tempfile
+
+        turns = [
+            {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0},
+            {"speaker": "SPEAKER_01", "start": 1.0, "end": 2.0},
+        ]
+        status = DiarizationTestStatus(
+            True, 5.0, latency=4.9, rtr=6.0, num_speakers=2, num_turns=2, turns=turns
+        )
+
+        with tempfile.TemporaryDirectory() as out:
+            strategy = _strategy()
+            strategy.output_path = out
+            strategy.model_spec.hf_model_repo = "pyannote/speaker-diarization-community-1"
+            strategy.require_health = MagicMock(return_value="diarization-cpu")
+            strategy.get_performance_targets = MagicMock(
+                return_value=MagicMock(ttft_ms=None, rtr=None, tolerance=0.1)
+            )
+
+            async def _fake(*args, **kwargs):
+                return status
+
+            with patch(
+                "utils.media_clients.diarization_client._sample_audio_path",
+                return_value="/tmp/a.wav",
+            ), patch(
+                "utils.media_clients.diarization_client._audio_duration_seconds",
+                return_value=30.0,
+            ), patch(
+                "utils.media_clients.diarization_client._load_reference_annotation",
+                return_value=_turns_to_annotation(turns),
+            ), patch(
+                "utils.media_clients.diarization_client._sample_reference_path",
+                return_value="/tmp/a.rttm",
+            ), patch.object(
+                DiarizationClientStrategy, "_diarize_once", side_effect=_fake
+            ):
+                strategy.run_eval()
+
+            written = list(pathlib.Path(out).rglob("results_*.json"))
+            assert len(written) == 1
+            report = json.loads(written[0].read_text())[0]
+
+        # Hypothesis equals the reference here, so the DER must be exactly 0.
+        assert report["score"] == pytest.approx(0.0)
+        assert report["task_name"] == "pyannote_sample_der"
+        assert report["speaker_count_matches"] is True
+        assert report["accuracy_check"] == ReportCheckTypes.PASS
+
+    def test_a_failed_request_is_not_scored(self):
+        strategy = _strategy()
+        strategy.require_health = MagicMock(return_value="diarization-cpu")
+
+        async def _fake(*args, **kwargs):
+            return DiarizationTestStatus(False, 0.0)
+
+        with patch(
+            "utils.media_clients.diarization_client._sample_audio_path",
+            return_value="/tmp/a.wav",
+        ), patch(
+            "utils.media_clients.diarization_client._audio_duration_seconds",
+            return_value=30.0,
+        ), patch(
+            "utils.media_clients.diarization_client._load_reference_annotation",
+            return_value=_turns_to_annotation([]),
+        ), patch(
+            "utils.media_clients.diarization_client._sample_reference_path",
+            return_value="/tmp/a.rttm",
+        ), patch.object(
+            DiarizationClientStrategy, "_diarize_once", side_effect=_fake
+        ):
+            with pytest.raises(RuntimeError):
+                strategy.run_eval()
 
 
 class TestReport(unittest.TestCase):

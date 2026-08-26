@@ -44,6 +44,23 @@ logger = logging.getLogger(__name__)
 # thread-safe), so a cold first call plus a long recording needs a wide timeout.
 REQUEST_TIMEOUT_S = 600
 
+DIARIZATION_EVAL_TASK_NAME = "pyannote_sample_der"
+
+# community-1's own published DER, for context in the report. It is measured on
+# AMI/DIHARD/VoxConverse, not on this 30 s clip, so it is recorded rather than
+# used as the gate.
+DIARIZATION_PUBLISHED_DER = 0.170
+DIARIZATION_PUBLISHED_DER_REF = (
+    "https://huggingface.co/pyannote/speaker-diarization-community-1"
+    " (AMI IHM 17.0%, DIHARD3 20.2%, VoxConverse 11.2%)"
+)
+
+# Gate for this clip. The reference annotation is the one shipped with the
+# sample, and a healthy pipeline scores far below this; the margin exists so a
+# boundary shifted by a few frames does not fail the run, while a genuinely
+# wrong speaker assignment does.
+DIARIZATION_DER_TARGET = 0.20
+
 
 def _sample_audio_path() -> str:
     """Path to pyannote's bundled 30 s two-speaker sample.
@@ -55,6 +72,38 @@ def _sample_audio_path() -> str:
     import pyannote.audio
 
     return str(Path(pyannote.audio.__file__).parent / "sample" / "sample.wav")
+
+
+def _sample_reference_path() -> str:
+    """Path to the hand-annotated RTTM shipped next to the sample recording."""
+    import pyannote.audio
+
+    return str(Path(pyannote.audio.__file__).parent / "sample" / "sample.rttm")
+
+
+def _load_reference_annotation(rttm_path: str):
+    """Read an RTTM file into a ``pyannote.core.Annotation``."""
+    from pyannote.core import Annotation, Segment
+
+    annotation = Annotation()
+    with open(rttm_path) as handle:
+        for line in handle:
+            fields = line.split()
+            if not fields or fields[0] != "SPEAKER":
+                continue
+            start, duration, speaker = float(fields[3]), float(fields[4]), fields[7]
+            annotation[Segment(start, start + duration)] = speaker
+    return annotation
+
+
+def _turns_to_annotation(turns):
+    """Convert served ``[{speaker,start,end}]`` turns into an Annotation."""
+    from pyannote.core import Annotation, Segment
+
+    annotation = Annotation()
+    for turn in turns:
+        annotation[Segment(turn["start"], turn["end"])] = turn["speaker"]
+    return annotation
 
 
 def _audio_duration_seconds(path: str) -> Optional[float]:
@@ -71,16 +120,96 @@ class DiarizationClientStrategy(BaseMediaStrategy):
     """Strategy for speaker-diarization models (pyannote community-1, etc.)."""
 
     def run_eval(self) -> None:
-        """Diarization has no eval workflow.
+        """Score the served model with the diarization error rate.
 
-        Accuracy is diarization error rate against a reference annotation, which
-        lm-evaluation-harness has no task for; the device port is gated on DER in
-        the tt-metal test suite instead. Fail loudly rather than emitting a
-        report that scores nothing.
+        DER is the standard diarization metric: the fraction of speaking time
+        attributed to the wrong speaker, plus missed speech and false alarm.
+        The reference is the hand annotation pyannote ships beside its sample
+        recording, so this measures the deployed pipeline against ground truth
+        rather than against another run of itself.
+
+        Lower is better, so the report inverts nothing: ``score`` is the DER and
+        the accuracy check passes when it is at or below the configured target.
         """
-        raise NotImplementedError(
-            "diarization has no eval workflow; accuracy is gated on diarization "
-            "error rate in the tt-metal on-device tests, not through lm-eval"
+        from pyannote.metrics.diarization import DiarizationErrorRate
+
+        logger.info(
+            f"Running evals for model: {self.model_spec.model_name} on device: {self.device.name}"
+        )
+        self.require_health()
+
+        audio_path = _sample_audio_path()
+        audio_duration = _audio_duration_seconds(audio_path)
+        reference = _load_reference_annotation(_sample_reference_path())
+
+        loop_start = time.monotonic()
+        status = asyncio.run(self._diarize_once(audio_path, audio_duration))
+        wall_clock_seconds = time.monotonic() - loop_start
+        if not status.status:
+            raise RuntimeError("diarization request failed; cannot score a DER")
+
+        hypothesis = _turns_to_annotation(status.turns)
+        der = float(DiarizationErrorRate()(reference, hypothesis))
+        reference_speakers = len(reference.labels())
+        speaker_count_matches = status.num_speakers == reference_speakers
+
+        logger.info(
+            f"DER={der:.5f} | speakers={status.num_speakers} "
+            f"(reference {reference_speakers}) | RTR={status.rtr}"
+        )
+
+        eval_data = [
+            {
+                "model": self.model_spec.model_name,
+                "device": self.device.name.lower(),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "task_type": "diarization",
+                "task_name": DIARIZATION_EVAL_TASK_NAME,
+                "score": der,
+                "published_score": DIARIZATION_PUBLISHED_DER,
+                "published_score_ref": DIARIZATION_PUBLISHED_DER_REF,
+                "num_speakers": status.num_speakers,
+                "reference_num_speakers": reference_speakers,
+                "speaker_count_matches": speaker_count_matches,
+                "rtr": status.rtr,
+                "latency": status.latency,
+                "throughput_rps": self._calculate_throughput_rps(
+                    1, wall_clock_seconds
+                ),
+                "performance_check": self._calculate_performance_check(
+                    status.latency, status.rtr
+                ),
+                "accuracy_check": self._calculate_accuracy_check(
+                    der, speaker_count_matches
+                ),
+            }
+        ]
+
+        eval_filename = (
+            Path(self.output_path)
+            / f"eval_{self.model_spec.model_id}"
+            / self.model_spec.hf_model_repo.replace("/", "__")
+            / f"results_{time.time()}.json"
+        )
+        eval_filename.parent.mkdir(parents=True, exist_ok=True)
+        with open(eval_filename, "w") as f:
+            json.dump(eval_data, f, indent=4)
+        logger.info(f"Evaluation data written to: {eval_filename}")
+
+    def _calculate_accuracy_check(
+        self, der: float, speaker_count_matches: bool
+    ) -> ReportCheckTypes:
+        """PASS when the DER is within target and the speaker count is right.
+
+        A DER can look acceptable while the pipeline splits or merges speakers,
+        so the speaker count is checked alongside it rather than folded in.
+        """
+        if not speaker_count_matches:
+            return ReportCheckTypes.FAIL
+        return (
+            ReportCheckTypes.PASS
+            if der <= DIARIZATION_DER_TARGET
+            else ReportCheckTypes.FAIL
         )
 
     def run_benchmark(self) -> list[DiarizationTestStatus]:
@@ -194,6 +323,7 @@ class DiarizationClientStrategy(BaseMediaStrategy):
             rtr=rtr,
             num_speakers=num_speakers,
             num_turns=len(turns),
+            turns=turns,
         )
 
     def _generate_report(

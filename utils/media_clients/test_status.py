@@ -164,12 +164,16 @@ class DiarizationTestStatus(BaseTestStatus):
         rtr: Optional[float] = None,
         num_speakers: Optional[int] = None,
         num_turns: Optional[int] = None,
+        turns: Optional[list] = None,
     ):
         super().__init__(status, elapsed)
         self.latency = latency
         self.rtr = rtr
         self.num_speakers = num_speakers
         self.num_turns = num_turns
+        # Kept out of to_dict(): the eval workflow scores these into a DER, and
+        # the per-call report should stay a summary rather than raw segments.
+        self.turns = turns or []
 
     def to_dict(self) -> Dict[str, Any]:
         return {
