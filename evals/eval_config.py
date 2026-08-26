@@ -2684,6 +2684,30 @@ _eval_config_list = [
         ],
     ),
     EvalConfig(
+        hf_model_repo="pyannote/speaker-diarization-community-1",
+        tasks=[
+            EvalTask(
+                # Scored by DiarizationClientStrategy.run_eval, which computes a
+                # diarization error rate against the hand annotation shipped with
+                # pyannote's sample recording. Media evals call the client
+                # directly (run_evals.run_media_evals), so no lm-eval task is
+                # involved and none exists for diarization.
+                task_name="pyannote_sample_der",
+                workflow_venv_type=None,
+                max_concurrent=None,
+                apply_chat_template=False,
+                score=EvalTaskScore(
+                    # community-1's published DER (AMI IHM); recorded for
+                    # context, since it is measured on full corpora rather than
+                    # on this 30 s clip.
+                    published_score=17.0,
+                    published_score_ref="https://huggingface.co/pyannote/speaker-diarization-community-1",
+                    score_func=lambda results: 0.0,
+                ),
+            ),
+        ],
+    ),
+    EvalConfig(
         hf_model_repo="stabilityai/stable-diffusion-3.5-large",
         tasks=[
             EvalTask(
