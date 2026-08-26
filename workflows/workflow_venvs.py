@@ -321,43 +321,22 @@ def setup_evals_audio(
 
 def _install_qwen3_asr_openai_eval_model(venv_config: VenvConfig) -> bool:
     """Copy the qwen3_asr_openai lmms-eval model into the installed lmms-eval
-    package and register it in the simple-model registry. Idempotent."""
-    import shutil
-    import subprocess
+    package and register it in the simple-model registry. Idempotent.
 
+    The copy/registration runs inside the target venv via run_command, like the
+    other setup_* steps: that keeps the whole setup path mockable by patching a
+    single seam (workflows.workflow_venvs.run_command) and keeps this function
+    from touching the host filesystem when it is only being exercised in tests.
+    """
     src = get_repo_root_path() / "evals" / "lmms_eval_models" / "qwen3_asr_openai.py"
-    if not src.exists():
-        logger.error(f"qwen3_asr_openai model source not found: {src}")
-        return False
-    try:
-        pkg_dir = subprocess.check_output(
-            [
-                str(venv_config.venv_python),
-                "-c",
-                "import os, lmms_eval; print(os.path.dirname(lmms_eval.__file__))",
-            ],
-            text=True,
-        ).strip()
-    except Exception as exc:  # noqa: BLE001
-        logger.error(f"Could not locate installed lmms_eval package: {exc}")
-        return False
-    dst = Path(pkg_dir) / "models" / "simple" / "qwen3_asr_openai.py"
-    shutil.copyfile(src, dst)
-    init_path = Path(pkg_dir) / "models" / "__init__.py"
-    init_src = init_path.read_text()
-    if "qwen3_asr_openai" not in init_src:
-        anchor = '    "whisper_tt": "WhisperTT",' + chr(10)
-        entry = '    "qwen3_asr_openai": "Qwen3ASROpenAI",' + chr(10)
-        if anchor in init_src:
-            init_src = init_src.replace(anchor, anchor + entry, 1)
-            init_path.write_text(init_src)
-        else:
-            logger.error(
-                "Could not register qwen3_asr_openai: whisper_tt anchor not found"
-            )
-            return False
-    logger.info("Installed qwen3_asr_openai lmms-eval model into %s", dst)
-    return True
+    installer = get_repo_root_path() / "evals" / "lmms_eval_models" / "install.py"
+    return (
+        run_command(
+            f"{venv_config.venv_python} {installer} {src}",
+            logger=logger,
+        )
+        == 0
+    )
 
 
 def setup_evals_embedding(
