@@ -12,8 +12,7 @@ import pytest
 from utils.media_clients.diarization_client import (
     DiarizationClientStrategy,
     _audio_duration_seconds,
-    _load_reference_annotation,
-    _turns_to_annotation,
+    _sample_audio_path,
 )
 from utils.media_clients.test_status import DiarizationTestStatus
 from workflows.workflow_types import ReportCheckTypes
@@ -71,6 +70,45 @@ def _wav_bytes(seconds: float, sample_rate: int = 16000) -> bytes:
         writer.setframerate(sample_rate)
         writer.writeframes(b"\x00\x00" * int(seconds * sample_rate))
     return buf.getvalue()
+
+
+def _fake_accuracy(reference_turns):
+    """Stand-in for tt-metal's accuracy module.
+
+    Real scoring is tested in tt-metal (``test_accuracy_helpers.py``); these
+    tests only need the client to route through it, so this keeps them runnable
+    without a tt-metal checkout while still exercising the real DER maths via
+    pyannote.metrics.
+    """
+    from pyannote.core import Annotation, Segment
+    from pyannote.metrics.diarization import DiarizationErrorRate
+
+    def _to_annotation(turns):
+        annotation = Annotation()
+        for turn in turns:
+            annotation[Segment(turn["start"], turn["end"])] = turn["speaker"]
+        return annotation
+
+    fake = MagicMock()
+    fake.PUBLISHED_DER = 0.17
+    fake.PUBLISHED_DER_REF = "https://huggingface.co/pyannote/speaker-diarization-community-1"
+    fake.ACCURACY_DER_MAX = 0.15
+    fake.sample_audio_path.return_value = "/tmp/a.wav"
+    fake.sample_reference_path.return_value = "/tmp/a.rttm"
+    fake.load_rttm.return_value = _to_annotation(reference_turns)
+    fake.turns_to_annotation.side_effect = _to_annotation
+
+    def _score(hypothesis, reference):
+        return {
+            "der": float(DiarizationErrorRate()(reference, hypothesis)),
+            "num_speakers": len(hypothesis.labels()),
+            "reference_num_speakers": len(reference.labels()),
+            "speaker_count_matches": len(hypothesis.labels())
+            == len(reference.labels()),
+        }
+
+    fake.score_against_reference.side_effect = _score
+    return fake
 
 
 def _strategy() -> DiarizationClientStrategy:
@@ -152,55 +190,61 @@ class TestDiarizeOnce(unittest.TestCase):
         assert status.status is False
 
 
-class TestReferenceAnnotation(unittest.TestCase):
-    """The DER reference is the RTTM shipped beside pyannote's sample."""
+class TestSharedScoring(unittest.TestCase):
+    """Scoring must come from tt-metal so both repos report the same number."""
 
-    def test_rttm_is_parsed_into_segments_per_speaker(self):
-        import tempfile
+    def test_eval_scoring_is_delegated_to_the_tt_metal_helpers(self):
+        import utils.media_clients.diarization_client as client
 
-        rttm = (
-            "SPEAKER sample 1 6.690 0.430 <NA> <NA> speaker90 <NA> <NA>\n"
-            "SPEAKER sample 1 7.550 0.800 <NA> <NA> speaker91 <NA> <NA>\n"
-            "\n"
+        fake = MagicMock()
+        with patch.object(client, "_accuracy", return_value=fake):
+            assert client._accuracy() is fake
+
+    def test_benchmark_sample_matches_the_tt_metal_sample(self):
+        """The two halves must measure the same recording.
+
+        The benchmark path resolves the sample locally so it needs no tt-metal
+        checkout; that shortcut is only safe while both resolve to one file.
+        """
+        pytest.importorskip("pyannote.audio")
+        accuracy = pytest.importorskip(
+            "models.demos.audio.pyannote_diarization.accuracy"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".rttm") as handle:
-            handle.write(rttm)
-            handle.flush()
-            annotation = _load_reference_annotation(handle.name)
-
-        assert sorted(annotation.labels()) == ["speaker90", "speaker91"]
-        # RTTM stores start + duration; the annotation must hold start + end.
-        first = next(iter(annotation.itertracks(yield_label=True)))
-        assert first[0].start == pytest.approx(6.690)
-        assert first[0].end == pytest.approx(7.120)
-
-    def test_served_turns_become_a_comparable_annotation(self):
-        annotation = _turns_to_annotation(
-            [
-                {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0},
-                {"speaker": "SPEAKER_01", "start": 1.0, "end": 2.5},
-            ]
-        )
-        assert sorted(annotation.labels()) == ["SPEAKER_00", "SPEAKER_01"]
+        assert _sample_audio_path() == accuracy.sample_audio_path()
 
 
 class TestAccuracyCheck(unittest.TestCase):
     """DER alone is not enough: a wrong speaker count must fail."""
 
+    def _check(self, der, speaker_count_matches):
+        with patch(
+            "utils.media_clients.diarization_client._accuracy",
+            return_value=_fake_accuracy(reference_turns=[]),
+        ):
+            return _strategy()._calculate_accuracy_check(der, speaker_count_matches)
+
     def test_low_der_with_matching_speaker_count_passes(self):
-        assert (
-            _strategy()._calculate_accuracy_check(0.01, True) == ReportCheckTypes.PASS
-        )
+        assert self._check(0.01, True) == ReportCheckTypes.PASS
 
     def test_high_der_fails(self):
-        assert (
-            _strategy()._calculate_accuracy_check(0.9, True) == ReportCheckTypes.FAIL
-        )
+        assert self._check(0.9, True) == ReportCheckTypes.FAIL
 
     def test_wrong_speaker_count_fails_even_with_a_low_der(self):
-        assert (
-            _strategy()._calculate_accuracy_check(0.0, False) == ReportCheckTypes.FAIL
-        )
+        assert self._check(0.0, False) == ReportCheckTypes.FAIL
+
+    def test_the_threshold_comes_from_tt_metal(self):
+        """The served model must be held to the same bar as the metal test."""
+        fake = _fake_accuracy(reference_turns=[])
+        fake.ACCURACY_DER_MAX = 0.5
+        with patch(
+            "utils.media_clients.diarization_client._accuracy", return_value=fake
+        ):
+            # 0.3 would fail under the real 0.15 gate; it passes here only
+            # because the threshold is read from the shared module.
+            assert (
+                _strategy()._calculate_accuracy_check(0.3, True)
+                == ReportCheckTypes.PASS
+            )
 
 
 class TestRunEval(unittest.TestCase):
@@ -232,17 +276,11 @@ class TestRunEval(unittest.TestCase):
                 return status
 
             with patch(
-                "utils.media_clients.diarization_client._sample_audio_path",
-                return_value="/tmp/a.wav",
+                "utils.media_clients.diarization_client._accuracy",
+                return_value=_fake_accuracy(reference_turns=turns),
             ), patch(
                 "utils.media_clients.diarization_client._audio_duration_seconds",
                 return_value=30.0,
-            ), patch(
-                "utils.media_clients.diarization_client._load_reference_annotation",
-                return_value=_turns_to_annotation(turns),
-            ), patch(
-                "utils.media_clients.diarization_client._sample_reference_path",
-                return_value="/tmp/a.rttm",
             ), patch.object(
                 DiarizationClientStrategy, "_diarize_once", side_effect=_fake
             ):
@@ -266,17 +304,11 @@ class TestRunEval(unittest.TestCase):
             return DiarizationTestStatus(False, 0.0)
 
         with patch(
-            "utils.media_clients.diarization_client._sample_audio_path",
-            return_value="/tmp/a.wav",
+            "utils.media_clients.diarization_client._accuracy",
+            return_value=_fake_accuracy(reference_turns=[]),
         ), patch(
             "utils.media_clients.diarization_client._audio_duration_seconds",
             return_value=30.0,
-        ), patch(
-            "utils.media_clients.diarization_client._load_reference_annotation",
-            return_value=_turns_to_annotation([]),
-        ), patch(
-            "utils.media_clients.diarization_client._sample_reference_path",
-            return_value="/tmp/a.rttm",
         ), patch.object(
             DiarizationClientStrategy, "_diarize_once", side_effect=_fake
         ):

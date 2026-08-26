@@ -14,6 +14,13 @@ wall-clock second -- because the request carries a recording of a known length.
 That is what this client measures, using the pyannoteAI-shaped API the service
 exposes: stage the audio through ``POST /v1/media/input`` + ``PUT``, then
 ``POST /v1/audio/diarize``.
+
+Accuracy is scored as a diarization error rate against the human annotation
+that ships with the sample recording. The scoring itself is imported from
+tt-metal's ``models.demos.audio.pyannote_diarization.accuracy``, the same
+module its on-device tests use, so the number reported here and the number the
+tt-metal suite asserts on are produced by identical code rather than by two
+implementations that could drift apart.
 """
 
 import asyncio
@@ -46,64 +53,31 @@ REQUEST_TIMEOUT_S = 600
 
 DIARIZATION_EVAL_TASK_NAME = "pyannote_sample_der"
 
-# community-1's own published DER, for context in the report. It is measured on
-# AMI/DIHARD/VoxConverse, not on this 30 s clip, so it is recorded rather than
-# used as the gate.
-DIARIZATION_PUBLISHED_DER = 0.170
-DIARIZATION_PUBLISHED_DER_REF = (
-    "https://huggingface.co/pyannote/speaker-diarization-community-1"
-    " (AMI IHM 17.0%, DIHARD3 20.2%, VoxConverse 11.2%)"
-)
 
-# Gate for this clip. The reference annotation is the one shipped with the
-# sample, and a healthy pipeline scores far below this; the margin exists so a
-# boundary shifted by a few frames does not fail the run, while a genuinely
-# wrong speaker assignment does.
-DIARIZATION_DER_TARGET = 0.20
+def _accuracy():
+    """The scoring helpers from tt-metal, imported lazily.
+
+    The tt-metal checkout is already on PYTHONPATH wherever the ttnn port runs
+    (``tt_port/tt_nn_accelerator`` imports from it the same way), but the
+    benchmark half of this client must keep working without it, so the import
+    is deferred to the eval path.
+    """
+    from models.demos.audio.pyannote_diarization import accuracy
+
+    return accuracy
 
 
 def _sample_audio_path() -> str:
     """Path to pyannote's bundled 30 s two-speaker sample.
 
-    Shipped inside ``pyannote.audio`` itself, so no fixture is committed here
-    and no download is needed. Importing ``pyannote.audio.sample`` is avoided
-    on purpose: it decodes the file eagerly at import time.
+    Kept here rather than taken from the tt-metal helper so the benchmark path
+    needs no tt-metal checkout. Importing ``pyannote.audio.sample`` is avoided
+    on purpose: it decodes the file eagerly at import time, which needs a
+    working torchcodec.
     """
     import pyannote.audio
 
     return str(Path(pyannote.audio.__file__).parent / "sample" / "sample.wav")
-
-
-def _sample_reference_path() -> str:
-    """Path to the hand-annotated RTTM shipped next to the sample recording."""
-    import pyannote.audio
-
-    return str(Path(pyannote.audio.__file__).parent / "sample" / "sample.rttm")
-
-
-def _load_reference_annotation(rttm_path: str):
-    """Read an RTTM file into a ``pyannote.core.Annotation``."""
-    from pyannote.core import Annotation, Segment
-
-    annotation = Annotation()
-    with open(rttm_path) as handle:
-        for line in handle:
-            fields = line.split()
-            if not fields or fields[0] != "SPEAKER":
-                continue
-            start, duration, speaker = float(fields[3]), float(fields[4]), fields[7]
-            annotation[Segment(start, start + duration)] = speaker
-    return annotation
-
-
-def _turns_to_annotation(turns):
-    """Convert served ``[{speaker,start,end}]`` turns into an Annotation."""
-    from pyannote.core import Annotation, Segment
-
-    annotation = Annotation()
-    for turn in turns:
-        annotation[Segment(turn["start"], turn["end"])] = turn["speaker"]
-    return annotation
 
 
 def _audio_duration_seconds(path: str) -> Optional[float]:
@@ -131,16 +105,16 @@ class DiarizationClientStrategy(BaseMediaStrategy):
         Lower is better, so the report inverts nothing: ``score`` is the DER and
         the accuracy check passes when it is at or below the configured target.
         """
-        from pyannote.metrics.diarization import DiarizationErrorRate
+        accuracy = _accuracy()
 
         logger.info(
             f"Running evals for model: {self.model_spec.model_name} on device: {self.device.name}"
         )
         self.require_health()
 
-        audio_path = _sample_audio_path()
+        audio_path = accuracy.sample_audio_path()
         audio_duration = _audio_duration_seconds(audio_path)
-        reference = _load_reference_annotation(_sample_reference_path())
+        reference = accuracy.load_rttm(accuracy.sample_reference_path())
 
         loop_start = time.monotonic()
         status = asyncio.run(self._diarize_once(audio_path, audio_duration))
@@ -148,13 +122,15 @@ class DiarizationClientStrategy(BaseMediaStrategy):
         if not status.status:
             raise RuntimeError("diarization request failed; cannot score a DER")
 
-        hypothesis = _turns_to_annotation(status.turns)
-        der = float(DiarizationErrorRate()(reference, hypothesis))
-        reference_speakers = len(reference.labels())
-        speaker_count_matches = status.num_speakers == reference_speakers
+        scored = accuracy.score_against_reference(
+            accuracy.turns_to_annotation(status.turns), reference
+        )
+        der = scored["der"]
+        reference_speakers = scored["reference_num_speakers"]
+        speaker_count_matches = scored["speaker_count_matches"]
 
         logger.info(
-            f"DER={der:.5f} | speakers={status.num_speakers} "
+            f"DER={der:.5f} | speakers={scored['num_speakers']} "
             f"(reference {reference_speakers}) | RTR={status.rtr}"
         )
 
@@ -166,9 +142,9 @@ class DiarizationClientStrategy(BaseMediaStrategy):
                 "task_type": "diarization",
                 "task_name": DIARIZATION_EVAL_TASK_NAME,
                 "score": der,
-                "published_score": DIARIZATION_PUBLISHED_DER,
-                "published_score_ref": DIARIZATION_PUBLISHED_DER_REF,
-                "num_speakers": status.num_speakers,
+                "published_score": accuracy.PUBLISHED_DER,
+                "published_score_ref": accuracy.PUBLISHED_DER_REF,
+                "num_speakers": scored["num_speakers"],
                 "reference_num_speakers": reference_speakers,
                 "speaker_count_matches": speaker_count_matches,
                 "rtr": status.rtr,
@@ -203,12 +179,14 @@ class DiarizationClientStrategy(BaseMediaStrategy):
 
         A DER can look acceptable while the pipeline splits or merges speakers,
         so the speaker count is checked alongside it rather than folded in.
+        The threshold is tt-metal's, so the served model and the on-device test
+        are held to the same bar.
         """
         if not speaker_count_matches:
             return ReportCheckTypes.FAIL
         return (
             ReportCheckTypes.PASS
-            if der <= DIARIZATION_DER_TARGET
+            if der <= _accuracy().ACCURACY_DER_MAX
             else ReportCheckTypes.FAIL
         )
 
