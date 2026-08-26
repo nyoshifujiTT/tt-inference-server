@@ -3156,6 +3156,14 @@ audio_tts_templates = [
         min_ram_gb=6,
         model_type=ModelType.AUDIO,
         inference_engine=InferenceEngine.VLLM.value,
+        # The TT adapter warms up (and captures the decode trace) itself while
+        # the engine starts -- see warmup_model_decode in the startup log. The
+        # generic background trace capture must therefore stay off: it drives
+        # /v1/completions with synthetic *text* prompts, which for a
+        # transcription-only model runs while a trace is already active
+        # ("Allocating device buffers is unsafe due to the existence of an
+        # active trace") and wedges the first real request.
+        has_builtin_warmup=True,
         device_model_specs=[
             DeviceModelSpec(
                 device=DeviceTypes.P150,
