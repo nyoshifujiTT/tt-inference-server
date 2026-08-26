@@ -59,6 +59,11 @@ class AsyncLogHandler(logging.Handler):
 
     def __init__(self, filename=None, max_bytes=104857600, backup_count=5):
         super().__init__()
+        # logging.Handler.__init__ registers self in logging._handlerList, so
+        # logging.shutdown() -- which dictConfig() calls via
+        # _clearExistingHandlers() -- can invoke close() on this instance before
+        # the rest of __init__ has run. Bind the attribute close() needs first.
+        self._listener = None
         _safe_stop_listener(AsyncLogHandler._active_listener)
         AsyncLogHandler._active_listener = None
 
@@ -84,11 +89,14 @@ class AsyncLogHandler(logging.Handler):
         AsyncLogHandler._active_listener = self._listener
 
     def emit(self, record):
+        if self._listener is None:
+            return
         self._queue.put_nowait(record)
 
     def close(self):
-        _safe_stop_listener(self._listener)
-        if AsyncLogHandler._active_listener is self._listener:
+        listener = getattr(self, "_listener", None)
+        _safe_stop_listener(listener)
+        if listener is not None and AsyncLogHandler._active_listener is listener:
             AsyncLogHandler._active_listener = None
         super().close()
 
