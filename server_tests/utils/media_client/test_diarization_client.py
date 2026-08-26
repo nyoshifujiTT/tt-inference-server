@@ -93,6 +93,9 @@ def _fake_accuracy(reference_turns):
     fake.PUBLISHED_DER = 0.17
     fake.PUBLISHED_DER_REF = "https://huggingface.co/pyannote/speaker-diarization-community-1"
     fake.ACCURACY_DER_MAX = 0.15
+    # No corpus by default, so the sample path is what runs unless a test says
+    # otherwise; a MagicMock here would be truthy and silently pick the corpus.
+    fake.corpus_root.return_value = None
     fake.sample_audio_path.return_value = "/tmp/a.wav"
     fake.sample_reference_path.return_value = "/tmp/a.rttm"
     fake.load_rttm.return_value = _to_annotation(reference_turns)
@@ -343,3 +346,110 @@ class TestReport(unittest.TestCase):
         assert report["benchmarks"]["num_requests"] == 2
         assert report["benchmarks"]["rtr"] == pytest.approx(5.5)
         assert report["benchmarks"]["latency"] == pytest.approx(5.0)
+
+
+class TestCorpusEval(unittest.TestCase):
+    """With a corpus available the eval must score it, not the 30 s sample."""
+
+    def _strategy_with_corpus(self, fake):
+        strategy = _strategy()
+        strategy.model_spec.hf_model_repo = "pyannote/speaker-diarization-community-1"
+        strategy.require_health = MagicMock(return_value="diarization-cpu")
+        fake.corpus_root.return_value = "/corpus"
+        fake.corpus_der.return_value = {
+            "der": 0.12,
+            "num_recordings": 3,
+            "per_recording": {"a": 0.10, "b": 0.11, "c": 0.15},
+        }
+        fake.PUBLISHED_CORPUS_DER = {"voxconverse": 0.112}
+        fake.CORPUS_DER_TOLERANCE = 0.05
+        return strategy
+
+    def test_corpus_result_is_scored_against_the_published_figure(self):
+        import json
+        import pathlib
+        import tempfile
+
+        fake = _fake_accuracy(reference_turns=[])
+        with tempfile.TemporaryDirectory() as out:
+            strategy = self._strategy_with_corpus(fake)
+            strategy.output_path = out
+            with patch(
+                "utils.media_clients.diarization_client._accuracy", return_value=fake
+            ):
+                strategy.run_eval()
+
+            report = json.loads(
+                next(pathlib.Path(out).rglob("results_*.json")).read_text()
+            )[0]
+
+        assert report["task_name"] == "voxconverse_der"
+        assert report["score"] == pytest.approx(0.12)
+        assert report["num_recordings"] == 3
+        assert report["published_score"] == pytest.approx(0.112)
+        # 0.12 is within 0.112 + 0.05, so this run passes.
+        assert report["accuracy_check"] == ReportCheckTypes.PASS
+        # The single-sample path must not have run.
+        fake.sample_audio_path.assert_not_called()
+
+    def test_a_corpus_der_far_above_the_published_figure_fails(self):
+        import json
+        import pathlib
+        import tempfile
+
+        fake = _fake_accuracy(reference_turns=[])
+        with tempfile.TemporaryDirectory() as out:
+            strategy = self._strategy_with_corpus(fake)
+            strategy.output_path = out
+            fake.corpus_der.return_value = {
+                "der": 0.40,  # published 0.112 + tolerance 0.05 = 0.162
+                "num_recordings": 3,
+                "per_recording": {"a": 0.4},
+            }
+            with patch(
+                "utils.media_clients.diarization_client._accuracy", return_value=fake
+            ):
+                strategy.run_eval()
+
+            report = json.loads(
+                next(pathlib.Path(out).rglob("results_*.json")).read_text()
+            )[0]
+
+        assert report["accuracy_check"] == ReportCheckTypes.FAIL
+
+    def test_without_a_corpus_the_bundled_sample_is_used(self):
+        import tempfile
+
+        turns = [
+            {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0},
+            {"speaker": "SPEAKER_01", "start": 1.0, "end": 2.0},
+        ]
+        status = DiarizationTestStatus(
+            True, 5.0, latency=4.9, rtr=6.0, num_speakers=2, num_turns=2, turns=turns
+        )
+        fake = _fake_accuracy(reference_turns=turns)
+        fake.corpus_root.return_value = None
+
+        async def _fake_call(*args, **kwargs):
+            return status
+
+        with tempfile.TemporaryDirectory() as out:
+            strategy = _strategy()
+            strategy.output_path = out
+            strategy.model_spec.hf_model_repo = "pyannote/speaker-diarization-community-1"
+            strategy.require_health = MagicMock(return_value="diarization-cpu")
+            strategy.get_performance_targets = MagicMock(
+                return_value=MagicMock(ttft_ms=None, rtr=None, tolerance=0.1)
+            )
+            with patch(
+                "utils.media_clients.diarization_client._accuracy", return_value=fake
+            ), patch(
+                "utils.media_clients.diarization_client._audio_duration_seconds",
+                return_value=30.0,
+            ), patch.object(
+                DiarizationClientStrategy, "_diarize_once", side_effect=_fake_call
+            ):
+                strategy.run_eval()
+
+        fake.corpus_der.assert_not_called()
+        fake.sample_audio_path.assert_called()

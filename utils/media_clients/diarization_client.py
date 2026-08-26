@@ -26,6 +26,7 @@ implementations that could drift apart.
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 import wave
@@ -98,9 +99,14 @@ class DiarizationClientStrategy(BaseMediaStrategy):
 
         DER is the standard diarization metric: the fraction of speaking time
         attributed to the wrong speaker, plus missed speech and false alarm.
-        The reference is the hand annotation pyannote ships beside its sample
-        recording, so this measures the deployed pipeline against ground truth
-        rather than against another run of itself.
+
+        Scores a real corpus when ``DIARIZATION_CORPUS_DIR`` points at one, so
+        the result can be held against the DER this model is published as
+        scoring. Falls back to the 30 s sample pyannote ships otherwise: that
+        still measures the deployed pipeline against a human annotation rather
+        than against another run of itself, but one clean two-speaker clip says
+        nothing about overlap, speaker count or noise, and its DER is not
+        comparable to any published figure.
 
         Lower is better, so the report inverts nothing: ``score`` is the DER and
         the accuracy check passes when it is at or below the configured target.
@@ -112,6 +118,30 @@ class DiarizationClientStrategy(BaseMediaStrategy):
         )
         self.require_health()
 
+        corpus_name = os.environ.get("DIARIZATION_CORPUS_NAME", "voxconverse")
+        corpus = accuracy.corpus_root(corpus_name)
+        if corpus:
+            eval_data = self._eval_over_corpus(accuracy, corpus, corpus_name)
+        else:
+            logger.info(
+                "DIARIZATION_CORPUS_DIR is unset; scoring the bundled 30 s sample. "
+                "Set it to a corpus to compare against the published DER."
+            )
+            eval_data = self._eval_over_sample(accuracy)
+
+        eval_filename = (
+            Path(self.output_path)
+            / f"eval_{self.model_spec.model_id}"
+            / self.model_spec.hf_model_repo.replace("/", "__")
+            / f"results_{time.time()}.json"
+        )
+        eval_filename.parent.mkdir(parents=True, exist_ok=True)
+        with open(eval_filename, "w") as f:
+            json.dump(eval_data, f, indent=4)
+        logger.info(f"Evaluation data written to: {eval_filename}")
+
+    def _eval_over_sample(self, accuracy) -> list:
+        """Score the single bundled sample against its shipped annotation."""
         audio_path = accuracy.sample_audio_path()
         audio_duration = _audio_duration_seconds(audio_path)
         reference = accuracy.load_rttm(accuracy.sample_reference_path())
@@ -160,17 +190,66 @@ class DiarizationClientStrategy(BaseMediaStrategy):
                 ),
             }
         ]
+        return eval_data
 
-        eval_filename = (
-            Path(self.output_path)
-            / f"eval_{self.model_spec.model_id}"
-            / self.model_spec.hf_model_repo.replace("/", "__")
-            / f"results_{time.time()}.json"
+    def _eval_over_corpus(self, accuracy, root: str, corpus_name: str) -> list:
+        """Score a whole corpus so the DER is comparable to the published one.
+
+        Every recording goes through the served endpoint, one at a time, and the
+        metric is accumulated across them rather than averaged per file -- the
+        same way the published figures are computed, so a long recording weighs
+        more than a short one.
+        """
+        limit = os.environ.get("DIARIZATION_CORPUS_LIMIT")
+        limit = int(limit) if limit else None
+
+        def diarize(wav_path):
+            status = asyncio.run(
+                self._diarize_once(wav_path, _audio_duration_seconds(wav_path))
+            )
+            if not status.status:
+                raise RuntimeError(f"diarization request failed for {wav_path}")
+            return status.turns
+
+        loop_start = time.monotonic()
+        scored = accuracy.corpus_der(diarize, root, limit=limit)
+        wall_clock_seconds = time.monotonic() - loop_start
+
+        published = accuracy.PUBLISHED_CORPUS_DER.get(corpus_name)
+        ceiling = (
+            published + accuracy.CORPUS_DER_TOLERANCE if published is not None else None
         )
-        eval_filename.parent.mkdir(parents=True, exist_ok=True)
-        with open(eval_filename, "w") as f:
-            json.dump(eval_data, f, indent=4)
-        logger.info(f"Evaluation data written to: {eval_filename}")
+        passed = ceiling is not None and scored["der"] <= ceiling
+
+        logger.info(
+            f"{corpus_name} DER={scored['der']:.5f} over "
+            f"{scored['num_recordings']} recordings (published {published})"
+        )
+
+        return [
+            {
+                "model": self.model_spec.model_name,
+                "device": self.device.name.lower(),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "task_type": "diarization",
+                "task_name": f"{corpus_name}_der",
+                "score": scored["der"],
+                "published_score": published,
+                "published_score_ref": accuracy.PUBLISHED_DER_REF,
+                "num_recordings": scored["num_recordings"],
+                "per_recording_der": scored["per_recording"],
+                "throughput_rps": self._calculate_throughput_rps(
+                    scored["num_recordings"], wall_clock_seconds
+                ),
+                # Latency and RTR are per-request figures; the benchmark
+                # workflow reports them, so they are left out here rather than
+                # averaged over recordings of different lengths.
+                "performance_check": ReportCheckTypes.NA,
+                "accuracy_check": (
+                    ReportCheckTypes.PASS if passed else ReportCheckTypes.FAIL
+                ),
+            }
+        ]
 
     def _calculate_accuracy_check(
         self, der: float, speaker_count_matches: bool
