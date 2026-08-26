@@ -569,7 +569,11 @@ curl -s http://127.0.0.1:8000/v1/jobs/$JOB -H 'Authorization: Bearer your-secret
 
 `benchmarking/run_benchmarks.py` covers the served endpoint: `ModelType.DIARIZATION` selects `BenchmarkTaskDiarization`, so the sweep is a single diarization-typed run rather than the LLM prompt-length sweep.
 
-There is no `evals/run_evals.py` entry for diarization, and that is deliberate: the eval workflow drives `lm-evaluation-harness`, whose `--model` classes cover text, ASR and embeddings but have no diarization task. Speaker diarization is scored with the diarization error rate (`pyannote.metrics`) instead, which is what the device port is gated on: `models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py` asserts `DER < 0.05` for the on-device pipeline against the all-CPU one, plus an exact speaker-count match. `run_evals.py` raises `No evaluation tasks defined for model:` if pointed at this model, rather than running something meaningless.
+`evals/run_evals.py` covers it too. Media model types are dispatched to `run_media_evals`, which calls the client's `run_eval` directly rather than going through `lm-evaluation-harness` — so the absence of an lm-eval diarization task is no obstacle, the same way the TTS model scores itself.
+
+The metric is the diarization error rate, the standard for this task: the fraction of speaking time attributed to the wrong speaker, plus missed speech and false alarm. The reference is the hand annotation (`sample.rttm`) that ships beside pyannote's sample recording, so the eval scores the served pipeline against ground truth rather than against another run of itself. The speaker count is reported and checked alongside the DER, because a pipeline that splits or merges speakers can still post an acceptable DER. Measured on a p150: `DER = 0.052` with the expected two speakers, against community-1's published 0.17 on AMI IHM.
+
+The tt-metal suite gates a different comparison — `test_diarization_e2e_ondevice.py` asserts `DER < 0.05` for the on-device pipeline against the all-CPU one, which catches a device port that drifts from the reference implementation. The eval workflow catches the pipeline being wrong in absolute terms.
 
 
 
