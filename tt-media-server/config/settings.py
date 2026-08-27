@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     model_weights_path: str = ""
     training_model: Optional[str] = None
     chat_template_kwargs: dict = {}  # extra kwargs passed to apply_chat_template
+    tokenizer_type: str = ""  # AutoTokenizer tokenizer_type
     preprocessing_model_weights_path: str = ""
     # Optional external ASR endpoint (OpenAI /v1/audio/transcriptions) used by
     # the diarized-transcription path to transcribe each speaker turn. When
@@ -65,6 +66,8 @@ class Settings(BaseSettings):
     sdxl_image_resolution: tuple = (1024, 1024)
 
     # Queue and batch settings
+    # Outstanding work (queued + running) before HTTP 429. Wired into
+    # Scheduler.task_queue capacity and JobManager admission.
     max_queue_size: int = 5000
     max_batch_size: int = 1
     max_batch_delay_time_ms: Optional[int] = None
@@ -116,6 +119,7 @@ class Settings(BaseSettings):
     canary_deep_probe_timeout_seconds: float = 60.0
 
     # Job management settings
+    # In-memory job-record cap, including completed jobs. HTTP 503 when full.
     max_jobs: int = 10000
     job_cleanup_interval_seconds: int = 300
     job_retention_seconds: int = 86400
@@ -137,6 +141,25 @@ class Settings(BaseSettings):
     audio_task: str = AudioTasks.TRANSCRIBE.value
     audio_language: str = "English"
 
+    # Client-supplied media URL download settings (#4974).
+    # Presigned S3/GCS GET URLs are plain https URLs: validation covers scheme
+    # and hostname only, so query-string auth passes through untouched.
+    media_url_download_enabled: bool = True
+    # Comma-separated hostnames, exact ("bucket.s3.us-east-1.amazonaws.com")
+    # or label-anchored wildcards ("*.s3.us-east-1.amazonaws.com"). REQUIRED
+    # for URL downloads: while empty, every URL-valued media field is refused
+    # with 400 — the allowlist is the SSRF guard, and it is checked again on
+    # every redirect hop.
+    media_url_allowed_domains: str = ""
+    # 7,500,000 bytes base64-encode to exactly MAX_BASE64_IMAGE_LEN
+    # (10,000,000 chars, domain/video_i2v_generate_request.py). A larger
+    # default would pass the endpoint and then fail the field cap when an
+    # SP-runner worker re-validates ImagePromptEntry mid-job.
+    media_url_max_bytes: int = 7_500_000
+    # Total deadline for one asset: covers redirects and the full body read.
+    media_url_timeout_seconds: float = 30.0
+    media_url_max_redirects: int = 5
+
     # Telemetry settings
     enable_telemetry: bool = True
     prometheus_endpoint: str = "/metrics"
@@ -154,6 +177,16 @@ class Settings(BaseSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
+        # CI / the v2 orchestrator pass DEVICE as "blackhole_galaxy"
+        # (device_type.name.lower()), but the media-server DeviceTypes value is the
+        # short form "bh-galaxy". Canonicalize once here so every consumer of
+        # settings.device (config overrides, runner_utils mesh/grid setup, telemetry)
+        # sees the enum value; any other device string passes through unchanged.
+        if self.device:
+            self.device = {"blackhole_galaxy": "bh-galaxy"}.get(
+                self.device, self.device
+            )
 
         self.sdxl_image_resolution = tuple(self.sdxl_image_resolution)
         if self.sdxl_image_resolution not in SDXL_VALID_IMAGE_RESOLUTIONS:
@@ -327,11 +360,14 @@ class Settings(BaseSettings):
             ModelRunners.TT_QWEN_IMAGE.value,
             ModelRunners.TT_MOCHI_1.value,
             ModelRunners.TT_WAN_2_2.value,
+            ModelRunners.TT_WAN_2_2_T2V_PRODIA.value,
             ModelRunners.TT_WAN_2_2_I2V.value,
             ModelRunners.TT_WAN_2_2_I2V_PRODIA.value,
             ModelRunners.TT_WAN_2_2_I2V_ANISORA.value,
             ModelRunners.TT_WAN_2_2_I2V_DISTILL.value,
             ModelRunners.TT_WAN_2_2_I2V_LORA.value,
+            ModelRunners.TT_WAN_2_2_I2V_LIGHTNING.value,
+            ModelRunners.TT_MINIMAX_H3_T2VA.value,
         ]:
             self.default_throttle_level = None
 

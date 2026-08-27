@@ -59,7 +59,6 @@ void configureEnv() {
   setenv("PREFIX_CACHE_HIT_THRESHOLD", "0", 1);
 
   // Socket config: prefill connects as DEALER to our mock ROUTER (direct mode)
-  setenv("SOCKET_TRANSPORT", "zmq", 1);
   setenv("SOCKET_HOST", "127.0.0.1", 1);
   setenv("SOCKET_PORT", std::to_string(MOCK_DECODE_PORT).c_str(), 1);
   setenv("USE_PREFILL_GATEWAY", "0", 1);
@@ -367,6 +366,11 @@ TEST_F(PrefillIntegrationTest, PrefillRequest_TriggersSessionAllocation) {
   auto seq = server->taskQueue().receive();
   ASSERT_NE(seq, nullptr);
   EXPECT_GT(seq->getNumPromptTokens(), 0u);
+
+  ASSERT_TRUE(seq->getKVPositionId().has_value())
+      << "new prefill session must set kv_position_id (first free KV index)";
+  EXPECT_EQ(*seq->getKVPositionId(), 0u)
+      << "new prefill session first free KV index must be 0";
 
   // Verify decode_position_id propagated to the Sequence.
   EXPECT_EQ(seq->getDecodePositionId(), 5)
@@ -702,10 +706,8 @@ TEST_F(PrefillIntegrationTest, SlotCopy_TriggeredWhenSessionInFlight) {
     ASSERT_TRUE(received)
         << "Request C: expected ALLOCATE (session is in-flight)";
     EXPECT_EQ(memReq.action, tt::domain::MemoryManagementAction::ALLOCATE);
-    ASSERT_TRUE(memReq.slotIdToCopyFrom.has_value())
-        << "Request C: ALLOCATE should have slotIdToCopyFrom (slot copy)";
-    EXPECT_EQ(*memReq.slotIdToCopyFrom, 0u)
-        << "Request C: slotIdToCopyFrom should be slot 0 (request A's slot)";
+    EXPECT_FALSE(memReq.slotIdToCopyFrom.has_value())
+        << "Request C: in-flight session is not copy-eligible in prefill mode";
 
     // Respond to ALLOCATE: assign slot 1.
     tt::domain::ManageMemoryResult memRes{};
@@ -714,13 +716,11 @@ TEST_F(PrefillIntegrationTest, SlotCopy_TriggeredWhenSessionInFlight) {
     memRes.slotId = 1;
     server->memoryResultQueue().push(memRes);
 
-    // The sequence for C should be flagged as a continuation (slot copy).
+    // No slot copy → C processes the full prompt (not a continuation).
     auto seq = server->taskQueue().receive();
     ASSERT_NE(seq, nullptr) << "Request C: no Sequence";
-    EXPECT_TRUE(seq->isContinuation())
-        << "Request C: must be a continuation (slot copy)";
-    ASSERT_TRUE(seq->getKVPositionId().has_value())
-        << "Request C: slot copy should set kv_position_id";
+    EXPECT_FALSE(seq->isContinuation())
+        << "Request C: must not be a continuation (no slot copy)";
     prefillSlotC = seq->getPrefillKVCacheSlot();
 
     // Complete request C.
@@ -1059,10 +1059,8 @@ TEST_F(PrefillIntegrationTest, SlotCopy_CapsAtCommittedBlocksDuringExtension) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     ASSERT_TRUE(received) << "C: expected ALLOCATE (session in-flight)";
-    ASSERT_TRUE(memReq.slotIdToCopyFrom.has_value())
-        << "C: ALLOCATE should carry slotIdToCopyFrom (slot copy)";
-    EXPECT_EQ(*memReq.slotIdToCopyFrom, sourceSlot)
-        << "C: should copy from the source session's slot";
+    EXPECT_FALSE(memReq.slotIdToCopyFrom.has_value())
+        << "C: in-flight session is not copy-eligible in prefill mode";
 
     tt::domain::ManageMemoryResult memRes{};
     memRes.taskId = memReq.taskId;
@@ -1072,16 +1070,8 @@ TEST_F(PrefillIntegrationTest, SlotCopy_CapsAtCommittedBlocksDuringExtension) {
 
     auto seq = server->taskQueue().receive();
     ASSERT_NE(seq, nullptr) << "C: no Sequence";
-    EXPECT_TRUE(seq->isContinuation()) << "C: must be a slot-copy continuation";
-    ASSERT_TRUE(seq->getKVPositionId().has_value());
-    // The crux: copy is capped at the 3 RESIDENT blocks (96 tokens), so
-    // kv_position_id is the first free KV index and the 4th block (32 tokens)
-    // is prefilled locally. Without the cap the copy would take all 4 blocks
-    // (kv_position_id 128, 0 delta tokens) and read the uncomputed 4th block.
-    EXPECT_EQ(*seq->getKVPositionId(), 96u)
-        << "C: copy must stop at the resident prefix (3 blocks = 96 tokens)";
-    EXPECT_EQ(seq->getNumPromptTokens(), 32u)
-        << "C: the 4th (non-resident) block must be prefilled locally";
+    EXPECT_FALSE(seq->isContinuation())
+        << "C: must not be a continuation (no slot copy)";
 
     tt::test::WorkerResponse(seq->taskId)
         .tokenWithFlags(99, tt::ipc::SharedToken::FLAG_FINAL)

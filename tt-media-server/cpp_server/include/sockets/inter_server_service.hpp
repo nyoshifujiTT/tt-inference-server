@@ -44,6 +44,12 @@ class InterServerService {
   using PrefillCancelCallback =
       std::function<void(const CancelPrefillMessage& message)>;
 
+  using SlotReservationRequestCallback =
+      std::function<void(const SlotReservationRequestMessage& message)>;
+
+  using SlotReservationResponseCallback =
+      std::function<void(const SlotReservationResponseMessage& message)>;
+
   InterServerService();
   ~InterServerService();
 
@@ -80,6 +86,8 @@ class InterServerService {
    *                 result of mapSamplingParams() so global overrides like
    *                 USE_FAST_MODE are honoured. Defaulted SamplingParams{}
    *                 means "use prefill-side defaults".
+   * @param traceparent W3C traceparent of the decode-side Sentry
+   *                 transaction (empty = tracing disabled).
    * @return true if sent successfully
    */
   bool sendPrefillRequest(uint32_t taskId,
@@ -88,7 +96,8 @@ class InterServerService {
                           std::optional<int> maxTokens = std::nullopt,
                           std::optional<uint32_t> slotId = std::nullopt,
                           const tt::domain::llm::SamplingParams& sampling = {},
-                          int decodePositionId = 0, int decodeSkipTokens = 0);
+                          int decodePositionId = 0, int decodeSkipTokens = 0,
+                          const std::string& traceparent = {});
 
   /**
    * @brief Send prefill result back to the decode server
@@ -104,6 +113,11 @@ class InterServerService {
   bool sendPrefillCancel(uint32_t taskId);
 
   bool sendPrefillCacheBlocksAdded(const std::vector<uint64_t>& blockHashes);
+
+  bool sendSlotReservationRequest(const SlotReservationRequestMessage& message);
+
+  bool sendSlotReservationResponse(
+      const SlotReservationResponseMessage& message);
 
   /**
    * @brief Set callback for when prefill server receives a request
@@ -121,6 +135,10 @@ class InterServerService {
    * @param callback Function to call when prefill is complete
    */
   void onPrefillComplete(PrefillCompleteCallback callback);
+
+  void onSlotReservationRequest(SlotReservationRequestCallback callback);
+
+  void onSlotReservationResponse(SlotReservationResponseCallback callback);
 
   /**
    * @brief Set callback for connection lost events
@@ -162,6 +180,8 @@ class InterServerService {
   PrefillRequestedCallback prefillRequestedCallback;
   PrefillCancelCallback prefillCancelCallback;
   PrefillCompleteCallback prefillCompleteCallback;
+  SlotReservationRequestCallback slotReservationRequestCallback;
+  SlotReservationResponseCallback slotReservationResponseCallback;
   bool enabled = false;
   tt::config::LLMMode llmMode = tt::config::LLMMode::REGULAR;
   bool gatewayMode = false;

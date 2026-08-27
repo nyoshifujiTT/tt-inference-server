@@ -21,19 +21,23 @@
 
 #include "api/error_response.hpp"
 #include "api/route_registry.hpp"
+#include "config/build_info.hpp"
 #include "config/defaults.hpp"
 #include "config/settings.hpp"
-#include "dynamo/dynamo_endpoint.hpp"
+#include "dynamo/worker_server.hpp"
 #include "metrics/metrics.hpp"
 #include "profiling/tracy.hpp"
 #include "runtime/worker/blaze_worker_metrics_renderer.hpp"
 #include "runtime/worker/single_process_worker_metrics.hpp"
+#include "runtime/worker/tts_worker_metrics_renderer.hpp"
 #include "runtime/worker/worker_manager.hpp"
 #include "runtime/worker/worker_metrics_aggregator.hpp"
 #include "runtime/worker/worker_metrics_shm.hpp"
 #include "services/llm_pipeline.hpp"
 #include "services/llm_service.hpp"
 #include "services/service_container.hpp"
+#include "services/tts_service.hpp"
+#include "telemetry/sentry_tracing.hpp"
 #include "utils/logger.hpp"
 #include "utils/service_factory.hpp"
 
@@ -81,6 +85,8 @@ tt::worker::MetricsLayout metricsLayoutFromConfig() {
       return tt::worker::MetricsLayout::BLAZE_RUNNER;
     case tt::config::ModelService::EMBEDDING:
       return tt::worker::MetricsLayout::EMBEDDING;
+    case tt::config::ModelService::TTS:
+      return tt::worker::MetricsLayout::TTS_RUNNER;
     case tt::config::ModelService::IMAGE:
       return tt::worker::MetricsLayout::UNKNOWN;
   }
@@ -221,23 +227,38 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  // Sentry distributed tracing (no-op without SENTRY_DSN). Initialized after
+  // the service fork+execv'd its workers so the SDK runs only in this node
+  // process; workers are never instrumented.
+  tt::telemetry::init(std::string(tt::config::kInferenceServerVersion),
+                      tt::config::logInstanceTag());
+
   // Wire the aggregator now that the WorkerManager exists. Workers may still
   // be attaching to the segment; renderers tolerate empty/UNKNOWN slots.
   if (shm != nullptr) {
     auto& agg = tt::worker::WorkerMetricsAggregator::instance();
     tt::worker::WorkerManager* mgr = nullptr;
-    auto llm = std::dynamic_pointer_cast<tt::services::LLMService>(
-        tt::services::ServiceContainer::instance().getService(
-            tt::config::ModelService::LLM));
-    if (llm) {
+    auto& container = tt::services::ServiceContainer::instance();
+    if (auto llm = std::dynamic_pointer_cast<tt::services::LLMService>(
+            container.getService(tt::config::ModelService::LLM))) {
       mgr = llm->getWorkerManager();
+    } else if (auto tts = std::dynamic_pointer_cast<tt::services::TtsService>(
+                   container.getService(tt::config::ModelService::TTS))) {
+      mgr = tts->getWorkerManager();
     }
     std::vector<tt::worker::MetricsLayout> layoutByWorker(
         numWorkers, metricsLayoutFromConfig());
     agg.initialize(shm.get(), mgr, std::move(layoutByWorker));
+    // Only the renderer matching the configured layout ever builds its
+    // families (prebuildAll dispatches per worker layout, and a process
+    // serves exactly one MODEL_SERVICE), so registering both is safe despite
+    // the shared tt_worker_* metric names.
     agg.registerRenderer(
         tt::worker::MetricsLayout::BLAZE_RUNNER,
         std::make_unique<tt::worker::SpPipelineWorkerMetricsRenderer>());
+    agg.registerRenderer(
+        tt::worker::MetricsLayout::TTS_RUNNER,
+        std::make_unique<tt::worker::TtsWorkerMetricsRenderer>());
     agg.prebuildAll();
   }
 
@@ -358,7 +379,7 @@ int main(int argc, char* argv[]) {
   // enabled (it is a backend-worker plane, separate from the OpenAI HTTP
   // surface). Routes through the same LLMPipeline as HTTP so prefix caching,
   // session reuse, and disaggregation all apply.
-  std::unique_ptr<tt::dynamo::DynamoEndpoint> dynamoEndpoint;
+  std::unique_ptr<tt::dynamo::DynamoWorkerServer> dynamoWorkerServer;
   if (modelSvc == tt::config::ModelService::LLM &&
       tt::config::dynamoEndpointEnabled()) {
     auto llmService = std::dynamic_pointer_cast<tt::services::LLMService>(
@@ -367,7 +388,7 @@ int main(int argc, char* argv[]) {
     if (!llmService) {
       TT_LOG_ERROR(
           "[Main] DYNAMO_ENDPOINT_ENABLED=1 but LLM service is not "
-          "registered; skipping Dynamo endpoint.");
+          "registered; skipping Dynamo worker server.");
     } else {
       auto pipeline = std::make_shared<tt::services::LLMPipeline>(
           llmService,
@@ -375,31 +396,85 @@ int main(int argc, char* argv[]) {
           tt::services::ServiceContainer::instance().disaggregation(),
           tt::services::ServiceContainer::instance().socket());
 
-      tt::dynamo::DynamoEndpoint::Options opts;
+      tt::dynamo::DynamoWorkerServer::Options opts;
       opts.bind_host = tt::config::dynamoBindHost();
+      opts.bind_port = tt::config::dynamoBindPort();
       opts.namespace_name = tt::config::dynamoNamespace();
       opts.component = tt::config::dynamoComponent();
       opts.endpoint = tt::config::dynamoEndpointName();
+      const std::string discoveryBackend = tt::config::dynamoDiscoveryBackend();
+      if (discoveryBackend == "kubernetes") {
+        opts.backend = tt::dynamo::DiscoveryBackend::KUBERNETES;
+      } else if (discoveryBackend == "etcd") {
+        opts.backend = tt::dynamo::DiscoveryBackend::ETCD;
+      } else {
+        TT_LOG_ERROR(
+            "[Main] Unknown DYNAMO_DISCOVERY_BACKEND='{}'; expected 'etcd' or "
+            "'kubernetes'. Falling back to 'etcd'.",
+            discoveryBackend);
+        opts.backend = tt::dynamo::DiscoveryBackend::ETCD;
+      }
+      // Etcd backend.
       opts.etcd_endpoints = tt::config::dynamoEtcdEndpoints();
       opts.etcd_lease_ttl_secs = tt::config::dynamoEtcdLeaseTtlSecs();
+      // Model Deployment Card capabilities + Dynamo-native routing (shared by
+      // both discovery backends).
+      if (const char* v = std::getenv("DYNAMO_MODEL_TYPE"); v && *v) {
+        opts.model_type = v;
+      } else if (tt::config::dynamoRoutingEnabled() &&
+                 tt::config::llmMode() == tt::config::LLMMode::PREFILL_ONLY) {
+        // Released Dynamo rejects Tokens+Empty; advertise the compatible
+        // Prefill capability while still setting worker_type=prefill.
+        opts.model_type = "Prefill";
+      }
+      if (const char* v = std::getenv("DYNAMO_MODEL_INPUT"); v && *v) {
+        opts.model_input = v;
+      }
+      if (const char* v = std::getenv("DYNAMO_WORKER_TYPE"); v && *v) {
+        opts.worker_type = v;
+      } else if (tt::config::dynamoRoutingEnabled()) {
+        switch (tt::config::llmMode()) {
+          case tt::config::LLMMode::PREFILL_ONLY:
+            opts.worker_type = "prefill";
+            opts.needs = {{"decode"}};
+            break;
+          case tt::config::LLMMode::DECODE_ONLY:
+            opts.worker_type = "decode";
+            break;
+          case tt::config::LLMMode::REGULAR:
+            opts.worker_type = "aggregated";
+            break;
+        }
+      }
+      // Kubernetes backend.
+      opts.kube_api_server = tt::config::dynamoKubeApiServer();
+      opts.kube_token_path = tt::config::dynamoKubeTokenPath();
+      opts.kube_validate_cert = tt::config::dynamoKubeValidateCert();
+      opts.pod_namespace = tt::config::dynamoPodNamespace();
+      opts.pod_name = tt::config::dynamoPodName();
+      opts.pod_uid = tt::config::dynamoPodUid();
 
       try {
-        dynamoEndpoint =
-            std::make_unique<tt::dynamo::DynamoEndpoint>(pipeline, opts);
-        dynamoEndpoint->start();
+        dynamoWorkerServer = std::make_unique<tt::dynamo::DynamoWorkerServer>(
+            pipeline,
+            tt::services::ServiceContainer::instance().disaggregation(), opts);
+        dynamoWorkerServer->start();
       } catch (const std::exception& e) {
-        TT_LOG_ERROR("[Main] Dynamo endpoint failed to start: {}", e.what());
-        dynamoEndpoint.reset();
+        TT_LOG_ERROR("[Main] Dynamo worker server failed to start: {}",
+                     e.what());
+        dynamoWorkerServer.reset();
       }
     }
   }
 
   drogon::app().run();
 
-  if (dynamoEndpoint) {
-    dynamoEndpoint->stop();
-    dynamoEndpoint.reset();
+  if (dynamoWorkerServer) {
+    dynamoWorkerServer->stop();
+    dynamoWorkerServer.reset();
   }
+
+  tt::telemetry::shutdown();
 
   // `shm`'s destructor runs on scope exit and handles munmap + shm_unlink.
   TT_LOG_INFO("[Main] Server shutdown complete (graceful)");

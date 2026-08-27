@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+_orig_config_settings = sys.modules.get("config.settings")
+_orig_telemetry_client = sys.modules.get("telemetry.telemetry_client")
+
 sys.modules["ttnn"] = Mock()
 
 mock_settings = Mock()
@@ -31,6 +34,8 @@ from tt_model_runners.video_runner import (
     _attach_mpi_comm,
     _broadcast_request,
     _create_dit_runner,
+    _EncodeJob,
+    _encoder_loop,
     _is_shutdown,
     _rank,
     _rank0_load_image_prompts,
@@ -40,6 +45,20 @@ from tt_model_runners.video_runner import (
     run_all_ranks,
     video_request_to_generate_request,
 )
+
+# Restore the real modules so that test files collected after this one (e.g.
+# tests/test_video_metrics.py, which asserts on real Prometheus values) do not
+# inherit our Mocks. Same pattern and rationale as tests/test_device_worker.py:
+# the modules under test above already hold their imported references, so the
+# swap only needs to last for the duration of those imports.
+for _module_name, _original_module in {
+    "config.settings": _orig_config_settings,
+    "telemetry.telemetry_client": _orig_telemetry_client,
+}.items():
+    if _original_module is not None:
+        sys.modules[_module_name] = _original_module
+    else:
+        sys.modules.pop(_module_name, None)
 
 
 class TestRank:
@@ -109,7 +128,11 @@ class TestWriteErrorToShm:
 class TestCreateDitRunner:
     @staticmethod
     def _make_dit_module(
-        mock_mochi, mock_wan, mock_wan_i2v=None, mock_wan_i2v_prodia=None
+        mock_mochi,
+        mock_wan,
+        mock_wan_i2v=None,
+        mock_wan_i2v_prodia=None,
+        mock_wan_t2v_prodia=None,
     ):
         mock_mochi.__name__ = "TTMochi1Runner"
         mock_wan.__name__ = "TTWan22Runner"
@@ -122,6 +145,9 @@ class TestCreateDitRunner:
         if mock_wan_i2v_prodia is not None:
             mock_wan_i2v_prodia.__name__ = "TTWan22I2VProdiaRunner"
             mod.TTWan22I2VProdiaRunner = mock_wan_i2v_prodia
+        if mock_wan_t2v_prodia is not None:
+            mock_wan_t2v_prodia.__name__ = "TTWan22T2VProdiaRunner"
+            mod.TTWan22T2VProdiaRunner = mock_wan_t2v_prodia
         return {"tt_model_runners.dit_runners": mod}
 
     def test_creates_mochi_runner(self):
@@ -176,6 +202,26 @@ class TestCreateDitRunner:
             _create_dit_runner("tt-wan2.2-i2v-prodia", 0)
             mock_wan_i2v_prodia.assert_called_once_with("")
             mock_wan_i2v.assert_not_called()
+            mock_wan.assert_not_called()
+            mock_mochi.assert_not_called()
+
+    def test_creates_wan_t2v_prodia_runner(self):
+        """``tt-wan2.2-t2v-prodia`` must resolve to ``TTWan22T2VProdiaRunner``."""
+        mock_mochi = Mock()
+        mock_wan = Mock()
+        mock_wan_i2v = Mock()
+        mock_wan_t2v_prodia = Mock()
+        with patch.dict(
+            sys.modules,
+            self._make_dit_module(
+                mock_mochi,
+                mock_wan,
+                mock_wan_i2v,
+                mock_wan_t2v_prodia=mock_wan_t2v_prodia,
+            ),
+        ):
+            _create_dit_runner("tt-wan2.2-t2v-prodia", 0)
+            mock_wan_t2v_prodia.assert_called_once_with("")
             mock_wan.assert_not_called()
             mock_mochi.assert_not_called()
 
@@ -350,6 +396,29 @@ class TestRank0LoadImagePrompts:
         assert prompts is None
         assert skip is False
         assert encode_queue.qsize() == 0
+
+    def test_rejects_image_less_request_when_runner_requires_image(self):
+        """An I2V runner (``requires_image_conditioning=True``) that receives a
+        request with no image (empty ``image_path``) — e.g. a text-only request
+        routed to the I2V endpoint — must be rejected with an enqueued error and
+        ``skip=True``, not fall through to a base request that crashes the
+        runner on the missing ``image_prompts`` field."""
+        import queue as _queue
+
+        req = _make_request(image_path="")
+        encode_queue: _queue.Queue = _queue.Queue()
+
+        prompts, skip = _rank0_load_image_prompts(
+            req, encode_queue, requires_image=True
+        )
+
+        assert prompts == []
+        assert skip is True
+        assert encode_queue.qsize() == 1
+        job = encode_queue.get_nowait()
+        assert job.task_id == req.task_id
+        assert job.error is not None
+        assert "no image conditioning" in job.error
 
     def test_returns_none_false_when_raw_req_is_none(self):
         """Shutdown iteration: rank 0 read None from input ring. The helper
@@ -635,6 +704,7 @@ class TestRunInferenceLoop:
         mock_comm.bcast.side_effect = [(req, None, False), (None, None, False)]
 
         mock_runner = MagicMock()
+        mock_runner.requires_image_conditioning = False
         mock_frames = MagicMock()
         mock_runner.run.return_value = mock_frames
 
@@ -669,6 +739,7 @@ class TestRunInferenceLoop:
         mock_comm.bcast.side_effect = [(req, None, False), (None, None, False)]
 
         mock_runner = MagicMock()
+        mock_runner.requires_image_conditioning = False
         mock_runner.run.side_effect = RuntimeError("inference exploded")
 
         mock_input_shm = MagicMock()
@@ -776,6 +847,68 @@ class TestRunInferenceLoop:
         _run_inference_loop(mock_comm, mock_runner, None, None)
 
         mock_runner.run.assert_called_once()
+
+
+class TestEncoderLoop:
+    """The rank-0 encoder thread picks the exporter from the payload type: a
+    ``VideoAudioResult`` (audio runners) muxes video + audio, anything else is a
+    raw frame array encoded video-only. Both paths write exactly one response.
+    """
+
+    def _drain(self, job) -> MagicMock:
+        import queue as _queue
+
+        q: _queue.Queue = _queue.Queue()
+        q.put(job)
+        q.put(None)  # shutdown sentinel
+        output_shm = MagicMock()
+        _encoder_loop(output_shm, q)
+        return output_shm
+
+    def test_video_audio_result_muxes_with_audio(self):
+        import numpy as np
+
+        from utils.video_manager import VideoAudioResult
+
+        frames = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+        audio = np.zeros((2, 100), dtype=np.float32)
+        payload = VideoAudioResult(frames, audio, sampling_rate=16000, fps=25)
+        job = _EncodeJob(task_id="t-audio", frames=payload)
+
+        with patch(
+            "utils.video_manager.VideoManager.export_to_mp4_with_audio",
+            return_value="/tmp/out.mp4",
+        ) as mux, patch("utils.video_manager.VideoManager.export_to_mp4") as plain:
+            output_shm = self._drain(job)
+
+        plain.assert_not_called()
+        mux.assert_called_once()
+        args, kwargs = mux.call_args
+        assert args[0] is frames
+        assert args[1] is audio
+        assert args[2] == 16000
+        assert kwargs["fps"] == 25
+        output_shm.write_response.assert_called_once()
+
+    def test_raw_frames_use_video_only_export(self):
+        import numpy as np
+
+        frames = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+        job = _EncodeJob(task_id="t-plain", frames=frames)
+
+        with patch(
+            "utils.video_manager.VideoManager.export_to_mp4",
+            return_value="/tmp/out.mp4",
+        ) as plain, patch(
+            "utils.video_manager.VideoManager.export_to_mp4_with_audio"
+        ) as mux:
+            output_shm = self._drain(job)
+
+        mux.assert_not_called()
+        plain.assert_called_once()
+        args, _ = plain.call_args
+        assert args[0] is frames
+        output_shm.write_response.assert_called_once()
 
 
 class TestRunAllRanks:

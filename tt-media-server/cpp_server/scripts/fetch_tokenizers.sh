@@ -237,6 +237,17 @@ download_tokenizer \
     "json" \
     "true"
 
+# MiniMax M3 (public, no auth). Native multimodal model whose top-level
+# config.json uses model_type "minimax_m3_vl"; the text backbone shares the
+# MiniMax tokenizer layout with M2.7. Ships chat_template.jinja separately.
+download_tokenizer \
+    "MiniMaxAI/MiniMax-M3" \
+    "https://huggingface.co/MiniMaxAI/MiniMax-M3/resolve/main" \
+    "false" \
+    '{"model_type":"minimax_m3_vl","architectures":["MiniMaxM3SparseForConditionalGeneration"]}' \
+    "json" \
+    "true"
+
 # GLM-5.1 (public, no auth). Same glm_moe_dsa tokenizer/family as GLM-5.2
 # (same eos set + <think>/</think> ids), so it reuses the glm45/glm47 parser
 # branch in discovery.cpp. Ships its chat template as a separate
@@ -287,5 +298,21 @@ download_tokenizer \
     "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/resolve/main" \
     "false" \
     '{"model_type":"deepseek_v4","architectures":["DeepseekV4ForCausalLM"]}'
+
+# Gemma-4 31B Instruct (public, no auth). tokenizer.json is an LFS file, so the
+# base URL must be /resolve/main (/raw/main returns the LFS pointer). Ships its
+# chat template as a separate chat_template.jinja, so needs_chat_template is
+# "true". config.json carries the eos set [1, 106]; generation_config.json adds
+# <|tool_response> (50) and is fetched best-effort like every model. model_type
+# "gemma4" maps to the gemma4 reasoning + gemma4 tool-call Dynamo parsers in
+# discovery.cpp. The template uses no `.0` numeric indexing, so no minijinja
+# patch is needed.
+download_tokenizer \
+    "google/gemma-4-31B-it" \
+    "https://huggingface.co/google/gemma-4-31B-it/resolve/main" \
+    "false" \
+    '{"model_type":"gemma4","architectures":["Gemma4ForConditionalGeneration"]}' \
+    "json" \
+    "true"
 
 echo ""

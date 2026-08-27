@@ -27,6 +27,7 @@ from workflows.log_setup import setup_run_logger  # noqa: E402
 from workflows.model_spec import (  # noqa: E402
     MODEL_SPECS,
     ModelSpec,
+    derive_custom_weights_spec,
     export_model_specs_json,
     get_runtime_model_spec,
 )
@@ -37,12 +38,10 @@ from workflows.multihost_orchestrator import (
     setup_multihost_config,
 )
 from workflows.run_docker_server import (
+    collect_tt_triage_logs,
     format_docker_command,
     generate_docker_run_command,
-    run_docker_server,
 )
-from workflows.run_local_server import run_local_server
-from workflows.run_workflows import run_workflows
 from workflows.runtime_config import RuntimeConfig
 from workflows.setup_host import setup_host
 from workflows.utils import (
@@ -53,11 +52,12 @@ from workflows.utils import (
     load_dotenv,
     write_dotenv,
 )
-from workflows.v2_bridge import can_route_to_v2, run_v2_workflows
+from workflows.workflow_dispatch import build_engine_commands, can_dispatch_to_engine
 from workflows.validate_setup import run_multihost_validation_subprocess, validate_setup
 from workflows.workflow_types import (
     DeviceTypes,
     InferenceEngine,
+    ModelType,
     WorkflowType,
 )
 
@@ -79,6 +79,18 @@ def parse_device_ids(value):
         )
 
 
+def _placeholder_llm(device):
+    llms = [s for s in MODEL_SPECS.values() if s.model_type == ModelType.LLM]
+    if not llms:
+        return None
+    if device:
+        want = device.lower()
+        match = next((s for s in llms if s.device_type.name.lower() == want), None)
+        return (match.model_name, device) if match else None
+    spec = llms[0]
+    return spec.model_name, spec.device_type.name.lower()
+
+
 def parse_arguments():
     valid_workflows = {w.name.lower() for w in WorkflowType}
     valid_devices = {device.name.lower() for device in DeviceTypes}
@@ -97,7 +109,13 @@ def parse_arguments():
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
-        "--model", required=True, choices=valid_models, help="Model to run"
+        "--model",
+        required=False,
+        default=None,
+        choices=valid_models,
+        help="Model to run. Required for every workflow except prefill_decode, "
+        "which serves a mock stack chosen by --served-model and only needs a "
+        "placeholder spec (auto-picked when --model is omitted).",
     )
     parser.add_argument(
         "--workflow",
@@ -191,7 +209,7 @@ def parse_arguments():
             "Resolve the model spec from the dev catalog "
             "(workflows/model_specs/dev/) and forward it into the Docker "
             "container, overriding its prebuilt prod catalog. Also bind-mounts "
-            "host source dirs (benchmarking/, evals/, utils/, tests/, plus "
+            "host source dirs (reference_config/, utils/, tests/, plus "
             "vllm-tt-metal/src or tt-media-server/) so live host edits are "
             "picked up. Has no effect when --runtime-model-spec-json is given."
         ),
@@ -242,9 +260,11 @@ def parse_arguments():
         "--vllm-dir",
         type=str,
         default=os.getenv("vllm_dir"),
-        help="[for --local-server] Host path to the vLLM source tree to export as vllm_dir "
-        "and append to PYTHONPATH. Defaults to vllm_dir from the environment when set, "
-        "otherwise tt-metal-home/vllm.",
+        help="[DEPRECATED, ignored] Formerly the host path to a vLLM source tree, exported "
+        "as vllm_dir and appended to PYTHONPATH. vLLM is now an ordinary installed package "
+        "in the tt-metal venv and the TT platform comes from the separately installed "
+        "vllm-tt-plugin, so no source tree is needed. Accepted for backwards compatibility; "
+        "will be removed in a future release.",
     )
     parser.add_argument(
         "--limit-samples-mode",
@@ -259,6 +279,15 @@ def parse_arguments():
         "Accepts a JSON string '{\"task_name\": [int, ...]}' or a path to a JSON file. "
         "Indices are zero-based. Mutually exclusive with --limit-samples-mode. "
         "Text/LLM evals only.",
+    )
+    parser.add_argument(
+        "--repeat-evals",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run --workflow evals N times, keeping each run's report under "
+        "run_NN/ and writing an aggregated summary/ (reuses the workflow engine's "
+        "--repeat). Default 1 (no summary).",
     )
     parser.add_argument(
         "--skip-system-sw-validation",
@@ -294,6 +323,23 @@ def parse_arguments():
         help="Benchmarking tool to use: 'vllm' for vLLM benchmark_serving.py (default), "
         "'genai' for genai-perf (Triton SDK), 'aiperf' for AIPerf (https://github.com/ai-dynamo/aiperf), "
         "'guidellm' for GuideLLM (https://github.com/vllm-project/guidellm). ",
+    )
+    parser.add_argument(
+        "--goodput",
+        type=str,
+        default=None,
+        metavar="SLO",
+        help=(
+            "AIPerf --goodput SLO string applied to the LLM benchmark sweep "
+            "(--workflow benchmarks --tools aiperf): space-separated KEY:VALUE "
+            "pairs where KEY is a metric tag and VALUE is in the metric's "
+            "display unit. Reports the fraction of requests meeting every "
+            "threshold. Valid tags include time_to_first_token (ms), "
+            "request_latency (ms), inter_token_latency (ms), "
+            "output_token_throughput_per_user (tokens/s). Only used by the "
+            "'aiperf' tool; ignored by vllm/genai/guidellm. Example: "
+            "'time_to_first_token:4000 output_token_throughput_per_user:45'."
+        ),
     )
     parser.add_argument(
         "--no-auth",
@@ -337,6 +383,15 @@ def parse_arguments():
         "For --local-server, tensor cache/logs still use the host volume path.",
     )
     parser.add_argument(
+        "--custom-weights",
+        type=str,
+        default=None,
+        help="Label giving custom weights their own identity, derived from the "
+        "base --model spec. Gets its own volume/cache subtree. With "
+        "--host-weights-dir the bytes come from local disk; without it the label "
+        "is the HuggingFace repo to download. Requires --model.",
+    )
+    parser.add_argument(
         "--image-user",
         type=str,
         default="1000",
@@ -345,13 +400,6 @@ def parse_arguments():
         "Default release images use UID 1000. "
         "Override only when using a custom image built with a different UID.",
     )
-    parser.add_argument(
-        "--server-tests",
-        type=str,
-        default=os.getenv("SERVER_TESTS", "false"),
-        help="Run server tests using server_tests/run.py (true/false). Default is false.",
-    )
-
     # SPEC_TESTS workflow arguments (server tests filtering)
     spec_tests_group = parser.add_argument_group(
         "SPEC_TESTS workflow",
@@ -380,19 +428,19 @@ def parse_arguments():
         "--model-category",
         type=str,
         nargs="+",
-        help="Filter by model category (IMAGE, AUDIO, CNN)",
+        help="Filter by model category (CNN, EMBEDDING)",
         default=None,
     )
     spec_tests_group.add_argument(
         "--suite-category",
         type=str,
-        help="Load suites for a specific category (e.g., image, audio)",
+        help="Load suites for a specific category (e.g., cnn, embedding)",
         default=None,
     )
     spec_tests_group.add_argument(
         "--test-name",
         type=str,
-        help="Filter by specific test class name (e.g., ImageGenerationLoadTest)",
+        help="Filter by specific test class name (e.g., CnnLoadTest)",
         default=None,
     )
     spec_tests_group.add_argument(
@@ -408,36 +456,135 @@ def parse_arguments():
 
     # Serving-bench shell benchmark suites
     serving_bench_group = parser.add_argument_group(
-        "serving_bench workflow (v2)",
+        "serving_bench workflow",
         "Arguments for --workflow serving_bench (shell benchmark suites against a "
-        "running server, routed to v2)",
+        "running server, routed to the workflow engine)",
     )
     serving_bench_group.add_argument(
         "--serving-bench-suites",
         type=str,
         default=None,
         help="Comma-separated serving-bench suites to run (default: all suites under "
-        "tt-inference-server-v2/test_module/serving_bench, e.g. agentic_bench, "
+        "test_module/serving_bench, e.g. agentic_bench, "
         "benchmark). Suite knobs (DURATION, TARGET_CONCURRENCY, ...) are read from "
         "the environment; --limit-samples-mode selects a knob preset.",
     )
 
+    # Prefill/decode smoke suite
+    prefill_decode_group = parser.add_argument_group(
+        "prefill_decode workflow",
+        "Arguments for --workflow prefill_decode (brings up the disaggregated mock "
+        "stack and runs the smoke suite)",
+    )
+    prefill_decode_group.add_argument(
+        "--served-model",
+        type=str,
+        default=None,
+        help="HF repo id the prefill_decode mock stack should serve, e.g. "
+        "moonshotai/Kimi-K2.6. Must have a tokenizer dir under "
+        "tt-media-server/cpp_server/tokenizers/. Overrides the model derived from "
+        "--model; lets you serve a model with no catalog entry. Defaults to the "
+        "--model's HF repo, then run_stack.sh's built-in default.",
+    )
+
+    agentic_group = parser.add_argument_group(
+        "Agentic evals",
+        "Arguments for --workflow agentic (accuracy evals: tau3 / terminal-bench / "
+        "swe-bench), routed to the workflow engine",
+    )
+    agentic_group.add_argument(
+        "--agentic-benchmark",
+        type=str,
+        default=None,
+        help="Comma-separated agentic benchmark(s) to run under --workflow agentic. "
+        "Aliases: tau3 (tau3_bench_*), tb2.0 (terminal_bench_2), tb2.1 "
+        "(terminal_bench_2_1), swebench (swe_bench_*). Raw task names are also "
+        "accepted. When unset (or 'all'), runs every EVALS_AGENTIC task configured "
+        "for the model.",
+    )
+
+    agentic_traces_group = parser.add_argument_group(
+        "Agentic-traces benchmark",
+        "Arguments for --workflow agentic_traces, and --workflow release "
+        "--agentic-traces (routed to the workflow engine)",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces",
+        action="store_true",
+        help="Add the agentic trace replay to --workflow release, as a child alongside "
+        "evals/benchmarks/spec_tests, so its Blocks land in the same release report. "
+        "Opt-in because a full-mode run adds roughly an hour of profiling per "
+        "configured run on top of the rest of the release. Requires --workflow release; "
+        "use --workflow agentic_traces to run it on its own.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-mode",
+        type=str,
+        choices=["full", "ci"],
+        default="full",
+        help="Duration profile for the agentic-traces runs (default: full). 'full' is "
+        "the reference run used for reportable numbers; 'ci' is the shortest run the "
+        "InferenceX scenario permits (900s of profiling). Per-mode durations come from "
+        "the model's entry in reference_config/agentic_traces/.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-sources",
+        type=str,
+        default=None,
+        help="Comma-separated trace sources to run (inferencex_agentx, swarmone). When "
+        "unset, runs every configured source except opt-in ones. swarmone is opt-in: "
+        "it replays SwarmOne swo-bench scenarios and needs a SwarmOne license "
+        "(SWO_LICENSE_KEY or ~/.swarmone/license.key), so name it explicitly to run it.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-duration",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Override the mode's profiling duration. The InferenceX scenario rejects "
+        "anything below 900s.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-git-ref",
+        type=str,
+        default=None,
+        metavar="REF",
+        help="Override the InferenceX revision cloned into the AGENTIC_TRACES venv. "
+        "Defaults to the ref pinned for the ModelSpec; results are only comparable "
+        "across runs on the same ref.",
+    )
+    agentic_traces_group.add_argument(
+        "--agentic-traces-metrics-url",
+        type=str,
+        action="append",
+        default=None,
+        metavar="URL",
+        help="Extra Prometheus /metrics endpoint holding the prefix-cache counters, "
+        "for a deployment whose load target does not expose them (e.g. the "
+        "cpp_server worker(s) behind a Dynamo frontend). AIPerf scrapes the load "
+        "target regardless. Accepts a URL, host:port, or host:port/metrics; "
+        "repeatable.",
+    )
+
     prefix_cache_group = parser.add_argument_group(
-        "Prefix-cache benchmark (v2)",
-        "Arguments for --workflow benchmarks --prefix-cache (routed to v2)",
+        "Prefix-cache benchmark",
+        "Arguments for --workflow benchmarks --prefix-cache (routed to the workflow engine)",
     )
     prefix_cache_group.add_argument(
         "--prefix-cache",
         action="store_true",
-        help="Switch --workflow benchmarks to the v2 AIPerf prefix-caching scenario sweep. "
-        "Routes the run through the v2 engine. Requires --workflow benchmarks.",
+        help="Switch --workflow benchmarks to the AIPerf prefix-caching scenario sweep. "
+        "Routes the run through the workflow engine. Requires --workflow benchmarks.",
     )
     prefix_cache_group.add_argument(
         "--prefix-cache-preset",
         type=str,
-        choices=["ci", "full"],
+        choices=["ci", "full", "highcache_50k"],
         default="full",
-        help="Preset for --prefix-cache (default: full). 'ci' is a short regression sweep.",
+        help="Preset for --prefix-cache (default: full). 'ci' is a short regression sweep; "
+        "'highcache_50k' simulates the customer trillion-scale shape (50K shared/cacheable "
+        "prefix + 5K new ISL + 500 OSL at concurrency 32, ~90.9%% steady-state hit-rate) "
+        "with a matched zero-prefix baseline for TTFT-uplift comparison.",
     )
     prefix_cache_group.add_argument(
         "--prefix-cache-scenarios",
@@ -472,6 +619,28 @@ def parse_arguments():
         help="Path to a mooncake-format JSONL trace file for mooncake_trace scenarios.",
     )
     prefix_cache_group.add_argument(
+        "--prefix-cache-goodput",
+        type=str,
+        default=None,
+        metavar="SLO",
+        help="AIPerf --goodput SLO string: space-separated KEY:VALUE pairs (metric tag : "
+        "value in display unit). Reports requests/sec meeting every threshold. Tags include "
+        "time_to_first_token (ms), request_latency (ms), inter_token_latency (ms), "
+        "output_token_throughput_per_user (tokens/s). Overrides the preset/scenario goodput. "
+        "Example: 'time_to_first_token:4000 output_token_throughput_per_user:45'.",
+    )
+    prefix_cache_group.add_argument(
+        "--prefix-cache-metrics-url",
+        type=str,
+        action="append",
+        default=None,
+        metavar="URL",
+        help="Worker /metrics endpoint with the tt_prefix_cache_* counters, forwarded to "
+        "AIPerf as --server-metrics (load stays on the frontend). Accepts a full URL, "
+        "host:port, or host:port/metrics. Repeatable for multi-worker deployments. "
+        "Without it the scrape hits the prefix-unaware frontend and hit-rate is null.",
+    )
+    prefix_cache_group.add_argument(
         "--jwt-secret",
         type=str,
         default=None,
@@ -481,16 +650,16 @@ def parse_arguments():
 
     # Speculative-decoding benchmark
     spec_decode_group = parser.add_argument_group(
-        "Speculative-decoding benchmark (v2)",
-        "Arguments for --workflow benchmarks --spec-decode (routed to v2)",
+        "Speculative-decoding benchmark",
+        "Arguments for --workflow benchmarks --spec-decode (routed to the workflow engine)",
     )
     spec_decode_group.add_argument(
         "--spec-decode",
         action="store_true",
-        help="Switch --workflow benchmarks to the v2 AIPerf speculative-decoding sweep over "
+        help="Switch --workflow benchmarks to the AIPerf speculative-decoding sweep over "
         "SPEED-Bench. Scrapes the vLLM vllm:spec_decode_* counters per run for acceptance "
         "rate / mean accepted length. The server's speculative_config is out of scope and "
-        "must be set by whoever launched it. Routes the run through the v2 engine. "
+        "must be set by whoever launched it. Routes the run through the workflow engine. "
         "Requires --workflow benchmarks.",
     )
     spec_decode_group.add_argument(
@@ -505,7 +674,7 @@ def parse_arguments():
         type=int,
         default=None,
         help="Short chat-completion warmup requests sent before the spec-decode sweep "
-        "(v2 default: 4; 0 disables).",
+        "(default: 4; 0 disables).",
     )
 
     args = parser.parse_args()
@@ -529,15 +698,54 @@ def parse_arguments():
             args.server_url = normalize_server_url(args.server_url)
         except ValueError as e:
             parser.error(str(e))
+    if args.custom_weights is not None:
+        if not args.custom_weights.strip():
+            parser.error("--custom-weights cannot be empty.")
+        if args.model is None:
+            parser.error(
+                "--custom-weights requires a base --model to inherit its spec "
+                "(impl, device configs, engine, docker image) from."
+            )
+        if args.runtime_model_spec_json:
+            parser.error(
+                "--custom-weights cannot be combined with --runtime-model-spec-json; "
+                "the runtime spec JSON is used as-is and already fixes the model identity."
+            )
     args.engine = (
         InferenceEngine.from_string(args.engine).value if args.engine else None
     )
+    # --model and --device are optional only for prefill_decode (the mock stack
+    # serves --served-model, not the catalog model). Inject a placeholder spec
+    # so the rest of run.py resolves normally.
+    if args.model is None:
+        if args.workflow != "prefill_decode":
+            parser.error(
+                "the following arguments are required: --model "
+                "(optional only for --workflow prefill_decode)."
+            )
+        if not args.served_model:
+            parser.error(
+                "--workflow prefill_decode without --model requires --served-model "
+                "(the HF repo the mock stack should serve); --model alone is only a "
+                "placeholder spec."
+            )
+        placeholder = _placeholder_llm(args.device)
+        if placeholder is None:
+            parser.error(
+                "could not auto-pick a placeholder --model for "
+                f"--device {args.device!r}; pass --model explicitly."
+            )
+        args.model, args.device = placeholder
     if not args.device:
         args.device = infer_default_device(args.model, args.engine)
     args.tt_device = args.device
 
-    if not args.vllm_dir and args.tt_metal_home:
-        args.vllm_dir = str(Path(args.tt_metal_home).expanduser() / "vllm")
+    if args.vllm_dir:
+        logger.warning(
+            "--vllm-dir (or the vllm_dir env var) is deprecated and ignored: vLLM is "
+            "installed into the tt-metal venv as an ordinary package and the TT platform "
+            "is provided by vllm-tt-plugin, so no vLLM source tree is used."
+        )
 
     # indirectly set additional flags for CI-mode
     if args.ci_mode:
@@ -549,15 +757,15 @@ def parse_arguments():
     if args.eval_samples and args.limit_samples_mode:
         parser.error("--eval-samples and --limit-samples-mode are mutually exclusive.")
 
-    if args.prefix_cache and args.workflow != "benchmarks":
+    if args.prefix_cache and args.workflow not in ("benchmarks", "release"):
         parser.error(
-            "--prefix-cache currently requires --workflow benchmarks "
+            "--prefix-cache currently requires --workflow benchmarks or release "
             f"(got --workflow {args.workflow})."
         )
 
-    if args.spec_decode and args.workflow != "benchmarks":
+    if args.spec_decode and args.workflow not in ("benchmarks", "release"):
         parser.error(
-            "--spec-decode currently requires --workflow benchmarks "
+            "--spec-decode currently requires --workflow benchmarks or release "
             f"(got --workflow {args.workflow})."
         )
 
@@ -566,6 +774,62 @@ def parse_arguments():
             "--serving-bench-suites requires --workflow serving_bench "
             f"(got --workflow {args.workflow})."
         )
+
+    if args.served_model and args.workflow != "prefill_decode":
+        parser.error(
+            "--served-model requires --workflow prefill_decode "
+            f"(got --workflow {args.workflow})."
+        )
+
+    if args.agentic_benchmark and args.workflow != "agentic":
+        parser.error(
+            "--agentic-benchmark selects which agentic eval(s) to run and requires "
+            f"--workflow agentic (got --workflow {args.workflow})."
+        )
+
+    if args.repeat_evals is not None and args.repeat_evals < 1:
+        parser.error(
+            f"--repeat-evals must be a positive integer (got {args.repeat_evals})."
+        )
+
+    if args.repeat_evals and args.repeat_evals > 1 and args.workflow != "evals":
+        parser.error(
+            "--repeat-evals applies to --workflow evals "
+            f"(got --workflow {args.workflow})."
+        )
+
+    if args.agentic_traces and args.workflow != "release":
+        parser.error(
+            "--agentic-traces adds the trace replay to a release run and requires "
+            "--workflow release; run it on its own with --workflow agentic_traces "
+            f"(got --workflow {args.workflow})."
+        )
+
+    runs_agentic_traces = args.workflow == "agentic_traces" or args.agentic_traces
+    agentic_traces_overrides = (
+        args.agentic_traces_sources,
+        args.agentic_traces_duration,
+        args.agentic_traces_git_ref,
+        args.agentic_traces_metrics_url,
+    )
+    if any(f is not None for f in agentic_traces_overrides) and not runs_agentic_traces:
+        parser.error(
+            "--agentic-traces-* flags require --workflow agentic_traces or "
+            "--workflow release --agentic-traces "
+            f"(got --workflow {args.workflow})."
+        )
+
+    if args.agentic_traces_duration is not None:
+        from reference_config.agentic_traces.agentic_traces_config import (
+            AGENTIC_TRACES_MIN_PROFILE_SECONDS,
+        )
+
+        if args.agentic_traces_duration < AGENTIC_TRACES_MIN_PROFILE_SECONDS:
+            parser.error(
+                "--agentic-traces-duration must be at least "
+                f"{AGENTIC_TRACES_MIN_PROFILE_SECONDS}s (the InferenceX "
+                f"scenario's floor), got {args.agentic_traces_duration}s."
+            )
 
     # Dev specs don't pin a docker image (they're built/published out of band),
     # so dev-mode has no image to run in a container — require an explicit one.
@@ -593,14 +857,16 @@ def handle_secrets(runtime_config):
     # HF_TOKEN is optional for client-side scripts workflows. These run
     # against an inference server (local, docker, or external via
     # --server-url) and don't need to load HF weights/tokenizers themselves.
+    # AGENTIC_TRACES is deliberately absent despite being client-side: its
+    # SemiAnalysis Weka trace datasets are gated on the Hub, so the client
+    # itself needs a token to fetch them.
     client_side_workflows = {
         WorkflowType.BENCHMARKS,
         WorkflowType.EVALS,
         WorkflowType.STRESS_TESTS,
-        WorkflowType.TESTS,
         WorkflowType.SPEC_TESTS,
-        WorkflowType.REPORTS,
         WorkflowType.SERVING_BENCH,
+        WorkflowType.PREFILL_DECODE,
     }
     # --docker-server requires the HF_TOKEN env var to be available
     huggingface_required = (
@@ -665,7 +931,15 @@ def format_cli_args_summary(runtime_config):
         "=" * 60,
         "",
         "Model Options:",
-        f"  model:                      {runtime_config.model}",
+        f"  model:                      {runtime_config.model}"
+        + (
+            "  (placeholder spec; stack serves --served-model)"
+            if runtime_config.served_model
+            else ""
+        ),
+        f"  served_model:               {runtime_config.served_model}"
+        if runtime_config.served_model
+        else None,
         f"  device:                     {runtime_config.device}",
         f"  impl:                       {runtime_config.impl}",
         f"  engine:                     {runtime_config.engine}",
@@ -679,7 +953,6 @@ def format_cli_args_summary(runtime_config):
         f"  no_auth:                    {runtime_config.no_auth}",
         f"  tt_metal_python_venv_dir:   {runtime_config.tt_metal_python_venv_dir}",
         f"  tt_metal_home:              {runtime_config.tt_metal_home}",
-        f"  vllm_dir:                   {runtime_config.vllm_dir}",
         f"  service_port:               {runtime_config.service_port}",
         f"  bind_host:                  {runtime_config.bind_host}",
         f"  docker_override_image:      {runtime_config.override_docker_image}",
@@ -697,13 +970,16 @@ def format_cli_args_summary(runtime_config):
         f"  host_volume:                {runtime_config.host_volume}",
         f"  host_hf_cache:              {runtime_config.host_hf_cache}",
         f"  host_weights_dir:           {runtime_config.host_weights_dir}",
+        f"  custom_weights:             {runtime_config.custom_weights}"
+        if runtime_config.custom_weights
+        else None,
         f"  image_user:                 {runtime_config.image_user}",
         "",
     ]
 
     lines.append("=" * 60)
 
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line is not None)
 
 
 def populate_model_spec_cli_args(model_spec, runtime_config):
@@ -746,6 +1022,22 @@ def resolve_runtime(args):
             engine=args.engine,
             impl=args.impl,
         )
+        if args.custom_weights:
+            # With --host-weights-dir, point vLLM's --model at the container
+            # mount so weights load offline (the label is not a real HF repo).
+            # Must match setup_host's readonly weights mount path.
+            local_model_path = None
+            if args.host_weights_dir:
+                from workflows.setup_host import SetupConfig
+
+                local_model_path = str(
+                    SetupConfig.containter_user_home
+                    / "readonly_weights_mount"
+                    / Path(args.host_weights_dir).name
+                )
+            model_spec = derive_custom_weights_spec(
+                model_spec, args.custom_weights, local_model_path=local_model_path
+            )
         runtime_config = RuntimeConfig.from_args(
             args, impl=resolved_impl, engine=resolved_engine
         )
@@ -788,7 +1080,8 @@ def main():
     tt_inference_server_sha = get_current_commit_sha()
 
     # step 3: setup logging and finalize run_id
-    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_start = datetime.now()
+    run_timestamp = run_start.strftime("%Y-%m-%d_%H-%M-%S")
     run_id = get_run_id(
         timestamp=run_timestamp,
         model_id=model_id,
@@ -804,6 +1097,11 @@ def main():
     run_log_path = run_logs_path / f"run_{run_id}.log"
 
     setup_run_logger(logger=logger, run_id=run_id, run_log_path=run_log_path)
+
+    wf_logger = logging.getLogger("workflow_module")
+    wf_logger.handlers = logger.handlers
+    wf_logger.setLevel(logger.level)
+    wf_logger.propagate = False
 
     # Log CLI arguments and runtime info
     version = Path("VERSION").read_text().strip()
@@ -840,10 +1138,23 @@ def main():
             local_server=runtime_config.local_server,
         )
 
-    # step 4: optionally run inference server
+    # step 4: optionally run inference server. Server bring-up runs as a
+    # ServerCommand through the WorkflowRunner — the same runner that drives
+    # workflows — so one runner owns "bring up the server, then run workflows"
+    # (see docs/unified_runner_architecture.md).
+    from workflow_module import (
+        ServerCommand,
+        ServerLaunchSpec,
+        ServerMode,
+        WorkflowRunner,
+    )
+
+    server_launch = None
     if runtime_config.docker_server:
         docker_json_fpath = None
-        if runtime_config.dev_mode:
+        # dev mode and --custom-weights both need the container to use this spec
+        # rather than resolving --model against the baked catalog.
+        if runtime_config.dev_mode or runtime_config.custom_weights:
             docker_json_fpath = json_fpath
         if runtime_config.print_docker_cmd:
             if is_multihost_deployment(runtime_config):
@@ -890,41 +1201,69 @@ def main():
                     f"Docker run command:\n\n{format_docker_command(docker_command)}\n"
                 )
             return 0
-        run_docker_server(model_spec, runtime_config, setup_config, docker_json_fpath)
+        server_launch = ServerLaunchSpec(
+            mode=ServerMode.DOCKER,
+            model_spec=model_spec,
+            runtime_config=runtime_config,
+            setup_config=setup_config,
+            json_fpath=docker_json_fpath,
+        )
     elif runtime_config.local_server:
         logger.info("Running inference server on localhost ...")
-        run_local_server(model_spec, runtime_config, json_fpath, setup_config)
+        server_launch = ServerLaunchSpec(
+            mode=ServerMode.LOCAL,
+            model_spec=model_spec,
+            runtime_config=runtime_config,
+            setup_config=setup_config,
+            json_fpath=json_fpath,
+        )
 
-    main_return_code = 0
+    commands = []
+    if server_launch is not None:
+        commands.append(ServerCommand(server_launch))
 
-    # step 5: run workflows
-    skip_workflows = {WorkflowType.SERVER}
-    if WorkflowType.from_string(runtime_config.workflow) not in skip_workflows:
-        if can_route_to_v2(model_spec, runtime_config):
-            logger.info(
-                "Model %s (model_type=%s) routes through v2 engine.",
-                model_spec.model_name,
-                model_spec.model_type.name,
+    if WorkflowType.from_string(runtime_config.workflow) != WorkflowType.SERVER:
+        if not can_dispatch_to_engine(model_spec, runtime_config):
+            raise ValueError(
+                f"No workflow driver for --workflow {runtime_config.workflow} on "
+                f"{model_spec.model_name} ({model_spec.model_type.name}); all "
+                "supported workflows route to the workflow engine."
             )
-            workflow_results = run_v2_workflows(model_spec, runtime_config, json_fpath)
-        else:
-            workflow_results = run_workflows(model_spec, runtime_config, json_fpath)
-        if all(result.return_code == 0 for result in workflow_results):
-            logger.info("Completed run.py.")
-        else:
-            failed_workflows = [
-                f"{result.workflow_name} ({result.return_code})"
-                for result in workflow_results
-                if result.return_code != 0
-            ]
-            logger.error(
-                f"run.py failed workflows: {failed_workflows}. "
-                "See logs above for details."
-            )
-            main_return_code = 1
-    else:
         logger.info(
-            f"Completed {runtime_config.workflow} workflow, skipping run_workflows()."
+            "Model %s (model_type=%s) routes through the workflow engine.",
+            model_spec.model_name,
+            model_spec.model_type.name,
+        )
+        commands.extend(build_engine_commands(model_spec, runtime_config, json_fpath))
+
+    if not commands:
+        # --workflow server without --docker-server/--local-server: host setup
+        # only, nothing for the runner to execute.
+        logger.info(
+            "No server bring-up and no workflow commands for --workflow %s; "
+            "nothing to run.",
+            runtime_config.workflow,
+        )
+        main_return_code = 0
+    else:
+        runner = WorkflowRunner(commands)
+        main_return_code = runner.run()
+        if runtime_config.docker_server:
+            # tt-metal writes a tt-triage report into the cache_root volume when
+            # it detects a device hang; copy it under workflow_logs/ so CI's
+            # existing artifact upload picks it up. Runs on success too -- the
+            # report is simply absent when nothing hung.
+            collect_tt_triage_logs(
+                setup_config=setup_config,
+                model_spec=model_spec,
+                dest_dir=log_path / "tt_triage",
+                since_ts=run_start.timestamp(),
+            )
+    if main_return_code == 0:
+        logger.info("Completed run.py.")
+    else:
+        logger.error(
+            "run.py failed (rc=%d). See logs above for details.", main_return_code
         )
 
     logger.info(

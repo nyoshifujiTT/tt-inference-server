@@ -43,6 +43,9 @@ AVAILABLE_RUNNERS = {
     ModelRunners.TT_WAN_2_2: lambda wid: __import__(
         "tt_model_runners.dit_runners", fromlist=["TTWan22Runner"]
     ).TTWan22Runner(wid),
+    ModelRunners.TT_WAN_2_2_T2V_PRODIA: lambda wid: __import__(
+        "tt_model_runners.dit_runners", fromlist=["TTWan22T2VProdiaRunner"]
+    ).TTWan22T2VProdiaRunner(wid),
     ModelRunners.TT_WAN_2_2_I2V: lambda wid: __import__(
         "tt_model_runners.dit_runners", fromlist=["TTWan22I2VRunner"]
     ).TTWan22I2VRunner(wid),
@@ -58,6 +61,15 @@ AVAILABLE_RUNNERS = {
     ModelRunners.TT_WAN_2_2_I2V_LORA: lambda wid: __import__(
         "tt_model_runners.dit_runners", fromlist=["TTWan22I2VLoRARunner"]
     ).TTWan22I2VLoRARunner(wid),
+    ModelRunners.TT_WAN_2_2_I2V_LIGHTNING: lambda wid: __import__(
+        "tt_model_runners.dit_runners", fromlist=["TTWan22I2VLightningRunner"]
+    ).TTWan22I2VLightningRunner(wid),
+    ModelRunners.TT_LTX_2_3_DISTILLED: lambda wid: __import__(
+        "tt_model_runners.dit_runners", fromlist=["TTLTX23DistilledRunner"]
+    ).TTLTX23DistilledRunner(wid),
+    ModelRunners.TT_MINIMAX_H3_T2VA: lambda wid: __import__(
+        "tt_model_runners.dit_runners", fromlist=["TTMiniMaxH3Runner"]
+    ).TTMiniMaxH3Runner(wid),
     ModelRunners.TT_WHISPER: lambda wid: __import__(
         "tt_model_runners.whisper_runner", fromlist=["TTWhisperRunner"]
     ).TTWhisperRunner(wid),
@@ -84,6 +96,14 @@ AVAILABLE_RUNNERS = {
         "tt_model_runners.vllm_forge_qwen_embedding_runner",
         fromlist=["VLLMForgeEmbeddingQwenRunner"],
     ).VLLMForgeEmbeddingQwenRunner(wid),
+    ModelRunners.VLLMForge_QWEN_EMBEDDING_0_6B: lambda wid: __import__(
+        "tt_model_runners.vllm_forge_qwen_embedding_runner",
+        fromlist=["VLLMForgeEmbeddingQwenRunner"],
+    ).VLLMForgeEmbeddingQwenRunner(wid),
+    ModelRunners.VLLMForge_BGE_M3: lambda wid: __import__(
+        "tt_model_runners.vllm_forge_qwen_embedding_runner",
+        fromlist=["VLLMForgeEmbeddingQwenRunner"],
+    ).VLLMForgeEmbeddingQwenRunner(wid),
     ModelRunners.VLLMForge_LLAMA_70B: lambda wid: __import__(
         "tt_model_runners.vllm_forge_llama_70b",
         fromlist=["VLLMForgeLlama70BRunner"],
@@ -96,6 +116,10 @@ AVAILABLE_RUNNERS = {
         "tt_model_runners.vllm_forge_qwen_32b",
         fromlist=["VLLMForgeQwen32BRunner"],
     ).VLLMForgeQwen32BRunner(wid),
+    ModelRunners.VLLMForge_MISTRAL_SMALL_31_24B: lambda wid: __import__(
+        "tt_model_runners.vllm_forge_mistral_small_31_24b",
+        fromlist=["VLLMForgeMistralSmall31_24BRunner"],
+    ).VLLMForgeMistralSmall31_24BRunner(wid),
     ModelRunners.TT_XLA_RESNET: lambda wid: __import__(
         "tt_model_runners.forge_runners.runners", fromlist=["ForgeResnetRunner"]
     ).ForgeResnetRunner(wid),
@@ -132,6 +156,10 @@ AVAILABLE_RUNNERS = {
         "tt_model_runners.forge_training_runners.training_lora_runner",
         fromlist=["TrainingLoraRunner"],
     ).TrainingLoraRunner(wid),
+    ModelRunners.TRAINER_TRAINING_LORA: lambda wid: __import__(
+        "tt_model_runners.forge_training_runners.trainer_training_lora_runner",
+        fromlist=["TrainerTrainingLoraRunner"],
+    ).TrainerTrainingLoraRunner(wid),
     ModelRunners.MOCK: lambda wid: __import__(
         "tt_model_runners.mock_runner", fromlist=["MockRunner"]
     ).MockRunner(wid),

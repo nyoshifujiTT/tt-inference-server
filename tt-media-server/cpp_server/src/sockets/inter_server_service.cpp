@@ -52,7 +52,10 @@ bool InterServerService::initializeFromConfig() {
           port);
       success = socketManager.initializeAsServer(port);
     }
-    prefillHealthProbeMode = success;
+    // Under Dynamo routing, decode does not wait on ZMQ prefill health for
+    // readiness — Dynamo owns request routing; ZMQ is only for slot
+    // reservation once prefill connects.
+    prefillHealthProbeMode = success && !tt::config::dynamoRoutingEnabled();
   } else if (mode == tt::config::LLMMode::PREFILL_ONLY) {
     if (useGatewayMode) {
       TT_LOG_INFO(
@@ -136,7 +139,7 @@ bool InterServerService::sendPrefillRequest(
     const std::vector<uint32_t>& tokenIds, std::optional<int> maxTokens,
     std::optional<uint32_t> slotId,
     const tt::domain::llm::SamplingParams& sampling, int decodePositionId,
-    int decodeSkipTokens) {
+    int decodeSkipTokens, const std::string& traceparent) {
   if (!enabled) {
     return false;
   }
@@ -152,6 +155,7 @@ bool InterServerService::sendPrefillRequest(
   message.fastMode = sampling.fast_mode;
   message.decodePositionId = decodePositionId;
   message.decodeSkipTokens = decodeSkipTokens;
+  message.traceparent = traceparent;
 
   return socketManager.sendObject(tags::PREFILL_REQUEST, message);
 }
@@ -187,6 +191,22 @@ bool InterServerService::sendPrefillCacheBlocksAdded(
   return socketManager.sendObject(tags::PREFILL_CACHE_BLOCKS_ADDED, message);
 }
 
+bool InterServerService::sendSlotReservationRequest(
+    const SlotReservationRequestMessage& message) {
+  if (!enabled) {
+    return false;
+  }
+  return socketManager.sendObject(tags::SLOT_RESERVATION_REQUEST, message);
+}
+
+bool InterServerService::sendSlotReservationResponse(
+    const SlotReservationResponseMessage& message) {
+  if (!enabled) {
+    return false;
+  }
+  return socketManager.sendObject(tags::SLOT_RESERVATION_RESPONSE, message);
+}
+
 void InterServerService::onPrefillRequested(PrefillRequestedCallback callback) {
   prefillRequestedCallback = callback;
 }
@@ -197,6 +217,16 @@ void InterServerService::onPrefillCancelled(PrefillCancelCallback callback) {
 
 void InterServerService::onPrefillComplete(PrefillCompleteCallback callback) {
   prefillCompleteCallback = callback;
+}
+
+void InterServerService::onSlotReservationRequest(
+    SlotReservationRequestCallback callback) {
+  slotReservationRequestCallback = callback;
+}
+
+void InterServerService::onSlotReservationResponse(
+    SlotReservationResponseCallback callback) {
+  slotReservationResponseCallback = callback;
 }
 
 void InterServerService::setConnectionLostCallback(
@@ -259,6 +289,18 @@ void InterServerService::setupMessageHandlers() {
         [this](const PrefillHealthRequestMessage&) {
           sendPrefillHealthStatus();
         });
+
+    socketManager.registerHandler<SlotReservationResponseMessage>(
+        tags::SLOT_RESERVATION_RESPONSE,
+        [this](const SlotReservationResponseMessage& message) {
+          TT_LOG_INFO(
+              "[InterServerService] Received slot reservation response: "
+              "taskId={} error={}",
+              message.taskId, message.error);
+          if (slotReservationResponseCallback) {
+            slotReservationResponseCallback(message);
+          }
+        });
   }
 
   if (llmMode == tt::config::LLMMode::DECODE_ONLY) {
@@ -290,6 +332,18 @@ void InterServerService::setupMessageHandlers() {
           }
           if (prefillCompleteCallback) {
             prefillCompleteCallback(message);
+          }
+        });
+
+    socketManager.registerHandler<SlotReservationRequestMessage>(
+        tags::SLOT_RESERVATION_REQUEST,
+        [this](const SlotReservationRequestMessage& message) {
+          TT_LOG_INFO(
+              "[InterServerService] Received slot reservation request: "
+              "taskId={} hashes={}",
+              message.taskId, message.registrationHashes.size());
+          if (slotReservationRequestCallback) {
+            slotReservationRequestCallback(message);
           }
         });
   }

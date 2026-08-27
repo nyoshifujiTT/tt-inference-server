@@ -4,7 +4,9 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "transport/kv_control_channel.hpp"
@@ -15,37 +17,26 @@
 namespace tt::transport {
 
 /**
- * @brief Drives the sender (prefill) side of a migration over the control
- *        channel.
+ * @brief Drives the sender (prefill) side of a bounce migration over the
+ * control channel.
  *
- * Sequences one migration end to end:
- *   BeginMigration -> (await) MirrorReady -> transferSlot (one-sided WRITEs)
- *   -> DoneMarker -> (await) Ack.
+ * Sequences one migration:
+ *   BeginMigration -> (await) BounceReady -> per window: WindowReady ->
+ *   (await) WindowAck -> ... -> DoneMarker -> (await) Ack.
  *
- * Holds references to the control channel and the data-plane sender; owns no
- * threads — call migrate() from the prefill worker.
+ * The window handshake is the WindowSink handed to the data-plane sender, so
+ * the sender stays channel-free and the credit-based backpressure lives here.
  */
 class KvMigrationSender {
  public:
   KvMigrationSender(KvControlChannel& channel, MooncakeKvSender& sender);
 
-  /**
-   * @brief Init-time table exchange: send our serialized table, return the
-   *        peer's. The caller deserializes the peer blob (e.g. via
-   *        KvChunkAddressTableAdapter::fromProtobuf) into the decode table.
-   * @return the peer's table blob, or std::nullopt on protocol error.
-   */
+  /// Init-time table exchange (send ours, return the peer's).
   std::optional<std::vector<uint8_t>> exchangeTables(
       const std::vector<uint8_t>& localTableBlob);
 
-  /// Run one migration to completion.
-  ///
-  /// @return true only if the whole slot landed on the decode device. false
-  /// means the migration did NOT complete: the decode device may hold a partial
-  /// mix of new and stale KV. The caller MUST NOT let the decode engine consume
-  /// the slot until migrate() returns true, and recovers by retrying the *same*
-  /// request (the drain is idempotent — see README "Contract for a higher-layer
-  /// caller"). There is no rollback to prior contents.
+  /// Run one migration to completion. @return true only if the whole slot
+  /// landed on the decode device (same contract as KvMigrationSender::migrate).
   bool migrate(uint64_t uuid, const MigrationRequest& request);
 
  private:
@@ -54,30 +45,44 @@ class KvMigrationSender {
 };
 
 /**
- * @brief Drives the receiver (decode) side of a migration over the control
- *        channel.
+ * @brief Drives the receiver (decode) side of a bounce migration.
  *
- * Reacts to inbound control messages: BeginMigration -> prepareMirror +
- * MirrorReady; DoneMarker -> drain + Ack. run() services messages until the
- * channel closes; serveOne() handles a single message (for stepwise tests).
+ * Reacts to inbound control messages: TABLE_EXCHANGE (reply local decode
+ * table); BeginMigration -> BounceReady (segment + geometry); WindowReady ->
+ * drainWindow + WindowAck; DoneMarker -> Ack (carrying whether every window
+ * drained). Holds no table of its own — the bounce receiver drains purely from
+ * window descriptors.
  */
 class KvMigrationReceiver {
  public:
-  KvMigrationReceiver(KvControlChannel& channel, MooncakeKvReceiver& receiver);
+  KvMigrationReceiver(
+      KvControlChannel& channel, MooncakeKvReceiver& receiver,
+      std::shared_ptr<const std::vector<uint8_t>> localTableBlob = nullptr);
+  /// A null receiver enables control-only dry-run mode: TABLE_EXCHANGE is
+  /// served, while migration requests are logged and rejected.
+  KvMigrationReceiver(
+      KvControlChannel& channel, MooncakeKvReceiver* receiver,
+      std::shared_ptr<const std::vector<uint8_t>> localTableBlob = nullptr);
 
   /// Init-time table exchange: receive the peer's table, then send ours.
   std::optional<std::vector<uint8_t>> exchangeTables(
       const std::vector<uint8_t>& localTableBlob);
 
-  /// Handle one inbound message. @return false when the channel has closed.
+  /// Handle one inbound message (bounded wait). @return false on close/timeout.
   bool serveOne();
 
-  /// Service messages until the channel closes.
+  /// Service messages until the channel closes (idle timeouts keep waiting).
   void run();
 
  private:
+  bool handle(const KvControlMessage& msg);
+  bool handleTableExchange(const KvControlMessage& msg);
+
   KvControlChannel& channel_;
-  MooncakeKvReceiver& receiver_;
+  MooncakeKvReceiver* receiver_;
+  std::shared_ptr<const std::vector<uint8_t>> local_table_blob_;
+  // uuid -> whether every window so far drained ok (reset on BeginMigration).
+  std::unordered_map<uint64_t, bool> ok_;
 };
 
 }  // namespace tt::transport

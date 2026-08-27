@@ -155,23 +155,29 @@ def _attach_mpi_comm():
 def _create_dit_runner(model_runner: str, rank: int):
     """Create the appropriate DiT runner (lazy import to avoid loading ttnn globally)."""
     from tt_model_runners.dit_runners import (
+        TTMiniMaxH3Runner,
         TTMochi1Runner,
         TTWan22I2VAniSoraRunner,
         TTWan22I2VDistillRunner,
+        TTWan22I2VLightningRunner,
         TTWan22I2VLoRARunner,
         TTWan22I2VProdiaRunner,
         TTWan22I2VRunner,
         TTWan22Runner,
+        TTWan22T2VProdiaRunner,
     )
 
     runner_map = {
         ModelRunners.TT_MOCHI_1.value: TTMochi1Runner,
         ModelRunners.TT_WAN_2_2.value: TTWan22Runner,
+        ModelRunners.TT_WAN_2_2_T2V_PRODIA.value: TTWan22T2VProdiaRunner,
         ModelRunners.TT_WAN_2_2_I2V.value: TTWan22I2VRunner,
         ModelRunners.TT_WAN_2_2_I2V_PRODIA.value: TTWan22I2VProdiaRunner,
         ModelRunners.TT_WAN_2_2_I2V_ANISORA.value: TTWan22I2VAniSoraRunner,
         ModelRunners.TT_WAN_2_2_I2V_DISTILL.value: TTWan22I2VDistillRunner,
         ModelRunners.TT_WAN_2_2_I2V_LORA.value: TTWan22I2VLoRARunner,
+        ModelRunners.TT_WAN_2_2_I2V_LIGHTNING.value: TTWan22I2VLightningRunner,
+        ModelRunners.TT_MINIMAX_H3_T2VA.value: TTMiniMaxH3Runner,
     }
     runner_class = runner_map.get(model_runner)
     if not runner_class:
@@ -226,14 +232,30 @@ def _enqueue_rank0_error(
 def _rank0_load_image_prompts(
     raw_req: Optional[VideoRequest],
     encode_queue: "queue.Queue[Optional[_EncodeJob]]",
+    requires_image: bool = False,
 ) -> tuple:
     """
     Rank-0-only: resolve ``image_prompts`` for one inference iteration.
     Returns ``(image_prompts, skip)`` where ``skip=True`` means rank 0 has
     already enqueued an error response on the caller's behalf.
 
+    ``requires_image`` is the running runner's ``requires_image_conditioning``
+    flag. When it is True (an I2V runner) a request that carries no image
+    conditioning is rejected with a clean per-request error instead of falling
+    through to a base ``VideoGenerateRequest`` — which the I2V runner cannot
+    consume and would crash on (missing ``image_prompts``).
     """
-    if raw_req is None or not raw_req.image_path:
+    if raw_req is None:
+        return None, False
+    if not raw_req.image_path:
+        if requires_image:
+            return _enqueue_rank0_error(
+                encode_queue,
+                raw_req.task_id,
+                f"I2V request {raw_req.task_id} carries no image conditioning "
+                f"(image_path empty); a text-only request was routed to an I2V "
+                f"runner. Rejecting.",
+            )
         return None, False
     prompts = _read_image_prompts_side_file(raw_req.image_path, raw_req.task_id)
     if prompts is None:
@@ -334,7 +356,7 @@ def _encoder_loop(
     and error paths. Sentinel ``None`` signals shutdown.
 
     """
-    from utils.video_manager import VideoManager
+    from utils.video_manager import VideoAudioResult, VideoManager
 
     video_manager = VideoManager()
     _log.info("Encoder thread: started")
@@ -372,7 +394,18 @@ def _encoder_loop(
             continue
 
         try:
-            mp4_path = video_manager.export_to_mp4(job.frames)
+            # Audio runners (e.g. MiniMax-H3 t2va) hand back a VideoAudioResult so the
+            # soundtrack is muxed here; everything else hands back a raw frame array.
+            payload = job.frames
+            if isinstance(payload, VideoAudioResult):
+                mp4_path = video_manager.export_to_mp4_with_audio(
+                    payload.frames,
+                    payload.audio,
+                    payload.sampling_rate,
+                    fps=payload.fps,
+                )
+            else:
+                mp4_path = video_manager.export_to_mp4(payload)
             _log.info(
                 f"Encoder thread: encoded mp4 for task {job.task_id} at {mp4_path}"
             )
@@ -437,7 +470,9 @@ def _run_inference_loop(
                 )
             else:
                 rank0_image_prompts, rank0_skip = _rank0_load_image_prompts(
-                    raw_req, encode_queue
+                    raw_req,
+                    encode_queue,
+                    getattr(runner, "requires_image_conditioning", False),
                 )
 
         req, image_prompts, skip = _broadcast_request(

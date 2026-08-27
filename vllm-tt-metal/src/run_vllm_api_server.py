@@ -302,18 +302,28 @@ def ensure_weights_available(model_spec: dict) -> Path:
         logger.info(f"Using pre-mounted weights from MODEL_WEIGHTS_DIR: {weights_path}")
         return weights_path
 
-    # Default: download weights into cache_root
+    # Default: download weights into cache_root.
+    # snapshot_download resumes partial downloads and skips files already present, so
+    # always invoke it: a partially-downloaded directory looks non-empty but would crash
+    # the server at load time if treated as complete. Fall back to existing weights only
+    # when the hub is unreachable, preserving offline startup with complete weights.
     cache_root = Path(os.getenv("CACHE_ROOT", "/home/container_app_user/cache_root"))
     model_name = model_spec["model_name"]
     weights_path = cache_root / "weights" / model_name
+    hf_repo = model_spec.get("hf_weights_repo") or model_spec["hf_model_repo"]
 
-    if not weights_path.exists() or not any(weights_path.iterdir()):
-        hf_repo = model_spec.get("hf_weights_repo") or model_spec["hf_model_repo"]
-        logger.info(f"Downloading weights from {hf_repo} to {weights_path}")
-        weights_path.mkdir(parents=True, exist_ok=True)
+    weights_path.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Downloading weights from {hf_repo} to {weights_path}")
+    try:
         snapshot_download(repo_id=hf_repo, local_dir=weights_path)
-    else:
-        logger.info(f"Weights already exist at {weights_path}")
+    except Exception as e:
+        if any(weights_path.iterdir()):
+            logger.warning(
+                f"Could not reach Hugging Face to verify weights ({e}); "
+                f"using existing weights at {weights_path}"
+            )
+        else:
+            raise
 
     os.environ["MODEL_WEIGHTS_DIR"] = str(weights_path)
     return weights_path
@@ -481,9 +491,16 @@ def set_metal_timeout_env_vars():
     TT_METAL_DISPATCH_TIMEOUT_COMMAND_TO_EXECUTE so that tt-triage runs
     automatically when an op dispatch hangs.
 
-    Disabled when DISABLE_METAL_OP_TIMEOUT=1 is set (via run.py --disable-metal-timeout).
+    Disabled when DISABLE_METAL_OP_TIMEOUT=1 is set by either the model spec or
+    ``run.py --disable-metal-timeout``.
     """
     if os.getenv("DISABLE_METAL_OP_TIMEOUT") == "1":
+        # DISABLE_METAL_OP_TIMEOUT is an inference-server control flag; tt-metal
+        # itself only reads these two variables. Clear inherited values so an
+        # explicit model/CLI disable cannot leave a previously configured timeout
+        # active in this process.
+        os.environ.pop("TT_METAL_OPERATION_TIMEOUT_SECONDS", None)
+        os.environ.pop("TT_METAL_DISPATCH_TIMEOUT_COMMAND_TO_EXECUTE", None)
         logger.info("Metal op timeout disabled via DISABLE_METAL_OP_TIMEOUT=1")
         return
 
@@ -502,10 +519,18 @@ def set_metal_timeout_env_vars():
 
     # mkdir -p so the redirect succeeds when log_dir doesn't exist yet (in CI it
     # points at the cache_root volume, which has no pre-created logs/ dir). See #2670.
+    # Tee rather than redirect: the triage report names the stalled core/kernel and
+    # is the only artifact that explains a dispatch hang. Writing it solely into
+    # log_dir loses it whenever that directory is a container volume CI does not
+    # upload (the Galaxy release job is exactly this case), so a hang reproduces as
+    # an unexplained TT_THROW with the diagnosis stranded inside the dead container.
+    # Teeing keeps the on-disk copy and also puts the report on stdout, where it is
+    # captured in the server log and therefore in the CI job log.
     timeout_cmd = (
         f"mkdir -p {log_dir} && "
         f"{python_env_dir}/bin/python {triage_script} "
-        f"--disable-progress > {log_dir}/tt-triage-$(date +%Y%m%d-%H%M%S).log 2>&1"
+        f"--disable-progress 2>&1 | "
+        f"tee {log_dir}/tt-triage-$(date +%Y%m%d-%H%M%S).log"
     )
 
     os.environ["TT_METAL_OPERATION_TIMEOUT_SECONDS"] = "5.0"
@@ -761,8 +786,8 @@ def main():
     register_tt_models(impl_id)
 
     # Step 4: Set runtime environment variables and vLLM server args
-    set_metal_timeout_env_vars()
     set_runtime_env_vars(model_spec)
+    set_metal_timeout_env_vars()
     runtime_settings(model_spec, no_auth=args.no_auth)
     default_vllm_args = model_spec["device_model_spec"]["vllm_args"]
     set_vllm_sys_argv(args, remaining_sys_argv, default_vllm_args)

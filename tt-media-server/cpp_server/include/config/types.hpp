@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -18,6 +17,7 @@ enum class ModelService {
   LLM,
   EMBEDDING,
   IMAGE,
+  TTS,
 };
 
 /** String value for env MODEL_SERVICE. */
@@ -27,6 +27,8 @@ inline std::string toString(ModelService s) {
       return "embedding";
     case ModelService::IMAGE:
       return "image";
+    case ModelService::TTS:
+      return "tts";
     case ModelService::LLM:
     default:
       return "llm";
@@ -37,6 +39,7 @@ inline std::string toString(ModelService s) {
 inline ModelService modelServiceFromString(const std::string& v) {
   if (v == "embedding") return ModelService::EMBEDDING;
   if (v == "image") return ModelService::IMAGE;
+  if (v == "tts") return ModelService::TTS;
   return ModelService::LLM;
 }
 
@@ -48,9 +51,11 @@ enum class ModelType {
   KIMI_K2_7_CODE,
   GPT_OSS_120B,
   MINIMAX_M2_7,
+  MINIMAX_M3,
   GLM_5_1,
   GLM_5_2,
   DEEPSEEK_V4_PRO,
+  GEMMA_4_31B_IT,
 };
 
 enum class LLMMode {
@@ -82,10 +87,16 @@ inline LLMMode llmModeFromString(const std::string& v) {
 enum class ModelRunnerType {
   MOCK,
   MOCK_PIPELINE,
+  MOCK_SCHEDULER,
   PIPELINE_MANAGER,
   TT_SDXL_GENERATE,
   TT_SDXL_IMAGE_TO_IMAGE,
   TT_SDXL_EDIT,
+  TT_TTS,
+  TT_BGE_LARGE_EN,
+  TT_BGE_M3,
+  TT_QWEN_EMBEDDING_8B,
+  EMBEDDING_MOCK,
 };
 
 enum class Model {
@@ -95,9 +106,11 @@ enum class Model {
   KIMI_K2_7_CODE,
   GPT_OSS_120B,
   MINIMAX_M2_7,
+  MINIMAX_M3,
   GLM_5_1,
   GLM_5_2,
   DEEPSEEK_V4_PRO,
+  GEMMA_4_31B_IT,
 };
 
 struct ModelMapping {
@@ -112,9 +125,11 @@ static constexpr ModelMapping MODEL_MAPPINGS[] = {
     {Model::KIMI_K2_7_CODE, "moonshotai/Kimi-K2.7-Code"},
     {Model::GPT_OSS_120B, "openai/gpt-oss-120b"},
     {Model::MINIMAX_M2_7, "MiniMaxAI/MiniMax-M2.7"},
+    {Model::MINIMAX_M3, "MiniMaxAI/MiniMax-M3"},
     {Model::GLM_5_1, "zai-org/GLM-5.1"},
     {Model::GLM_5_2, "zai-org/GLM-5.2"},
     {Model::DEEPSEEK_V4_PRO, "deepseek-ai/DeepSeek-V4-Pro"},
+    {Model::GEMMA_4_31B_IT, "google/gemma-4-31B-it"},
 };
 
 inline std::string toString(Model m) {
@@ -130,6 +145,8 @@ inline std::string toString(ModelRunnerType m) {
       return "mock";
     case ModelRunnerType::MOCK_PIPELINE:
       return "mock_pipeline";
+    case ModelRunnerType::MOCK_SCHEDULER:
+      return "mock_scheduler";
     case ModelRunnerType::PIPELINE_MANAGER:
       return "pipeline_manager";
     case ModelRunnerType::TT_SDXL_GENERATE:
@@ -138,6 +155,16 @@ inline std::string toString(ModelRunnerType m) {
       return "tt_sdxl_image_to_image";
     case ModelRunnerType::TT_SDXL_EDIT:
       return "tt_sdxl_edit";
+    case ModelRunnerType::TT_TTS:
+      return "tt_tts";
+    case ModelRunnerType::TT_BGE_LARGE_EN:
+      return "tt_bge_large_en";
+    case ModelRunnerType::TT_BGE_M3:
+      return "tt_bge_m3";
+    case ModelRunnerType::TT_QWEN_EMBEDDING_8B:
+      return "tt_qwen_embedding_8b";
+    case ModelRunnerType::EMBEDDING_MOCK:
+      return "embedding_mock";
   }
   return "unknown";
 }
@@ -151,9 +178,19 @@ inline std::string toClientRunnerName(ModelRunnerType m) {
       return "tt-sdxl-image-to-image";
     case ModelRunnerType::TT_SDXL_EDIT:
       return "tt-sdxl-edit";
+    case ModelRunnerType::TT_TTS:
+      return "tt-tts";
+    case ModelRunnerType::TT_BGE_LARGE_EN:
+      return "bge_large_en_v1_5";
+    case ModelRunnerType::TT_BGE_M3:
+      return "bge-m3";
+    case ModelRunnerType::TT_QWEN_EMBEDDING_8B:
+      return "qwen_embedding_8b";
     case ModelRunnerType::MOCK:
     case ModelRunnerType::MOCK_PIPELINE:
+    case ModelRunnerType::MOCK_SCHEDULER:
     case ModelRunnerType::PIPELINE_MANAGER:
+    case ModelRunnerType::EMBEDDING_MOCK:
       return "";
   }
   return "";
@@ -164,24 +201,6 @@ inline Model modelFromString(const std::string_view& v) {
     if (entry.name == v) return entry.model;
   }
   throw std::invalid_argument("Invalid model: " + std::string(v));
-}
-
-enum class ResponseFormatType : uint8_t {
-  TEXT = 0,
-  JSON_OBJECT = 1,
-  JSON_SCHEMA = 2
-};
-
-enum class SchedulingPolicy {
-  PREFILL_FIRST,
-  MAX_OCCUPANCY,
-};
-
-/** Parse SCHEDULING_POLICY; empty or unknown -> PREFILL_FIRST. Expects
- * lowercase input. */
-inline SchedulingPolicy schedulingPolicyFromString(const std::string& v) {
-  if (v == "max_occupancy") return SchedulingPolicy::MAX_OCCUPANCY;
-  return SchedulingPolicy::PREFILL_FIRST;
 }
 
 }  // namespace tt::config
