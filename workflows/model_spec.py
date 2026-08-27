@@ -3142,7 +3142,7 @@ audio_tts_templates = [
         # built from the base cannot serve this model. Build with
         # TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git until
         # these land on tenstorrent/tt-metal.
-        tt_metal_commit="d53d8d7",
+        tt_metal_commit="319f413",
         # Bring-up branch head (nyoshifujiTT/vllm, nyoshifujiTT/qwen3-asr-17b_p150x1).
         # e1a3825 is its upstream base and lacks the Qwen3-ASR fixes this model
         # needs (thinker_config ordering in the HF config, the TT adapter
