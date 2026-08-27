@@ -3711,11 +3711,12 @@ _eval_config_list = [
         hf_model_repo="pyannote/speaker-diarization-community-1",
         tasks=[
             EvalTask(
-                # Scored by DiarizationClientStrategy.run_eval, which computes a
-                # diarization error rate against the hand annotation shipped with
-                # pyannote's sample recording. Media evals call the client
-                # directly (run_evals.run_media_evals), so no lm-eval task is
-                # involved and none exists for diarization.
+                # Scored by test_module.eval_tests.run_diarization_eval as a
+                # diarization error rate -- against a prepared corpus when
+                # DIARIZATION_CORPUS_DIR names one, else the hand annotation
+                # shipped with pyannote's sample. Media model types dispatch
+                # straight to their runner, so no lm-eval task is involved and
+                # none exists for diarization.
                 task_name="pyannote_sample_der",
                 workflow_venv_type=None,
                 max_concurrent=None,

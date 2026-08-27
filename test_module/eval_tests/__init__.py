@@ -9,6 +9,7 @@ import importlib
 _LAZY_ATTRS = {
     "run_audio_eval": ".audio_eval_tests",
     "run_cnn_eval": ".cnn_eval_tests",
+    "run_diarization_eval": ".diarization_eval_tests",
     "run_embedding_eval": ".embedding_eval_tests",
     "run_image_eval": ".image_eval_tests",
     "IMAGE_EVAL_DISPATCH": ".image_eval_tests",

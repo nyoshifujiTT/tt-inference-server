@@ -53,6 +53,7 @@ EVAL_DISPATCH: dict[str, str] = {
     "EMBEDDING": "run_embedding_eval",
     "TEXT_TO_SPEECH": "run_tts_eval",
     "VIDEO": "run_video_eval",
+    "DIARIZATION": "run_diarization_eval",
 }
 
 BENCHMARK_DISPATCH: dict[str, str] = {
@@ -62,6 +63,7 @@ BENCHMARK_DISPATCH: dict[str, str] = {
     "EMBEDDING": "run_embedding_benchmark",
     "TEXT_TO_SPEECH": "run_tts_benchmark",
     "VIDEO": "run_video_benchmark",
+    "DIARIZATION": "run_diarization_benchmark",
 }
 
 

@@ -9,6 +9,7 @@ import importlib
 _LAZY_ATTRS = {
     "run_audio_benchmark": ".audio_benchmark_tests",
     "run_cnn_benchmark": ".cnn_benchmark_tests",
+    "run_diarization_benchmark": ".diarization_benchmark_tests",
     "run_embedding_benchmark": ".embedding_benchmark_tests",
     "run_image_benchmark": ".image_benchmark_tests",
     "IMAGE_BENCHMARK_DISPATCH": ".image_benchmark_tests",
