@@ -81,11 +81,18 @@ a local-only commit cannot end up in the image.
 ## 2. Build
 
 ```bash
-python3 scripts/build_docker_images.py --build-metal-commit <tt-metal sha>
+python3 scripts/build_docker_images.py --build-metal-commit <tt-metal sha> --release
 ```
 
-This produces
-`ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:<VERSION>-<tt_metal>-<vllm>`.
+This produces both
+`...vllm-tt-metal-src-dev-ubuntu-22.04-amd64:<VERSION>-<tt_metal>-<vllm>` and
+`...vllm-tt-metal-src-release-ubuntu-22.04-amd64:<VERSION>-<tt_metal>-<vllm>`.
+
+`--release` is required. Without it the script logs
+`Skipping release image build: ...` and only the dev image is produced, but the
+catalog resolves a vLLM model to the **release** repo
+(`model_spec.py::get_default_docker_image`), so step 4 would then either serve a
+different image than the spec describes or fail to find one at all.
 
 ## 3. Revert
 
@@ -99,8 +106,11 @@ git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile \
 ```bash
 python3 run.py --model bge-reranker-v2-m3 --workflow server --tt-device p150 \
   --docker-server --no-auth --service-port 8010 \
-  --override-docker-image <tag from step 2>
+  --override-docker-image <the release tag from step 2>
 ```
+
+Use the **release** tag here, not the dev one: that is what the catalog resolves
+to, so serving it is what validates the spec end to end.
 
 Do not pass `--dev-mode`: it overlays host sources onto the image, so the run
 would no longer validate the image being tested.

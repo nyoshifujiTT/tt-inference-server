@@ -177,6 +177,39 @@ class TestRerankerBuildingDoc:
                 ln.startswith("+") and key in ln for ln in patch.splitlines()
             ), f"the documented patch does not set {key}"
 
+    def test_documented_build_produces_the_image_the_catalog_resolves(self):
+        """The build step must ask for the release image.
+
+        `build_docker_images.py` only builds the release image when `--release`
+        is passed; otherwise it logs "Skipping release image build" and leaves
+        just the dev one. But a vLLM model resolves to the *release* repo
+        (model_spec.py::get_default_docker_image), so a doc that omits the flag
+        sends the reader to serve an image the catalog never names -- or to no
+        image at all.
+        """
+        doc = self.DOC.read_text()
+        build_lines = [ln for ln in doc.splitlines() if "build_docker_images.py" in ln]
+        assert build_lines, "BUILDING.md no longer documents a build command"
+        for line in build_lines:
+            assert "--release" in line, (
+                f"documented build does not pass --release, so it never produces "
+                f"the release image the catalog resolves to: {line.strip()}"
+            )
+
+    def test_documented_serve_uses_the_release_image(self):
+        """The serve step must point at the release tag, for the same reason."""
+        doc = self.DOC.read_text()
+        serve_lines = [ln for ln in doc.splitlines() if "--override-docker-image" in ln]
+        assert serve_lines, "BUILDING.md no longer documents serving"
+        # Check the argument itself, not the prose around it: an earlier version
+        # of this test looked at the following 120 characters and passed on the
+        # wrong command purely because a later sentence said "release".
+        for line in serve_lines:
+            argument = line.split("--override-docker-image", 1)[1].strip()
+            assert "release" in argument, (
+                f"the documented serve command does not pass the release tag: {line.strip()}"
+            )
+
 
 class TestBundlesReachTheImage:
     """A bundle only registers a model if it is actually in the image and
