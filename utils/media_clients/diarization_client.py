@@ -118,7 +118,7 @@ class DiarizationClientStrategy(BaseMediaStrategy):
         )
         self.require_health()
 
-        corpus_name = os.environ.get("DIARIZATION_CORPUS_NAME", "voxconverse")
+        corpus_name = os.environ.get("DIARIZATION_CORPUS_NAME", "voxconverse-test")
         corpus = accuracy.corpus_root(corpus_name)
         if corpus:
             eval_data = self._eval_over_corpus(accuracy, corpus, corpus_name)
@@ -199,6 +199,11 @@ class DiarizationClientStrategy(BaseMediaStrategy):
         metric is accumulated across them rather than averaged per file -- the
         same way the published figures are computed, so a long recording weighs
         more than a short one.
+
+        The split has to match the published one to be a like-for-like check.
+        Scoring a development split against a test-split figure lands well under
+        it -- dev is the easier half -- so a split with no published number of
+        its own reports NA rather than a pass it did not earn.
         """
         limit = os.environ.get("DIARIZATION_CORPUS_LIMIT")
         limit = int(limit) if limit else None
@@ -215,11 +220,20 @@ class DiarizationClientStrategy(BaseMediaStrategy):
         scored = accuracy.corpus_der(diarize, root, limit=limit)
         wall_clock_seconds = time.monotonic() - loop_start
 
-        published = accuracy.PUBLISHED_CORPUS_DER.get(corpus_name)
-        ceiling = (
-            published + accuracy.CORPUS_DER_TOLERANCE if published is not None else None
-        )
-        passed = ceiling is not None and scored["der"] <= ceiling
+        published = accuracy.published_corpus_der(corpus_name)
+        if published is None:
+            accuracy_check = ReportCheckTypes.NA
+            logger.warning(
+                f"no published DER for split {corpus_name!r}; reporting the "
+                "measured value without a pass/fail verdict"
+            )
+        else:
+            ceiling = published + accuracy.CORPUS_DER_TOLERANCE
+            accuracy_check = (
+                ReportCheckTypes.PASS
+                if scored["der"] <= ceiling
+                else ReportCheckTypes.FAIL
+            )
 
         logger.info(
             f"{corpus_name} DER={scored['der']:.5f} over "
@@ -245,9 +259,7 @@ class DiarizationClientStrategy(BaseMediaStrategy):
                 # workflow reports them, so they are left out here rather than
                 # averaged over recordings of different lengths.
                 "performance_check": ReportCheckTypes.NA,
-                "accuracy_check": (
-                    ReportCheckTypes.PASS if passed else ReportCheckTypes.FAIL
-                ),
+                "accuracy_check": accuracy_check,
             }
         ]
 

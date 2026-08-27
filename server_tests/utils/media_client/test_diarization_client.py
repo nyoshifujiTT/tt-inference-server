@@ -361,7 +361,7 @@ class TestCorpusEval(unittest.TestCase):
             "num_recordings": 3,
             "per_recording": {"a": 0.10, "b": 0.11, "c": 0.15},
         }
-        fake.PUBLISHED_CORPUS_DER = {"voxconverse": 0.112}
+        fake.published_corpus_der.return_value = 0.112
         fake.CORPUS_DER_TOLERANCE = 0.05
         return strategy
 
@@ -383,7 +383,7 @@ class TestCorpusEval(unittest.TestCase):
                 next(pathlib.Path(out).rglob("results_*.json")).read_text()
             )[0]
 
-        assert report["task_name"] == "voxconverse_der"
+        assert report["task_name"] == "voxconverse-test_der"
         assert report["score"] == pytest.approx(0.12)
         assert report["num_recordings"] == 3
         assert report["published_score"] == pytest.approx(0.112)
@@ -453,3 +453,37 @@ class TestCorpusEval(unittest.TestCase):
 
         fake.corpus_der.assert_not_called()
         fake.sample_audio_path.assert_called()
+
+
+    def test_a_split_without_a_published_figure_is_not_scored_as_a_pass(self):
+        """Dev-split runs land under the test-split number; that is not a pass.
+
+        Borrowing another split's figure would report success while measuring
+        the easier half of the corpus, so the verdict has to be NA.
+        """
+        import json
+        import pathlib
+        import tempfile
+
+        fake = _fake_accuracy(reference_turns=[])
+        with tempfile.TemporaryDirectory() as out:
+            strategy = self._strategy_with_corpus(fake)
+            strategy.output_path = out
+            fake.published_corpus_der.return_value = None
+            fake.corpus_der.return_value = {
+                "der": 0.0705,  # what dev actually scores
+                "num_recordings": 216,
+                "per_recording": {"a": 0.07},
+            }
+            with patch(
+                "utils.media_clients.diarization_client._accuracy", return_value=fake
+            ):
+                strategy.run_eval()
+
+            report = json.loads(
+                next(pathlib.Path(out).rglob("results_*.json")).read_text()
+            )[0]
+
+        assert report["score"] == pytest.approx(0.0705)
+        assert report["published_score"] is None
+        assert report["accuracy_check"] == ReportCheckTypes.NA
