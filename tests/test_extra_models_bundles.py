@@ -202,3 +202,21 @@ class TestBundlesReachTheImage:
         assert 'COPY --chown=container_app_user:container_app_user \\\n    "vllm-tt-metal/extra_models" ${EXTRA_MODELS_DIR}' in text, (
             "the extra_models directory is not COPYed into the image"
         )
+
+    def test_the_reranker_is_registered_only_through_its_bundle(self):
+        """The in-tree tt-vllm-plugin must not also register the reranker.
+
+        That package is a different plugin: this image clones the standalone
+        tenstorrent/vllm-tt-plugin, and the only Dockerfiles that install
+        ``tt-vllm-plugin/`` belong to tt-media-server. Registering the reranker
+        there therefore ran nowhere, while looking like the wiring that makes
+        serving work -- and it duplicated what the bundle already does, so the
+        two could silently disagree about which class serves the architecture.
+        """
+        registry = BUNDLE_ROOT.parents[1] / "tt-vllm-plugin" / "tt_vllm_plugin" / "__init__.py"
+        if not registry.is_file():
+            pytest.skip("in-tree tt-vllm-plugin is not present")
+        assert "bge_reranker" not in registry.read_text(), (
+            "the reranker is registered in the in-tree tt-vllm-plugin, which this "
+            "image does not install; EXTRA_MODELS_DIR is the single registration point"
+        )
