@@ -17,7 +17,7 @@ build the base with Bake first and tag it the way the script expects:
 ```
 cd $TT_METAL_HOME
 docker buildx bake -f dockerfile/docker-bake.hcl \
-  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:736048c \
+  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:ddb7ace \
   --set ci-build.output=type=docker \
   ci-build
 ```
@@ -33,7 +33,7 @@ upstream, so both clone URLs have to be overridden:
 cd $TT_INFERENCE_SERVER
 TT_VLLM_REPO_URL=https://github.com/nyoshifujiTT/vllm.git \
 TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git \
-  python3 scripts/build_docker_images.py --build-metal-commit 736048c --single-threaded
+  python3 scripts/build_docker_images.py --build-metal-commit ddb7ace --single-threaded
 ```
 
 Without `TT_METAL_REPO_URL` the image lacks the vLLM adapter and the server dies
@@ -49,7 +49,7 @@ it is replaced, so keep at least 60 GB free.
 ```
 python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 --workflow server \
   --docker-server --dev-mode --no-auth --service-port 8110 --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-736048c-5e69638
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-ddb7ace-5e69638
 ```
 
 `/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the
