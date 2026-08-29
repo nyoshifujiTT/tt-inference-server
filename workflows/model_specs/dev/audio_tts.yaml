@@ -93,6 +93,13 @@ templates:
       default_impl: true
       env_vars:
         TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+        # Offload the embedding net only. The segmentation net is short-lived and
+        # offloading it costs more than it saves, so it stays on the host; set
+        # this to 1 for device coverage of both nets. Declared here because the
+        # host environment does not reach the container -- only what run.py puts
+        # on the docker command does, and that is model_spec.env_vars plus
+        # MODEL/DEVICE.
+        DIARIZATION_TT_SEGMENTATION: "0"
   status: COMPLETE
 
 - weights:
