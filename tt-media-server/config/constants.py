@@ -114,6 +114,7 @@ class ModelNames(Enum):
     FALCON3_7B_INSTRUCT = "Falcon3-7B-Instruct"
     YOLOX_NANO = "yolox_nano"
     Z_IMAGE_TURBO = "Z-Image-Turbo"
+    PYANNOTE_SPEAKER_DIARIZATION_COMMUNITY_1 = "speaker-diarization-community-1"
 
 
 class ModelRunners(Enum):
@@ -138,6 +139,7 @@ class ModelRunners(Enum):
     TT_LTX_2_3_DISTILLED = "tt-ltx-2.3-distilled"
     TT_MINIMAX_H3_T2VA = "tt-minimax-h3-t2va"
     TT_WHISPER = "tt-whisper"
+    TT_PYANNOTE_DIARIZATION = "tt-pyannote-diarization"
     VLLMForge = "vllm_forge"
     TT_YOLOV4 = "tt-yolov4"
     VLLMForge_QWEN_EMBEDDING = "vllmforge_qwen_embedding"
@@ -378,6 +380,9 @@ INFERENCE_MODEL_RUNNER_TO_MODEL_NAMES_MAP = {
     ModelRunners.TT_WHISPER: {
         ModelNames.OPENAI_WHISPER_LARGE_V3,
         ModelNames.DISTIL_WHISPER_LARGE_V3,
+    },
+    ModelRunners.TT_PYANNOTE_DIARIZATION: {
+        ModelNames.PYANNOTE_SPEAKER_DIARIZATION_COMMUNITY_1,
     },
     ModelRunners.TT_XLA_RESNET: {ModelNames.MICROSOFT_RESNET_50},
     ModelRunners.TT_XLA_VOVNET: {ModelNames.VOVNET},
@@ -1194,6 +1199,14 @@ ModelConfigs = {
         "queue_for_multiprocessing": QueueType.BatchFifo.value,
     },
     (ModelRunners.TT_WHISPER, DeviceTypes.P150): {
+        "device_mesh_shape": (1, 1),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_1.value,
+        "max_batch_size": 1,
+    },
+    # Diarization runs pyannote on host and offloads only the two neural nets,
+    # so it needs a single device and no mesh -- same shape as whisper.
+    (ModelRunners.TT_PYANNOTE_DIARIZATION, DeviceTypes.P150): {
         "device_mesh_shape": (1, 1),
         "is_galaxy": False,
         "device_ids": DeviceIds.DEVICE_IDS_1.value,
