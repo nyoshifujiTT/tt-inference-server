@@ -34,6 +34,11 @@ from utils.ffmpeg_utils import decode_to_wav
 from utils.logger import TTLogger
 
 
+# L1 scratch the ttnn ports were tuned against; the on-device tests in tt-metal
+# open their device with the same value.
+TT_L1_SMALL_SIZE = 32768
+
+
 def _wav_bytes_to_waveform(wav_bytes: bytes) -> dict:
     """Decode in-memory WAV into pyannote's ``{"waveform", "sample_rate"}`` input.
 
@@ -66,8 +71,14 @@ class DiarizationService:
     def __init__(self):
         self.logger = TTLogger()
         self._start_time = time.time()
+        # HF_MODEL is how the other runners let an operator redirect the repo
+        # id (llama_runner, embedding_runner). It matters here because the
+        # canonical community-1 repo is gated: without a token the only way to
+        # start is to point at the ungated mirror, and the settings path is
+        # resolved from the catalog rather than the environment.
         model_path = (
-            settings.model_weights_path
+            os.environ.get("HF_MODEL")
+            or settings.model_weights_path
             or settings.preprocessing_model_weights_path
             or SupportedModels.PYANNOTE_SPEAKER_DIARIZATION_COMMUNITY_1.value
         )
@@ -77,15 +88,35 @@ class DiarizationService:
             model_path=model_path, device="cpu", nn_accelerator=nn_accelerator
         )
 
-    def _maybe_build_tt_accelerator(self):
-        """Build a Tenstorrent NN accelerator hook when DIARIZATION_TT_DEVICE_ID is set.
+    def _resolve_device_id(self):
+        """Device to offload onto, taken from the resolved settings.
 
-        Offloads community-1's segmentation (PyanNet) and embedding (WeSpeaker)
-        NNs onto a p150 via ttnn (see tt_port/tt_nn_accelerator). When the env var
-        is unset, returns None and the service runs pure-CPU.
+        ``settings.device_ids`` is what every other service uses; for this model
+        the catalog resolves it to a single device (``"(0)"``). Reading it here
+        rather than from a private env var means the standard launch --
+        ``run.py`` passing only MODEL and DEVICE -- offloads without any extra
+        configuration.
         """
-        dev_id = os.getenv("DIARIZATION_TT_DEVICE_ID")
-        if dev_id is None or dev_id == "":
+        raw = (settings.device_ids or "").strip()
+        if not raw:
+            return None
+        first = raw.replace(" ", "").split("),(")[0].strip("()")
+        return int(first) if first.isdigit() else None
+
+    def _maybe_build_tt_accelerator(self):
+        """Offload the two neural nets onto the device the settings resolved.
+
+        community-1's segmentation (PyanNet) and embedding (WeSpeaker) run
+        through ttnn (see tt_port/tt_nn_accelerator); the rest of the pipeline
+        -- clustering and the pyannote glue -- stays on host, as it does on GPU.
+        Falls back to pure CPU when there is no device or ttnn cannot open it,
+        so the service still answers rather than failing to start.
+        """
+        dev_id = self._resolve_device_id()
+        if dev_id is None:
+            self.logger.info(
+                "DiarizationService: no device resolved from settings; running on CPU"
+            )
             return None
         try:
             import ttnn
@@ -96,8 +127,9 @@ class DiarizationService:
             )
             from tt_nn_accelerator import make_tt_accelerator
 
-            l1 = int(os.getenv("DIARIZATION_TT_L1_SMALL", "32768"))
-            device = ttnn.open_device(device_id=int(dev_id), l1_small_size=l1)
+            device = ttnn.open_device(
+                device_id=dev_id, l1_small_size=TT_L1_SMALL_SIZE
+            )
             self._tt_device = device
             self.logger.info(
                 f"DiarizationService: TT NN acceleration on device {dev_id}"

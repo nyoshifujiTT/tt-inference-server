@@ -18,20 +18,47 @@ def _load_service(monkeypatch, captured):
     return svc
 
 
-def test_no_tt_env_means_cpu_no_accelerator(monkeypatch):
-    monkeypatch.delenv("DIARIZATION_TT_DEVICE_ID", raising=False)
+def test_no_device_in_settings_means_cpu(monkeypatch):
+    """A spec that resolves no device leaves the service on CPU rather than failing."""
     captured = {}
     svc = _load_service(monkeypatch, captured)
+    monkeypatch.setattr(svc.settings, "device_ids", "", raising=False)
     svc.DiarizationService()
     assert captured["nn_accelerator"] is None
 
 
-def test_tt_env_but_ttnn_unavailable_falls_back_to_cpu(monkeypatch):
-    monkeypatch.setenv("DIARIZATION_TT_DEVICE_ID", "0")
+def test_device_comes_from_settings_not_a_private_env_var(monkeypatch):
+    """The offload target is whatever the catalog resolved, as elsewhere.
+
+    Requiring a diarization-specific env var here would mean the standard
+    launch -- run.py passing only MODEL and DEVICE -- silently stayed on CPU.
+    """
+    captured = {}
+    svc = _load_service(monkeypatch, captured)
+    monkeypatch.setattr(svc.settings, "device_ids", "(3)", raising=False)
+
+    service = svc.DiarizationService.__new__(svc.DiarizationService)
+    service.logger = svc.TTLogger()
+    assert service._resolve_device_id() == 3
+
+
+def test_multi_device_settings_take_the_first(monkeypatch):
+    """pyannote is single-device here; a wider mesh must not crash the parse."""
+    captured = {}
+    svc = _load_service(monkeypatch, captured)
+    monkeypatch.setattr(svc.settings, "device_ids", "(0),(1),(2),(3)", raising=False)
+
+    service = svc.DiarizationService.__new__(svc.DiarizationService)
+    service.logger = svc.TTLogger()
+    assert service._resolve_device_id() == 0
+
+
+def test_ttnn_unavailable_falls_back_to_cpu(monkeypatch):
     # Ensure importing ttnn fails -> graceful fallback (nn_accelerator None)
     monkeypatch.setitem(sys.modules, "ttnn", None)  # import ttnn -> ImportError
     captured = {}
     svc = _load_service(monkeypatch, captured)
+    monkeypatch.setattr(svc.settings, "device_ids", "(0)", raising=False)
     svc.DiarizationService()
     assert captured["nn_accelerator"] is None
 
