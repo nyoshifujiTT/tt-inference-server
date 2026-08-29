@@ -268,6 +268,9 @@ MODEL_SERVICE_RUNNER_MAP = {
     ModelServices.TEXT_TO_SPEECH: {
         ModelRunners.TT_SPEECHT5_TTS,
     },
+    ModelServices.DIARIZATION: {
+        ModelRunners.TT_PYANNOTE_DIARIZATION,
+    },
 }
 
 

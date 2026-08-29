@@ -15,10 +15,12 @@ import pytest
 
 from config.constants import (
     INFERENCE_MODEL_RUNNER_TO_MODEL_NAMES_MAP,
+    MODEL_SERVICE_RUNNER_MAP,
     DeviceTypes,
     ModelConfigs,
     ModelNames,
     ModelRunners,
+    ModelServices,
     SupportedModels,
 )
 
@@ -46,6 +48,21 @@ def test_runner_has_a_device_config():
     # One device, no mesh: pyannote runs on host and only the two nets offload.
     assert config["device_mesh_shape"] == (1, 1)
     assert config["is_galaxy"] is False
+
+
+def test_runner_maps_to_the_diarization_service():
+    """run.py passes only MODEL and DEVICE -- never MODEL_SERVICE.
+
+    Settings deduces the service from the runner through this map, so without
+    an entry the container comes up with no service selected and serves
+    nothing, even once the name resolves.
+    """
+    services = [
+        service
+        for service, runners in MODEL_SERVICE_RUNNER_MAP.items()
+        if ModelRunners.TT_PYANNOTE_DIARIZATION in runners
+    ]
+    assert services == [ModelServices.DIARIZATION]
 
 
 def test_weights_path_resolves_from_the_model_name():
@@ -76,16 +93,13 @@ def test_settings_resolves_the_whole_chain():
         "from config.settings import Settings;"
         "s = Settings();"
         "import json;"
-        "print(json.dumps({'runner': s.model_runner, 'weights': s.model_weights_path}))"
+        "print(json.dumps({'runner': s.model_runner, 'weights': s.model_weights_path,"
+        " 'service': s.model_service}))"
     )
-    env = dict(
-        os.environ,
-        MODEL=MODEL_NAME,
-        DEVICE="p150",
-        MODEL_SERVICE="diarization",
-        PYTHONPATH=".",
-    )
-    for leftover in ("MODEL_RUNNER", "MODEL_WEIGHTS_PATH"):
+    # Exactly what run.py --docker-server sets: no MODEL_SERVICE, no runner,
+    # no weights path. Everything else has to be deduced.
+    env = dict(os.environ, MODEL=MODEL_NAME, DEVICE="p150", PYTHONPATH=".")
+    for leftover in ("MODEL_SERVICE", "MODEL_RUNNER", "MODEL_WEIGHTS_PATH"):
         env.pop(leftover, None)
 
     out = subprocess.run(
@@ -99,6 +113,7 @@ def test_settings_resolves_the_whole_chain():
 
     assert resolved["runner"] == ModelRunners.TT_PYANNOTE_DIARIZATION.value
     assert resolved["weights"] == "pyannote/speaker-diarization-community-1"
+    assert resolved["service"] == ModelServices.DIARIZATION.value
 
 
 def test_an_unregistered_model_still_fails_loudly():
