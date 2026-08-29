@@ -120,3 +120,45 @@ def test_an_unregistered_model_still_fails_loudly():
     """Guard the guard: the lookup must reject unknown names, not accept them."""
     with pytest.raises(ValueError):
         ModelNames("speaker-diarization-not-a-real-model")
+
+
+def test_the_diarization_api_is_served_for_this_model():
+    """The point of all the registration: MODEL alone must serve the API.
+
+    Routes are chosen from settings.model_service at import time, so this is
+    the end of the chain -- if any earlier link is missing the app comes up
+    with no diarization endpoints even though the container stays alive.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "from fastapi import FastAPI;"
+        "from fastapi.testclient import TestClient;"
+        "from open_ai_api import api_router;"
+        "app = FastAPI();"
+        "app.include_router(api_router);"
+        "import json;"
+        "print(json.dumps(sorted(TestClient(app).get('/openapi.json').json()['paths'])))"
+    )
+    env = dict(os.environ, MODEL=MODEL_NAME, DEVICE="p150", NO_AUTH="1", PYTHONPATH=".")
+    for leftover in ("MODEL_SERVICE", "MODEL_RUNNER", "MODEL_WEIGHTS_PATH"):
+        env.pop(leftover, None)
+
+    out = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    served = set(json.loads(out.stdout.strip().splitlines()[-1]))
+
+    # The pyannoteAI-shaped surface, plus the media staging the diarize body
+    # references by media:// url.
+    assert "/v1/audio/diarize" in served
+    assert "/v1/diarize" in served
+    assert "/v1/jobs/{job_id}" in served
+    assert "/v1/media/input" in served
