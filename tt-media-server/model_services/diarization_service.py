@@ -97,10 +97,12 @@ class DiarizationService:
         ``run.py`` passing only MODEL and DEVICE -- offloads without any extra
         configuration.
         """
-        raw = (settings.device_ids or "").strip()
-        if not raw:
+        raw = settings.device_ids
+        if not isinstance(raw, str) or not raw.strip():
+            # Not a string when the settings module is stubbed (tests) or the
+            # field was never resolved; either way there is no device to use.
             return None
-        first = raw.replace(" ", "").split("),(")[0].strip("()")
+        first = raw.strip().replace(" ", "").split("),(")[0].strip("()")
         return int(first) if first.isdigit() else None
 
     def _maybe_build_tt_accelerator(self):

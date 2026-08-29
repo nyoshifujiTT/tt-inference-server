@@ -18,6 +18,15 @@ def _load_service(monkeypatch, captured):
     return svc
 
 
+def test_non_string_device_ids_means_cpu(monkeypatch):
+    """An unresolved (or stubbed) device_ids must not crash the constructor."""
+    captured = {}
+    svc = _load_service(monkeypatch, captured)
+    monkeypatch.setattr(svc.settings, "device_ids", object(), raising=False)
+    svc.DiarizationService()
+    assert captured["nn_accelerator"] is None
+
+
 def test_no_device_in_settings_means_cpu(monkeypatch):
     """A spec that resolves no device leaves the service on CPU rather than failing."""
     captured = {}
