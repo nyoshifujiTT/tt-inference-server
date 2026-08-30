@@ -249,6 +249,15 @@ def run(args: argparse.Namespace) -> int:
         "avg_rtr": round(avg(rtrs), 4),
         "total_audio_s": round(total_audio, 2),
         "throughput_audio_s_per_s": round(total_audio / wall, 3) if wall else 0.0,
+        # Standard aggregate ASR speed metrics: rtfx = total audio / wall time
+        # (higher is faster, >1 beats real time), rtf = its reciprocal, both over
+        # the ORIGINAL waveform duration. This is what vLLM's ASR benchmark and
+        # the Open ASR Leaderboard report, so these can be compared with published
+        # numbers. They are NOT the same as avg_rtf/avg_rtr above, which average
+        # per-request ratios and therefore ignore concurrency: at concurrency > 1
+        # rtfx rises while avg_rtf stays put.
+        "rtfx": round(total_audio / wall, 3) if wall else 0.0,
+        "rtf": round(wall / total_audio, 4) if total_audio else 0.0,
     }
     print(json.dumps(report, indent=2, ensure_ascii=False))
     if args.output:
