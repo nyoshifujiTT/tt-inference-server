@@ -94,6 +94,21 @@ catalog resolves a vLLM model to the **release** repo
 (`model_spec.py::get_default_docker_image`), so step 4 would then either serve a
 different image than the spec describes or fail to find one at all.
 
+Budget **at least 60 GB free** on whatever filesystem backs
+`docker info --format '{{.DockerRootDir}}'`, and expect roughly an hour: this
+builds tt-metal from source (~1400 compile targets) rather than pulling a
+prebuilt base. One run leaves 42.6 GB of images behind (dev 21.7 GB, release
+21.7 GB, tt-metalium base 4.75 GB, heavily shared), plus build cache while it
+runs. `--disk-per-build` defaults to 40 GB and only gates how many builds run in
+parallel; it does not reserve space, so a half-full disk still fails mid-build.
+
+Superseded images are not cleaned up automatically. After confirming a new image
+works, drop the previous tag rather than letting them accumulate:
+
+```bash
+docker images --format '{{.Repository}}:{{.Tag}}' | grep <old-tt-metal-sha> | xargs -r docker rmi
+```
+
 ## 3. Revert
 
 ```bash
