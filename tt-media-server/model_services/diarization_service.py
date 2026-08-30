@@ -23,7 +23,6 @@ from domain.diarization_request import DiarizationRequest
 from domain.diarization_response import DiarizationResponse, DiarizationSegment
 from utils.decorators import log_execution_time
 from utils.diarization_backend import DiarizationBackend
-from utils.diarization_venv_client import DiarizationVenvClient
 from utils.diarization_warnings import (
     build_speaker_count_warning,
     count_distinct_speakers,
@@ -84,35 +83,8 @@ class DiarizationService:
             or SupportedModels.PYANNOTE_SPEAKER_DIARIZATION_COMMUNITY_1.value
         )
         self.logger.info(f"DiarizationService using model: {model_path}")
-        self._backend = self._build_backend(model_path)
-
-    def _build_backend(self, model_path):
-        """Diarize in the audio venv when there is one, in-process otherwise.
-
-        The image keeps ``pyannote.audio`` in ``audio_venv`` because installing
-        it beside vLLM would drag torch from 2.7 to 2.13, so in the container
-        the backend cannot be imported here at all -- it has to be reached
-        through the same kind of worker the ASR path uses. A plain checkout has
-        pyannote in the venv it runs from, and then the direct backend is both
-        available and simpler, so keep using it there.
-        """
-        # The worker opens the device itself: ttnn has to be imported in the
-        # process that runs the nets, and that is the child, not this one.
-        env = dict(os.environ)
-        device_id = self._resolve_device_id()
-        if device_id is not None:
-            env["DIARIZATION_DEVICE_ID"] = str(device_id)
-            env["DIARIZATION_L1_SMALL"] = str(TT_L1_SMALL_SIZE)
-        client = DiarizationVenvClient(
-            model_path=model_path, logger=self.logger, env=env
-        )
-        if client.is_available():
-            self.logger.info(
-                "DiarizationService: using the audio venv worker for pyannote"
-            )
-            return client
         nn_accelerator = self._maybe_build_tt_accelerator()
-        return DiarizationBackend(
+        self._backend = DiarizationBackend(
             model_path=model_path, device="cpu", nn_accelerator=nn_accelerator
         )
 
@@ -157,7 +129,9 @@ class DiarizationService:
             )
             from tt_nn_accelerator import make_tt_accelerator
 
-            device = ttnn.open_device(device_id=dev_id, l1_small_size=TT_L1_SMALL_SIZE)
+            device = ttnn.open_device(
+                device_id=dev_id, l1_small_size=TT_L1_SMALL_SIZE
+            )
             self._tt_device = device
             self.logger.info(
                 f"DiarizationService: TT NN acceleration on device {dev_id}"
