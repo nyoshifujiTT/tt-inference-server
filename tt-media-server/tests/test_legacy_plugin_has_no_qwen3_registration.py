@@ -36,10 +36,15 @@ def test_no_qwen3_arch_is_registered_here():
 def test_the_model_wrapper_is_not_named_as_a_vllm_entry_point():
     source = _plugin_source()
 
-    assert "qwen3_embedding_8b.demo.generator_vllm" not in source, (
-        "the model wrapper returns the finished embedding, not the pre-pooling "
-        "layout a vLLM pooling runner indexes; it must not be a registered arch"
-    )
+    # Both the path the wrapper used to live at and the one it lives at now:
+    # the point is that the wrapper -- wherever it sits -- returns the finished
+    # embedding, not the pre-pooling layout a vLLM pooling runner indexes, so it
+    # must not be a registered arch.
+    for path in (
+        "qwen3_embedding_8b.demo.generator_vllm",
+        "qwen3_embedding.tt.model",
+    ):
+        assert path not in source, f"{path} must not be registered as a vLLM arch"
 
 
 def test_the_other_registrations_are_untouched():
