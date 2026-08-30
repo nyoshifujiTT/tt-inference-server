@@ -8,7 +8,7 @@ from config.constants import SupportedModels
 from domain.diarization_request import DiarizationRequest
 from telemetry.telemetry_client import TelemetryEvent
 from tt_model_runners.base_metal_device_runner import BaseMetalDeviceRunner
-from tt_port.tt_nn_accelerator import make_tt_accelerator
+from tt_model_runners.diarization_nn_accelerator import make_tt_accelerator
 from utils.decorators import log_execution_time
 from utils.diarization_backend import DiarizationBackend
 

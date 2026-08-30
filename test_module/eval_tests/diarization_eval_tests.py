@@ -51,7 +51,7 @@ def _accuracy():
     """The scoring helpers from tt-metal, imported lazily.
 
     The tt-metal checkout is on PYTHONPATH wherever the ttnn port runs
-    (``tt_port/tt_nn_accelerator`` imports from it the same way), but the
+    (``tt_model_runners/diarization_nn_accelerator`` imports from it the same way), but the
     benchmark runner must keep working without it, so the import stays on the
     eval path only.
     """

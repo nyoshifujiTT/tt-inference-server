@@ -27,9 +27,10 @@ device-coverage validation).
 The ttnn implementations themselves live in tt-metal under
 ``models.demos.audio.pyannote_diarization`` (the community-standard home for a
 model's ttnn code, next to the whisper / qwen3_asr demos); this module is only
-the thin tt-inference-server-side adapter that wires them into pyannote. ttnn /
-torch / the metal package are imported lazily so this module stays importable
-(and unit-testable) without a device or a tt-metal checkout on PYTHONPATH.
+the thin adapter that wires them into pyannote, and it sits beside the runner
+that uses it, as whisper's helpers sit beside whisper_runner. torch and the
+metal package are imported lazily so this module stays importable (and
+unit-testable) without a tt-metal checkout on PYTHONPATH.
 """
 
 from __future__ import annotations

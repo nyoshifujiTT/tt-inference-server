@@ -87,7 +87,8 @@ class DiarizationBackend:
         self._lock = threading.Lock()
         # Optional hook (pipeline) -> None to offload the community-1 NNs
         # (segmentation PyanNet / embedding WeSpeaker) onto an accelerator such
-        # as a Tenstorrent p150 (see tt_port/). When None, everything runs on
+        # as a Tenstorrent p150 (see tt_model_runners/diarization_nn_accelerator).
+        # When None, everything runs on
         # the configured torch device (CPU).
         self._nn_accelerator = nn_accelerator
 
