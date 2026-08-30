@@ -45,3 +45,24 @@ def test_duration_is_the_submitted_audio_not_a_padded_length():
     # client, i.e. the real clip length.
     src = _read(BENCH)
     assert "total_audio = sum(r[2] for r in ok_results if r[2])" in src
+
+
+def test_audio_duration_prefers_our_own_measurement():
+    # The server's usage.seconds is a BILLING quantity in whole seconds, so it
+    # rounds every clip up. Trusting it inflated TED-509 from the true 1649.4 s
+    # to 1892.0 s (+14.7%) and made rtfx look correspondingly better, while the
+    # per-request durations recorded alongside stayed correct - so the error was
+    # only visible in the aggregate.
+    src = _read(BENCH)
+    assert "def resolve_audio_seconds(resp: dict, measured: Optional[float])" in src
+    assert "if measured is not None:\n        return measured" in src
+    assert "resolve_audio_seconds(data, wav_duration_seconds(file_bytes))" in src
+
+
+def test_server_reported_duration_is_still_the_fallback():
+    # A non-WAV container cannot be measured locally; fall back rather than drop
+    # the request from the aggregate.
+    src = _read(BENCH)
+    body = src[src.index("def resolve_audio_seconds") : src.index("def transcribe_once")]
+    assert 'resp.get("duration")' in body
+    assert 'usage.get("seconds")' in body

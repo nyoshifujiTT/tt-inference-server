@@ -126,7 +126,21 @@ def _multipart_body(fields: dict, filename: str, file_bytes: bytes) -> Tuple[byt
     return b"\r\n".join(lines), boundary
 
 
-def resolve_audio_seconds(resp: dict, fallback: Optional[float]) -> Optional[float]:
+def resolve_audio_seconds(resp: dict, measured: Optional[float]) -> Optional[float]:
+    """Audio duration to score speed against, in seconds.
+
+    Prefer the duration WE measured from the submitted file. The server's own
+    figure is a billing quantity, not a measurement: OpenAI's ``usage.seconds``
+    is whole seconds, so it rounds every clip up. Trusting it inflated the total
+    for TED-509 from the true 1649.4 s to 1892.0 s (+14.7%) and made rtfx look
+    correspondingly better, while the per-request durations recorded alongside
+    were correct - so the bug only showed up in the aggregate.
+
+    Fall back to the response only when the file could not be parsed (e.g. a
+    non-WAV container), and keep the same precedence there as before.
+    """
+    if measured is not None:
+        return measured
     # verbose_json / media: top-level "duration"
     d = resp.get("duration")
     if d is not None:
@@ -134,14 +148,14 @@ def resolve_audio_seconds(resp: dict, fallback: Optional[float]) -> Optional[flo
             return float(d)
         except (TypeError, ValueError):
             pass
-    # json: usage.seconds (OpenAI/vLLM standard)
+    # json: usage.seconds (OpenAI/vLLM standard, but whole seconds)
     usage = resp.get("usage")
     if isinstance(usage, dict) and usage.get("seconds") is not None:
         try:
             return float(usage["seconds"])
         except (TypeError, ValueError):
             pass
-    return fallback
+    return None
 
 
 def transcribe_once(
@@ -177,7 +191,9 @@ def transcribe_once(
         data = json.loads(payload)
     except json.JSONDecodeError:
         return ok, elapsed, None, payload[:200]
-    audio_s = resolve_audio_seconds(data, None)
+    # Measure the submitted file ourselves; the server's figure is billing-grade
+    # (whole seconds) and would inflate the aggregate.
+    audio_s = resolve_audio_seconds(data, wav_duration_seconds(file_bytes))
     text = data.get("text", "")
     return ok, elapsed, audio_s, text
 
