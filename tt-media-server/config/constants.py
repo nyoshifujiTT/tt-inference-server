@@ -1346,6 +1346,22 @@ ModelConfigs = {
         ),
         "queue_for_multiprocessing": QueueType.FasterFifo.value,
     },
+    (ModelRunners.QWEN_EMBEDDING_8B, DeviceTypes.P150): {
+        "device_mesh_shape": (1, 1),
+        "is_galaxy": False,
+        "device_ids": DeviceIds.DEVICE_IDS_1.value,
+        "max_batch_size": 32,
+        "use_queue_per_worker": True,
+        "default_throttle_level": 0,
+        "request_processing_timeout_seconds": 2000,
+        "vllm": _vllm_config(
+            model=SupportedModels.QWEN_3_EMBEDDING_8B.value,
+            max_model_length=32768,
+            max_num_batched_tokens=32768,
+            max_num_seqs=32,
+        ),
+        "queue_for_multiprocessing": QueueType.FasterFifo.value,
+    },
     (ModelRunners.QWEN_EMBEDDING_8B, DeviceTypes.N300): {
         "device_mesh_shape": (1, 2),
         "is_galaxy": False,
