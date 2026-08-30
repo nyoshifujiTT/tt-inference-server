@@ -194,6 +194,16 @@ def run_diarization_benchmark(ctx: MediaContext) -> Block:
         logger.error(f"Benchmark execution encountered an error: {e}")
         raise
 
+    # A failed call yields no ttft/rtr, and averaging skips missing values, so a
+    # run where most calls errored would otherwise report the healthy average of
+    # the few that worked -- a benchmark that gets better the more it fails.
+    failed = [status for status in status_list if not status.status]
+    if failed:
+        raise RuntimeError(
+            f"{len(failed)} of {len(status_list)} diarization calls failed; "
+            "refusing to report an average over the survivors"
+        )
+
     logger.info("Generating benchmark report...")
     ttft_ms_value = _diarization_avg(status_list, "ttft_ms")
     rtr_value = _diarization_avg(status_list, "rtr")

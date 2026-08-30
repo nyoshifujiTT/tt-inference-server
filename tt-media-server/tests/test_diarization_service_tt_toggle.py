@@ -138,7 +138,12 @@ def test_start_workers_warms_up_with_one_diarize(monkeypatch):
     assert warmup_audio["sample_rate"] == 16000
 
 
-def test_start_workers_warmup_failure_is_non_fatal(monkeypatch):
+def test_start_workers_warmup_failure_is_fatal(monkeypatch):
+    """Warmup is the only thing that exercises the pipeline before traffic.
+
+    Swallowing it lets a server that cannot diarize at all come up and report
+    itself ready, with one warning line as the sole evidence.
+    """
     monkeypatch.delenv("DIARIZATION_TT_DEVICE_ID", raising=False)
     import model_services.diarization_service as svc
 
@@ -152,7 +157,8 @@ def test_start_workers_warmup_failure_is_non_fatal(monkeypatch):
     monkeypatch.setattr(svc, "DiarizationBackend", _BoomBackend)
     _stub_device(monkeypatch, svc)
     service = svc.DiarizationService()
-    assert service.start_workers() is None  # warmup failure must be swallowed
+    with pytest.raises(RuntimeError, match="boom"):
+        service.start_workers()
 
 
 def test_wav_bytes_to_waveform_decodes_without_torchcodec():

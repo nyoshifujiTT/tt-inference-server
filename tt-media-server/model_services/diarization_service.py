@@ -180,14 +180,16 @@ class DiarizationService:
         The pyannote pipeline weights are lazy-loaded and, when TT acceleration
         is enabled, every ttnn kernel is JIT/auto-shard compiled on first use.
         Doing that on the first real request would make it slow and emit
-        one-off device log noise. So we run a single short dummy diarization
-        here to pay the load + compile cost up front; failures are non-fatal
-        (the first real request will simply compile lazily as before).
+        one-off device log noise, so a single short dummy diarization pays the
+        load and compile cost up front.
+
+        A failure here is a failure to serve, so it propagates. This warmup is
+        the first and only thing that exercises the whole pipeline before real
+        traffic; swallowing its exception turns "cannot diarize at all" into a
+        warning line under a server that reports itself ready, which is exactly
+        how a missing pyannote install survived into a shipped image.
         """
-        try:
-            self.warmup()
-        except Exception as e:  # noqa: BLE001 - warmup is best-effort
-            self.logger.warning(f"Diarization warmup skipped ({e})")
+        self.warmup()
         return None
 
     def warmup(self, seconds: float = 12.0) -> None:
