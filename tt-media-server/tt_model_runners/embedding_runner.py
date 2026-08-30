@@ -168,12 +168,48 @@ class Qwen3Embedding8BRunner(EmbeddingRunner):
             "trace_region_size": self.settings.trace_region_size,
         }
 
+    def _embed(self, tokenized):
+        # encode() is the wrapper's finished-embedding entry point: it runs the
+        # model's own three stages (transformer, last-token pooling, L2
+        # normalize) inside a single prefill trace and hands back unit-norm
+        # [batch, hidden] rows, which is what _process_result slices.
+        #
+        # forward() is the shared implementation behind that and behind the
+        # pre-pooling entry point vLLM needs; calling it here would leave which
+        # stage we get to a default rather than to this runner's requirement.
+        return self.model.encode(
+            tokenized["input_ids"],
+            attention_mask=tokenized.get("attention_mask"),
+        )
+
+    @log_execution_time("Model warmup")
+    async def warmup(self) -> bool:
+        self.logger.info(f"Device {self.device_id}: Model warmup...")
+        os.environ["HF_MODEL"] = self.model_name
+        self._load_model()
+        tokenized = self.tokenizer.tokenize(["The capital of France is Paris"], self.max_model_len)
+        self._embed(tokenized)
+        ttnn.synchronize_device(self.ttnn_device)
+        self.logger.info(f"Device {self.device_id}: Model warmup completed")
+        return True
+
+    def run(self, requests: list[TextEmbeddingRequest]):
+        self._validate_requests(requests)
+        text_inputs = [req.input for req in requests]
+        num_requests = len(requests)
+        tokenized = self.tokenizer.tokenize(text_inputs, self.max_model_len)
+        token_counts = self.tokenizer.calculate_token_counts(tokenized, num_requests)
+        result = self._embed(tokenized)
+        ttnn.synchronize_device(self.ttnn_device)
+        return self._process_result(result, requests, token_counts)
+
     def _load_model(self):
         self.logger.info(f"Device {self.device_id}: Loading model...")
-        # Shared adapter (subclasses the upstream PR #35941 wrapper) exposing the
-        # fork pooling contract. Aliased to the name the runner expects.
-        from models.demos.qwen3_embedding.tt.generator_vllm import (
-            Qwen3EmbeddingForTTvLLM as Qwen3ForEmbedding,
+        # The model wrapper itself, not the vLLM pooling adapter: this runner
+        # owns no Pooler, so it needs the finished embedding rather than the
+        # pre-pooling hidden states the adapter hands to vLLM.
+        from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm import (
+            Qwen3ForEmbedding,
         )
 
         self.model = Qwen3ForEmbedding(
