@@ -2,27 +2,27 @@
 #
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 
-"""Speaker diarization service (CPU, pyannote.audio 4.x / community-1).
+"""Speaker diarization service (pyannote.audio 4.x / community-1).
 
-This is an audio-category service that is SEPARATE from AudioService (which does
-ASR/whisper preprocessing). It runs pyannote diarization on CPU via
-DiarizationBackend and returns pyannoteAI-shaped speaker turns only (no ASR).
+An audio-category service, separate from AudioService (which does ASR/whisper
+preprocessing): diarization returns pyannoteAI-shaped speaker turns only, with
+no transcript.
 
-It does not use the device Scheduler / model runner path: pyannote diarization
-is a CPU pipeline, so __init__ is overridden to skip Scheduler + HF auto-download
-and just construct the CPU backend. Concurrency safety (pyannote pipeline is not
-thread-safe) is handled inside DiarizationBackend via a lock.
+Like every other service here it is a thin BaseService: request decoding lives
+in ``pre_process``, response shaping in ``post_process``, and everything about
+the device -- opening it, warming it, reporting its health, restarting a dead
+worker -- belongs to the Scheduler and to TTDiarizationRunner. The pyannote
+pipeline is not thread-safe, which the catalog expresses as max_batch_size 1
+and the runner as ``is_request_batchable() -> False``, rather than as a lock
+around a pipeline this process owns.
 """
 
-import os
-import time
-
-from config.constants import SupportedModels
 from config.settings import settings
 from domain.diarization_request import DiarizationRequest
 from domain.diarization_response import DiarizationResponse, DiarizationSegment
+from model_services.base_service import BaseService
+from telemetry.telemetry_client import TelemetryEvent
 from utils.decorators import log_execution_time
-from utils.diarization_backend import DiarizationBackend
 from utils.diarization_warnings import (
     build_speaker_count_warning,
     count_distinct_speakers,
@@ -31,12 +31,6 @@ from utils.diarized_asr_coordinator import DiarizedAsrCoordinator
 from utils.asr_http_client import encode_wav_pcm16, transcribe_wav_bytes
 from utils.composite_model_id import parse_model_id
 from utils.ffmpeg_utils import decode_to_wav
-from utils.logger import TTLogger
-
-
-# L1 scratch the ttnn ports were tuned against; the on-device tests in tt-metal
-# open their device with the same value.
-TT_L1_SMALL_SIZE = 32768
 
 
 def _wav_bytes_to_waveform(wav_bytes: bytes) -> dict:
@@ -65,188 +59,51 @@ def _wav_bytes_to_waveform(wav_bytes: bytes) -> dict:
     return {"waveform": torch.from_numpy(samples.copy()), "sample_rate": sample_rate}
 
 
-class DiarizationService:
-    """CPU speaker-diarization service (not a device/runner-backed BaseService)."""
+class DiarizationService(BaseService):
+    """Speaker diarization over the standard Scheduler + device-runner path."""
 
     def __init__(self):
-        self.logger = TTLogger()
-        self._start_time = time.time()
-        # HF_MODEL is how the other runners let an operator redirect the repo
-        # id (llama_runner, embedding_runner). It matters here because the
-        # canonical community-1 repo is gated: without a token the only way to
-        # start is to point at the ungated mirror, and the settings path is
-        # resolved from the catalog rather than the environment.
-        model_path = (
-            os.environ.get("HF_MODEL")
-            or settings.model_weights_path
-            or settings.preprocessing_model_weights_path
-            or SupportedModels.PYANNOTE_SPEAKER_DIARIZATION_COMMUNITY_1.value
-        )
-        self.logger.info(f"DiarizationService using model: {model_path}")
-        nn_accelerator = self._build_tt_accelerator()
-        self._backend = DiarizationBackend(
-            model_path=model_path, device="cpu", nn_accelerator=nn_accelerator
-        )
+        super().__init__()
 
-    def _resolve_device_id(self):
-        """Device to offload onto, taken from the resolved settings.
+    @log_execution_time(
+        "Diarization preprocessing", TelemetryEvent.PRE_PROCESSING, None
+    )
+    async def pre_process(self, request: DiarizationRequest) -> DiarizationRequest:
+        """Decode the submitted audio to the waveform the runner will diarize.
 
-        ``settings.device_ids`` is what every other service uses; for this model
-        the catalog resolves it to a single device (``"(0)"``). Reading it here
-        rather than from a private env var means the standard launch --
-        ``run.py`` passing only MODEL and DEVICE -- offloads without any extra
-        configuration.
+        Normalizing to 16 kHz mono here rather than in the runner keeps ffmpeg
+        off the device worker, and pyannote 4.x wants exact sample-count crops:
+        a compressed input handed straight through raises length errors.
         """
-        raw = settings.device_ids
-        if not isinstance(raw, str) or not raw.strip():
-            return None
-        first = raw.strip().replace(" ", "").split("),(")[0].strip("()")
-        return int(first) if first.isdigit() else None
-
-    def _build_tt_accelerator(self):
-        """Offload the two neural nets onto the device the settings resolved.
-
-        community-1's segmentation (PyanNet) and embedding (WeSpeaker) run
-        through ttnn (see tt_port/tt_nn_accelerator); the rest of the pipeline
-        -- clustering and the pyannote glue -- stays on host, as it does on GPU.
-
-        Any failure to reach the device is raised, not swallowed. This model is
-        served precisely because it runs on the accelerator, so a silent CPU
-        fallback would keep answering while quietly delivering none of that --
-        it hid a broken TT_MESH_GRAPH_DESC_PATH through a full bring-up.
-        """
-        dev_id = self._resolve_device_id()
-        if dev_id is None:
-            raise RuntimeError(
-                "DiarizationService: no device resolved from settings.device_ids "
-                f"({settings.device_ids!r}); the catalog must resolve a device for "
-                "this model"
-            )
-
-        import sys
-
-        import ttnn
-
-        sys.path.insert(
-            0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "tt_port")
-        )
-        from tt_nn_accelerator import make_tt_accelerator
-
-        device = ttnn.open_device(device_id=dev_id, l1_small_size=TT_L1_SMALL_SIZE)
-        self._tt_device = device
-        self.logger.info(f"DiarizationService: TT NN acceleration on device {dev_id}")
-        return make_tt_accelerator(device)
-
-    @log_execution_time("Diarization request")
-    async def process_request(self, request: DiarizationRequest) -> DiarizationResponse:
         audio_bytes = request.file
         if isinstance(audio_bytes, str):
             import base64
 
             audio_bytes = base64.b64decode(audio_bytes)
 
-        # Normalize any input to 16 kHz mono WAV (pyannote 4.x expects exact
-        # sample-count crops; compressed inputs otherwise raise length errors).
         wav_bytes = decode_to_wav(audio_bytes, sample_rate=settings.default_sample_rate)
+        request._audio_array = self._wav_bytes_to_samples(wav_bytes)
+        return request
 
-        result = self._backend.diarize(
-            _wav_bytes_to_waveform(wav_bytes),
-            num_speakers=request.num_speakers,
-            min_speakers=request.min_speakers,
-            max_speakers=request.max_speakers,
-            exclusive=request.exclusive,
-        )
-
+    async def post_process(self, result, input_request=None) -> DiarizationResponse:
+        """Shape the runner's turns into the pyannoteAI response."""
         segments = [DiarizationSegment(**s) for s in result["segments"]]
         exclusive = None
         if result.get("exclusiveDiarization") is not None:
             exclusive = [
                 DiarizationSegment(**s) for s in result["exclusiveDiarization"]
             ]
-        warning = build_speaker_count_warning(
-            count_distinct_speakers(result["segments"]),
-            num_speakers=request.num_speakers,
-            min_speakers=request.min_speakers,
-            max_speakers=request.max_speakers,
-        )
+        warning = None
+        if input_request is not None:
+            warning = build_speaker_count_warning(
+                count_distinct_speakers(result["segments"]),
+                num_speakers=input_request.num_speakers,
+                min_speakers=input_request.min_speakers,
+                max_speakers=input_request.max_speakers,
+            )
         return DiarizationResponse(
             segments=segments, exclusiveDiarization=exclusive, warning=warning
         )
-
-    def start_workers(self):
-        """Warm up the pipeline (and compile ttnn kernels) at service start.
-
-        Part of the service lifecycle contract invoked by the app lifespan.
-        The pyannote pipeline weights are lazy-loaded and, when TT acceleration
-        is enabled, every ttnn kernel is JIT/auto-shard compiled on first use.
-        Doing that on the first real request would make it slow and emit
-        one-off device log noise, so a single short dummy diarization pays the
-        load and compile cost up front.
-
-        A failure here is a failure to serve, so it propagates. This warmup is
-        the first and only thing that exercises the whole pipeline before real
-        traffic; swallowing its exception turns "cannot diarize at all" into a
-        warning line under a server that reports itself ready, which is exactly
-        how a missing pyannote install survived into a shipped image.
-        """
-        self.warmup()
-        return None
-
-    def warmup(self, seconds: float = 12.0) -> None:
-        """Run one dummy diarization to load weights and compile ttnn kernels.
-
-        Uses a short synthetic 16 kHz mono WAV. seconds is chosen long
-        to exercise the real segmentation window (10 s) so its kernels compile
-        during warmup rather than on the first user request.
-        """
-        import io
-        import wave
-        import numpy as np
-
-        sr = int(settings.default_sample_rate)
-        n = int(seconds * sr)
-        # low-amplitude noise so VAD/segmentation produce a non-trivial graph
-        rng = np.random.RandomState(0)
-        pcm = (rng.randn(n) * 0.02 * 32768.0).astype(np.int16)
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(sr)
-            w.writeframes(pcm.tobytes())
-        self.logger.info("DiarizationService: warming up pipeline...")
-        self._backend.diarize(_wav_bytes_to_waveform(buf.getvalue()), exclusive=True)
-        self.logger.info("DiarizationService: warmup complete")
-
-    def check_is_model_ready(self) -> dict:
-        """Readiness for /health and /tt-liveness.
-
-        The CPU backend has no device to probe; it is ready as soon as the
-        service is constructed. Weights load lazily on first diarize call.
-
-        ``worker_info`` is reported even though this service runs in-process
-        rather than through the Scheduler: the benchmark client's liveness gate
-        (``server_tests/test_cases/device_liveness_test.py``) counts ready
-        workers and aborts with "No worker_info found in response" without it,
-        so omitting it makes the model impossible to benchmark. One entry stands
-        for the single in-process pipeline, which is also the real concurrency:
-        the pyannote pipeline is not thread-safe and calls are serialized.
-        """
-        return {
-            "model_ready": True,
-            "runner_in_use": "diarization-cpu",
-            "worker_info": {
-                "diarization-0": {
-                    "pid": os.getpid(),
-                    "is_alive": True,
-                    "is_ready": True,
-                    "start_time": self._start_time,
-                    "ready_time": self._start_time,
-                    "restart_count": 0,
-                    "error_count": 0,
-                }
-            },
-        }
 
     def _wav_bytes_to_samples(self, wav_bytes):
         """Decode 16-bit PCM mono WAV bytes to a float32 numpy waveform."""
@@ -279,13 +136,8 @@ class DiarizationService:
                 "diarized transcription requires ASR_URL (settings.asr_url) to be set"
             )
 
-        audio_bytes = request.file
-        if isinstance(audio_bytes, str):
-            import base64
-
-            audio_bytes = base64.b64decode(audio_bytes)
-        wav_bytes = decode_to_wav(audio_bytes, sample_rate=settings.default_sample_rate)
-        samples = self._wav_bytes_to_samples(wav_bytes)
+        request = await self.pre_process(request)
+        samples = request._audio_array
 
         def transcribe_slice(chunk, sr):
             wb = encode_wav_pcm16(chunk, sr)
@@ -298,19 +150,22 @@ class DiarizationService:
                 timeout=settings.asr_timeout_s,
             )
 
+        # Diarize through the Scheduler, so the turns come from the same device
+        # worker the plain endpoint uses rather than from a second pipeline
+        # living in this process. The await has to happen here because the
+        # coordinator's slicing loop is synchronous.
+        request.exclusive = True
+        turns = await self.process(request)
+
         coordinator = DiarizedAsrCoordinator(
-            diarize_fn=self._backend.diarize,
+            diarize_fn=lambda *_args, **_kwargs: turns,
             transcribe_slice=transcribe_slice,
             sample_rate=settings.default_sample_rate,
         )
         return coordinator.run(
-            _wav_bytes_to_waveform(wav_bytes),
+            None,
             samples,
             num_speakers=request.num_speakers,
             min_speakers=request.min_speakers,
             max_speakers=request.max_speakers,
         )
-
-    def stop_workers(self):
-        """No background workers to stop (CPU backend is in-process)."""
-        return None
