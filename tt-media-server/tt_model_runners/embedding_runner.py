@@ -208,7 +208,7 @@ class Qwen3Embedding8BRunner(EmbeddingRunner):
         # The model wrapper itself, not the vLLM pooling adapter: this runner
         # owns no Pooler, so it needs the finished embedding rather than the
         # pre-pooling hidden states the adapter hands to vLLM.
-        from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm import (
+        from models.demos.wormhole.qwen3_embedding_8b.demo.model import (
             Qwen3ForEmbedding,
         )
 
