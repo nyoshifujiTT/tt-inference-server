@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
-"""DiarizationService TT-acceleration env toggle (device-independent)."""
+"""DiarizationService device acquisition (device-independent)."""
 
 import sys
+
+import pytest
 
 
 def _load_service(monkeypatch, captured):
@@ -18,22 +20,27 @@ def _load_service(monkeypatch, captured):
     return svc
 
 
-def test_non_string_device_ids_means_cpu(monkeypatch):
-    """An unresolved (or stubbed) device_ids must not crash the constructor."""
+def test_an_unresolved_device_spec_is_fatal(monkeypatch):
+    """Refusing to start beats starting without the accelerator.
+
+    This model is served because it runs on the device. A service that quietly
+    drops to CPU still answers every request, so nothing surfaces the problem --
+    that is how a broken TT_MESH_GRAPH_DESC_PATH survived a whole bring-up.
+    """
     captured = {}
     svc = _load_service(monkeypatch, captured)
     monkeypatch.setattr(svc.settings, "device_ids", object(), raising=False)
-    svc.DiarizationService()
-    assert captured["nn_accelerator"] is None
+    with pytest.raises(RuntimeError, match="no device resolved"):
+        svc.DiarizationService()
 
 
-def test_no_device_in_settings_means_cpu(monkeypatch):
-    """A spec that resolves no device leaves the service on CPU rather than failing."""
+def test_an_empty_device_spec_is_fatal(monkeypatch):
+    """Same for a spec that resolves to nothing at all."""
     captured = {}
     svc = _load_service(monkeypatch, captured)
     monkeypatch.setattr(svc.settings, "device_ids", "", raising=False)
-    svc.DiarizationService()
-    assert captured["nn_accelerator"] is None
+    with pytest.raises(RuntimeError, match="no device resolved"):
+        svc.DiarizationService()
 
 
 def test_device_comes_from_settings_not_a_private_env_var(monkeypatch):
@@ -62,14 +69,32 @@ def test_multi_device_settings_take_the_first(monkeypatch):
     assert service._resolve_device_id() == 0
 
 
-def test_ttnn_unavailable_falls_back_to_cpu(monkeypatch):
-    # Ensure importing ttnn fails -> graceful fallback (nn_accelerator None)
+def test_an_unreachable_device_is_fatal(monkeypatch):
+    """A device that cannot be opened must stop the service, not degrade it."""
     monkeypatch.setitem(sys.modules, "ttnn", None)  # import ttnn -> ImportError
     captured = {}
     svc = _load_service(monkeypatch, captured)
     monkeypatch.setattr(svc.settings, "device_ids", "(0)", raising=False)
-    svc.DiarizationService()
-    assert captured["nn_accelerator"] is None
+    with pytest.raises(ImportError):
+        svc.DiarizationService()
+
+
+def _stub_device(monkeypatch, svc):
+    """Give the service a device so construction reaches the backend.
+
+    The service now refuses to run without one, so tests that are about
+    something else still have to supply it.
+    """
+    import sys
+    import types
+
+    monkeypatch.setattr(svc.settings, "device_ids", "(0)", raising=False)
+    fake_ttnn = types.ModuleType("ttnn")
+    fake_ttnn.open_device = lambda device_id, l1_small_size: object()
+    monkeypatch.setitem(sys.modules, "ttnn", fake_ttnn)
+    fake_port = types.ModuleType("tt_nn_accelerator")
+    fake_port.make_tt_accelerator = lambda device: lambda pipeline: None
+    monkeypatch.setitem(sys.modules, "tt_nn_accelerator", fake_port)
 
 
 # --- warmup lifecycle tests (appended) ---
@@ -92,6 +117,7 @@ def _load_service_capturing_backend(monkeypatch, calls):
             return {"segments": [], "exclusiveDiarization": None}
 
     monkeypatch.setattr(svc, "DiarizationBackend", _FakeBackend)
+    _stub_device(monkeypatch, svc)
     return svc
 
 
@@ -124,6 +150,7 @@ def test_start_workers_warmup_failure_is_non_fatal(monkeypatch):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(svc, "DiarizationBackend", _BoomBackend)
+    _stub_device(monkeypatch, svc)
     service = svc.DiarizationService()
     assert service.start_workers() is None  # warmup failure must be swallowed
 
@@ -183,6 +210,7 @@ def test_diarized_transcription_also_avoids_file_paths(monkeypatch):
         "_wav_bytes_to_waveform",
         lambda wav_bytes: {"waveform": "tensor", "sample_rate": 16000},
     )
+    _stub_device(monkeypatch, svc)
 
     service = svc.DiarizationService()
     monkeypatch.setattr(service, "_wav_bytes_to_samples", lambda wav_bytes: [])
@@ -216,6 +244,7 @@ def test_readiness_reports_worker_info_for_the_liveness_gate(monkeypatch):
             pass
 
     monkeypatch.setattr(svc, "DiarizationBackend", _FakeBackend)
+    _stub_device(monkeypatch, svc)
     status = svc.DiarizationService().check_is_model_ready()
 
     assert status["model_ready"] is True

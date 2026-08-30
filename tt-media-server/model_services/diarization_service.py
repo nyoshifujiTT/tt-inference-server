@@ -83,7 +83,7 @@ class DiarizationService:
             or SupportedModels.PYANNOTE_SPEAKER_DIARIZATION_COMMUNITY_1.value
         )
         self.logger.info(f"DiarizationService using model: {model_path}")
-        nn_accelerator = self._maybe_build_tt_accelerator()
+        nn_accelerator = self._build_tt_accelerator()
         self._backend = DiarizationBackend(
             model_path=model_path, device="cpu", nn_accelerator=nn_accelerator
         )
@@ -99,49 +99,43 @@ class DiarizationService:
         """
         raw = settings.device_ids
         if not isinstance(raw, str) or not raw.strip():
-            # Not a string when the settings module is stubbed (tests) or the
-            # field was never resolved; either way there is no device to use.
             return None
         first = raw.strip().replace(" ", "").split("),(")[0].strip("()")
         return int(first) if first.isdigit() else None
 
-    def _maybe_build_tt_accelerator(self):
+    def _build_tt_accelerator(self):
         """Offload the two neural nets onto the device the settings resolved.
 
         community-1's segmentation (PyanNet) and embedding (WeSpeaker) run
         through ttnn (see tt_port/tt_nn_accelerator); the rest of the pipeline
         -- clustering and the pyannote glue -- stays on host, as it does on GPU.
-        Falls back to pure CPU when there is no device or ttnn cannot open it,
-        so the service still answers rather than failing to start.
+
+        Any failure to reach the device is raised, not swallowed. This model is
+        served precisely because it runs on the accelerator, so a silent CPU
+        fallback would keep answering while quietly delivering none of that --
+        it hid a broken TT_MESH_GRAPH_DESC_PATH through a full bring-up.
         """
         dev_id = self._resolve_device_id()
         if dev_id is None:
-            self.logger.info(
-                "DiarizationService: no device resolved from settings; running on CPU"
+            raise RuntimeError(
+                "DiarizationService: no device resolved from settings.device_ids "
+                f"({settings.device_ids!r}); the catalog must resolve a device for "
+                "this model"
             )
-            return None
-        try:
-            import ttnn
-            import sys
 
-            sys.path.insert(
-                0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "tt_port")
-            )
-            from tt_nn_accelerator import make_tt_accelerator
+        import sys
 
-            device = ttnn.open_device(
-                device_id=dev_id, l1_small_size=TT_L1_SMALL_SIZE
-            )
-            self._tt_device = device
-            self.logger.info(
-                f"DiarizationService: TT NN acceleration on device {dev_id}"
-            )
-            return make_tt_accelerator(device)
-        except Exception as e:  # noqa: BLE001 - fall back to CPU on any TT error
-            self.logger.warning(
-                f"TT NN acceleration requested but unavailable ({e}); using CPU"
-            )
-            return None
+        import ttnn
+
+        sys.path.insert(
+            0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "tt_port")
+        )
+        from tt_nn_accelerator import make_tt_accelerator
+
+        device = ttnn.open_device(device_id=dev_id, l1_small_size=TT_L1_SMALL_SIZE)
+        self._tt_device = device
+        self.logger.info(f"DiarizationService: TT NN acceleration on device {dev_id}")
+        return make_tt_accelerator(device)
 
     @log_execution_time("Diarization request")
     async def process_request(self, request: DiarizationRequest) -> DiarizationResponse:
