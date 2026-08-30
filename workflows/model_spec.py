@@ -3136,13 +3136,14 @@ audio_tts_templates = [
         weights=["Qwen/Qwen3-ASR-1.7B", "neosophie/Qwen3-ASR-1.7B-JA"],
         version="0.1.0",
         # Bring-up branch head (nyoshifujiTT/tt-metal,
-        # nyoshifujiTT/qwen3-asr-17b_p150x1). 97b36e1 is its upstream base and
-        # does not carry the vLLM adapter (models/demos/audio/qwen3_asr/tt/
+        # nyoshifujiTT/qwen3-asr-17b_p150x1), rebased onto
+        # upstream/yito/qwen3_asr_pr. 7b954c2 is its upstream base and does not
+        # carry the vLLM adapter (models/demos/audio/qwen3_asr/tt/
         # generator_vllm.py) nor the prefill/decode-trace fixes, so an image
         # built from the base cannot serve this model. Build with
         # TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git until
         # these land on tenstorrent/tt-metal.
-        tt_metal_commit="ddb7ace",
+        tt_metal_commit="3b1b9ad",
         # Bring-up branch head (nyoshifujiTT/vllm, nyoshifujiTT/qwen3-asr-17b_p150x1).
         # e1a3825 is its upstream base and lacks the Qwen3-ASR fixes this model
         # needs (thinker_config ordering in the HF config, the TT adapter
