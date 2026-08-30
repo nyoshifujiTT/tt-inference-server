@@ -14,11 +14,4 @@ torch==2.7.1+cpu
 torchaudio==2.7.1+cpu
 silero_vad
 
-# Speaker diarization (MODEL_SERVICE=diarization) loads community-1, which only
-# constructs under pyannote.audio 4.x; on 3.x the pipeline fails to build.
-# whisperx pins pyannote-audio<4, so uv-overrides.txt raises the ceiling -- see
-# the note there for why the 4.x torch floor is not honoured.
-pyannote.audio>=4.0,<5
-soundfile
-
 --extra-index-url https://download.pytorch.org/whl/cpu
