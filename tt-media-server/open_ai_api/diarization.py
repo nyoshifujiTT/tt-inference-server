@@ -7,9 +7,12 @@
 Schema aligned with the pyannoteAI cloud diarization API so a client can switch
 base URL only. Unlike /v1/audio/transcriptions this returns speaker turns only
 (no transcript). The /diarize input is a pyannoteAI-style JSON body with a
-``url`` (http(s):// or media://); see https://docs.pyannote.ai/openapi.json
+``url`` (http(s)://, media://, or inline base64); see
+https://docs.pyannote.ai/openapi.json
 (DiarizeRequest).
 """
+
+import re
 
 from domain.diarization_request import DiarizationRequest
 from fastapi import APIRouter, Body, Depends, HTTPException, Security
@@ -42,6 +45,25 @@ UNSUPPORTED_REQUEST_FIELDS = frozenset(
         "transcriptionConfig",
     }
 )
+
+
+# A leading "<scheme>://" is how a caller signals "go fetch this", so a value
+# shaped that way is never read as base64 -- ':' and '/' are outside the base64
+# alphabet, so no real payload can collide with the test.
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def _looks_like_a_url(value: str) -> bool:
+    return bool(_URL_SCHEME_RE.match(value))
+
+
+def _base64_len_for(max_bytes: int) -> int:
+    """Longest base64 text that can decode to ``max_bytes`` bytes.
+
+    Checked before decoding so an oversize payload is refused without first
+    materialising its decoded form.
+    """
+    return ((max_bytes + 2) // 3) * 4 + 4
 
 
 def _validate_served_model(model):
@@ -117,7 +139,8 @@ async def _fetch_audio(url: str) -> bytes:
     """Fetch the bytes a pyannoteAI ``DiarizeRequest.url`` points at.
 
     ``media://`` keys come out of this server's temporary storage; everything
-    else has to be an http(s) URL, and those go through the server's hardened
+    else is either an http(s) URL or inline base64. http(s) goes through the
+    server's hardened
     ``media_downloader`` -- the same path ``open_ai_api/video.py`` uses for
     presigned image URLs. That downloader is where the SSRF guard lives: a
     required hostname allowlist re-checked on every redirect hop, one deadline
@@ -126,9 +149,20 @@ async def _fetch_audio(url: str) -> bytes:
     there. A second fetch helper next to it would be a second hole to keep
     closed, which is exactly how the reference servers reintroduced SSRF.
 
+    Inline base64 is the fallback for a deployment with no object storage
+    reachable from the server: ``DiarizeRequest.url`` is ``{"type": "string"}``
+    with no pattern in the official schema, so carrying the audio in it is not
+    a schema violation, and it is the same "URL or base64 in one field" shape
+    ``domain/video_i2v_generate_request.py`` already uses for images. It costs
+    a third in wire size, so it is the fallback and not the recommendation.
+
     Statuses follow video.py so one taxonomy covers every URL-valued field:
     policy violation 400, over the cap 413, origin/network/deadline 422.
     """
+    import base64
+    import binascii
+
+    from config.settings import settings
     from utils.media_downloader import (
         MediaDownloadFetchError,
         MediaDownloadPolicyError,
@@ -148,27 +182,67 @@ async def _fetch_audio(url: str) -> bytes:
         except MediaStorageError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    if not is_media_url(url):
+    if is_media_url(url):
+        try:
+            return await download_media_url(url)
+        except MediaDownloadPolicyError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except MediaDownloadTooLargeError as e:
+            raise HTTPException(status_code=413, detail=str(e))
+        except MediaDownloadFetchError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+    if _looks_like_a_url(url):
+        # A scheme we do not serve. Saying so beats letting it fall through to
+        # the base64 decoder and reporting it as malformed base64.
         raise HTTPException(
             status_code=400,
-            detail=f"unsupported audio url scheme: {url!r}; use http(s):// or media://",
+            detail=(
+                f"unsupported audio url scheme: {url!r}; use http(s)://, "
+                "media://, or inline base64"
+            ),
         )
 
+    # The same cap the downloader enforces: how the bytes arrived should not
+    # change how many of them this server is willing to hold.
+    max_bytes = settings.media_url_max_bytes
+    if len(url) > _base64_len_for(max_bytes):
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"inline base64 audio is over the {max_bytes}-byte cap for this "
+                "server; upload it and pass a url instead"
+            ),
+        )
     try:
-        return await download_media_url(url)
-    except MediaDownloadPolicyError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except MediaDownloadTooLargeError as e:
-        raise HTTPException(status_code=413, detail=str(e))
-    except MediaDownloadFetchError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        audio_bytes = base64.b64decode(url, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "'url' is neither an http(s):// url, a media:// key, nor valid "
+                "base64 audio"
+            ),
+        )
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="'url' decoded to no audio")
+    if len(audio_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"inline base64 audio decodes to {len(audio_bytes)} bytes, over "
+                f"the {max_bytes}-byte cap for this server"
+            ),
+        )
+    return audio_bytes
 
 
 async def _build_request_from_body(body: dict) -> DiarizationRequest:
     """Validate a pyannoteAI DiarizeRequest body and resolve it to a request.
 
     Validates ``model`` and rejects precision-2-only options, requires ``url``
-    (http(s):// or media://), fetches the audio bytes, and builds the internal
+    (http(s)://, media://, or inline base64), fetches the audio bytes, and
+    builds the internal
     DiarizationRequest. See https://docs.pyannote.ai/openapi.json.
     """
     _validate_served_model(body.get("model"))
@@ -182,7 +256,8 @@ async def _build_request_from_body(body: dict) -> DiarizationRequest:
     url = body.get("url")
     if not url:
         raise HTTPException(
-            status_code=400, detail="'url' is required (http(s):// or media://)"
+            status_code=400,
+            detail="'url' is required (http(s)://, media://, or inline base64)",
         )
     audio_bytes = await _fetch_audio(url)
 

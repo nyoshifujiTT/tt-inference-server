@@ -497,13 +497,13 @@ There are two ways to call it: a synchronous convenience endpoint that returns t
 **Endpoint:** `POST /v1/audio/diarize` (legacy: `POST /audio/diarize`)
 **Content-Type:** `application/json`
 
-The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url` (a public `http(s)://` URL, or a `media://<object-key>` staged via the media API — see below); there is no multipart file field, matching pyannoteAI.
+The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a public `http(s)://` URL, a `media://<object-key>` staged via the media API (see below), or — as an extension for deployments with no reachable object storage — the audio itself as inline base64. The official schema types `url` as a bare string with no pattern, so base64 in that field is not a schema violation, and it is the same "URL or base64 in one field" shape the video endpoint uses for images; it costs a third in wire size, so prefer a URL when you have one. There is no multipart file field, matching pyannoteAI. Whichever form is used, the payload is capped at `media_url_max_bytes` (64 MiB for this model, about 35 minutes of 16 kHz mono audio); over that the server answers 413.
 
 ## Request parameters
 
 | Parameter      | Required | Description |
 |----------------|----------|-------------|
-| `url`          | Yes      | Audio location: `http(s)://…` or `media://<object-key>`. |
+| `url`          | Yes      | Audio location: `http(s)://…`, `media://<object-key>`, or the audio itself as inline base64. |
 | `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
 | `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
 | `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |
