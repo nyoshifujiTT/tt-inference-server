@@ -1141,13 +1141,6 @@ def build_dev_image(
         logger.info(f"Overriding vLLM repository URL: {vllm_repo_url}")
         build_command += ["--build-arg", f"TT_VLLM_REPO_URL={vllm_repo_url}"]
 
-    # Likewise for tt-metal: the model code (e.g. a new demo's generator_vllm)
-    # may only exist on the bring-up fork.
-    tt_metal_repo_url = os.getenv("TT_METAL_REPO_URL")
-    if tt_metal_repo_url:
-        logger.info(f"Overriding tt-metal repository URL: {tt_metal_repo_url}")
-        build_command += ["--build-arg", f"TT_METAL_REPO_URL={tt_metal_repo_url}"]
-
     build_command += [
         "-f",
         "vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile",
