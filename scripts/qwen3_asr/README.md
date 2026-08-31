@@ -69,6 +69,18 @@ with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`;
 without `TT_VLLM_REPO_URL` it lacks the HF-config fix and dies with
 `AttributeError: 'Qwen3ASRConfig' object has no attribute 'thinker_config'`.
 
+#### Why this clones a vLLM fork at all
+
+Upstream `tt-inference-server` has since dropped the vLLM clone entirely: the
+dev Dockerfile now clones only `tenstorrent/vllm-tt-plugin`, which owns the vLLM
+version pin and installs it via its own `docs/install-vllm-tt.sh`. On that
+layout `vllm_commit` names a *vllm-tt-plugin* commit, despite the name.
+
+This tree predates that change (branched 2026-04-30) and still clones vLLM
+itself, so here `vllm_commit` really is a commit on the vLLM fork. Keep it that
+way while on this base; switching to the plugin-only layout is a follow-up that
+belongs with the upstream merge, not with this recipe.
+
 #### If the branch is not pushed yet
 
 The commands above assume the pinned commits are reachable on the forks. While

@@ -147,6 +147,17 @@ def test_the_readme_names_the_branch_the_forks_must_carry():
         assert repo in readme, f"{repo} must be listed with its branch"
 
 
+def test_the_readme_explains_the_vllm_fork_clone():
+    """This base still clones vLLM itself; upstream clones only the plugin.
+
+    Without the note, the next reader compares against upstream, sees no vLLM
+    clone there, and assumes vllm_commit names a vllm-tt-plugin commit.
+    """
+    readme = _readme()
+    assert "Why this clones a vLLM fork at all" in readme
+    assert "vllm-tt-plugin" in readme, "the upstream layout must be contrasted"
+
+
 def test_the_readme_documents_the_unpushed_branch_path():
     """The recipe must not imply the forks already carry the pinned commits.
 
