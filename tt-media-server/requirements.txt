@@ -28,11 +28,6 @@ uvicorn
 requests
 num2words
 
-# Speaker diarization (MODEL_SERVICE=diarization) builds the community-1
-# pipeline in this venv, so pyannote belongs here rather than in the audio
-# venv: the service runs in-process and needs ttnn alongside it to offload the
-# two neural nets, and ttnn only exists in this venv. pyannote 4.x is required
-# because community-1 does not load under 3.x. See uv-overrides-main.txt for
-# why its torch floor is overridden.
-pyannote.audio>=4.0,<5
-soundfile
+# Speaker diarization dependencies live in diarization-requirements.txt; they go
+# into this same venv, but keeping them in their own file shows what that one
+# model adds.

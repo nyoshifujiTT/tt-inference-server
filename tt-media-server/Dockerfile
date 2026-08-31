@@ -149,12 +149,14 @@ COPY "tt-media-server/audio-requirements.txt" "${TT_METAL_HOME}/audio-requiremen
 COPY "tt-media-server/fix_dependencies.sh" "${TT_METAL_HOME}/fix_dependencies.sh"
 COPY "tt-media-server/uv-overrides.txt" "${TT_METAL_HOME}/uv-overrides.txt"
 COPY "tt-media-server/uv-overrides-main.txt" "${TT_METAL_HOME}/uv-overrides-main.txt"
+COPY "tt-media-server/diarization-requirements.txt" "${TT_METAL_HOME}/diarization-requirements.txt"
 # Main venv: Install server requirements (without whisperx/torch pins - those go in audio venv)
 RUN /bin/bash -c "source ${PYTHON_ENV_DIR}/bin/activate \
     && cd ${TT_METAL_HOME} && uv pip install --no-cache-dir --index-strategy unsafe-best-match --overrides uv-overrides-main.txt -r requirements.txt || \
     (echo 'Requirements installation failed, trying without pyluwen...' && \
     grep -v pyluwen requirements.txt > requirements_no_pyluwen.txt && \
     uv pip install --no-cache-dir --index-strategy unsafe-best-match --overrides uv-overrides-main.txt -r requirements_no_pyluwen.txt) \
+    && uv pip install --no-cache-dir --index-strategy unsafe-best-match --overrides uv-overrides-main.txt -r diarization-requirements.txt \
     && echo 'Running dependency fixes...' \
     && chmod +x fix_dependencies.sh \
     && ./fix_dependencies.sh"

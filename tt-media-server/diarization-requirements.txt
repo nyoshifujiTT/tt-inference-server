@@ -1,0 +1,21 @@
+# Dependencies for the speaker-diarization service (MODEL_SERVICE=diarization).
+#
+# Installed into the MAIN venv, not a separate one: the service offloads the two
+# community-1 neural nets through ttnn, and ttnn only exists in the main venv.
+# The split from requirements.txt is so that what this one model adds is visible
+# in one place rather than mixed into the server-wide list -- the same reason
+# audio-requirements.txt exists for whisperx.
+#
+# See uv-overrides-main.txt for why pyannote's declared torch floor is
+# overridden: it asks for torch>=2.8, this image is pinned to 2.7.1 by tt-metal
+# and tt-vllm-plugin, and the community-1 pipeline runs correctly on 2.7.1.
+
+# community-1 only loads under pyannote.audio 4.x; on 3.x the pipeline fails to
+# construct.
+pyannote.audio>=4.0,<5
+soundfile
+
+# Signs the pre-signed PUT urls POST /v1/media/input hands out. This server is
+# an S3 *client* -- it never stores the bytes itself, the way the official API
+# hands back a url on its storage service rather than on the API host.
+boto3

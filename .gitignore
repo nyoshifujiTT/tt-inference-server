@@ -60,6 +60,7 @@ scripts/examples/example_data
 !**/CMakeLists.txt
 !requirements*.txt
 !requirements/*.txt
+!**/*-requirements.txt
 !**/uv-overrides.txt
 !**/uv-overrides-main.txt
 !**/tsan_suppressions.txt
