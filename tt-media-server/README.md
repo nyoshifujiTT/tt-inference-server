@@ -44,7 +44,6 @@ All API endpoints use the `/v1` prefix to match the OpenAI API standard. Legacy 
 | `/v1/audio/transcriptions`                                  | `/audio/transcriptions`                              | POST   | Speech-to-text                             |
 | `/v1/audio/translations`                                    | `/audio/translations`                                | POST   | Speech-to-English (translation)            |
 | `/v1/audio/diarize`                                         | `/audio/diarize`                                     | POST   | Speaker diarization (who spoke when)       |
-| `/v1/audio/diarized-transcriptions`                         | `/audio/diarized-transcriptions`                     | POST   | Speaker-diarized transcription (ASR + diarization) |
 | `/v1/audio/speech`                                          | `/audio/speech`                                      | POST   | Text-to-speech                             |
 | `/v1/videos/generations`                                    | `/video/generations`                                 | POST   | Text-to-video generation                   |
 | `/v1/videos/generations/i2v`                                | `/video/generations/i2v`                             | POST   | Image-to-video generation (Wan2.2 I2V)     |
@@ -579,38 +578,6 @@ Measured on a p150: `DER = 0.052` with the two annotated speakers. That is not a
 
 The scoring is shared with tt-metal rather than reimplemented: both this eval and `models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py` call `models.demos.audio.pyannote_diarization.accuracy`, so the served model and the on-device tests report the same figure against the same thresholds. That test asserts both directions — `DER < 0.05` for the device run against the host run (fidelity: the port has not drifted from the reference implementation) and `DER < 0.15` against the human annotation (accuracy: the pipeline is right in absolute terms, which fidelity alone cannot show, since host and device could be wrong together).
 
-
-
-# Speaker-diarized transcription test call
-
-Available when `MODEL_SERVICE=diarization` and an ASR endpoint is configured via `ASR_URL`. This runs diarization on this service, then transcribes each speaker turn with the ASR model, returning an OpenAI `diarized_json`-style result.
-
-**Endpoint:** `POST /v1/audio/diarized-transcriptions` (legacy: `POST /audio/diarized-transcriptions`)
-**Content-Type:** `multipart/form-data`
-
-The single OpenAI `model` field carries **both** models, using a `+` separator as an explicit extension of the OpenAI `model` field (first part = ASR model, second = diarization model):
-
-- `model="<asr_model>"` — ASR only.
-- `model="<asr_model>+<diarization_model>"` — diarized transcription, e.g. `model="neosophie/Qwen3-ASR-1.7B-JA+pyannote/speaker-diarization-community-1"`.
-
-## Request parameters
-
-| Parameter      | Required | Description |
-|----------------|----------|-------------|
-| `file`         | Yes      | Audio file upload (WAV/MP3). |
-| `model`        | Yes      | Composite `"<asr_model>+<diarization_model>"` id (see above). |
-| `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
-| `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
-| `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |
-| `language`     | No       | ASR language hint passed through to the ASR endpoint. |
-| `prompt`       | No       | ASR prompt passed through to the ASR endpoint. |
-
-```bash
-curl -X POST 'http://127.0.0.1:8000/v1/audio/diarized-transcriptions' \
-  -H 'Authorization: Bearer your-secret-key' \
-  -F 'file=@/path/to/audio.wav' \
-  -F 'model=neosophie/Qwen3-ASR-1.7B-JA+pyannote/speaker-diarization-community-1'
-```
 
 
 # Text-to-Speech (TTS) test call

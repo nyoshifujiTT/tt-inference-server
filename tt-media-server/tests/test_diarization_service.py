@@ -12,7 +12,7 @@ these cover.
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -103,33 +103,6 @@ def test_a_speaker_count_mismatch_is_reported_as_a_warning(monkeypatch):
     )
 
     assert response.warning
-
-
-def test_diarized_transcription_diarizes_through_the_scheduler(monkeypatch):
-    """The composite route must not build a second pipeline of its own."""
-    from domain.diarization_request import DiarizationRequest
-
-    svc, service = _service(monkeypatch)
-    monkeypatch.setattr(svc.settings, "asr_url", "http://asr.invalid", raising=False)
-    monkeypatch.setattr(svc.settings, "asr_timeout_s", 5, raising=False)
-    monkeypatch.setattr(svc, "decode_to_wav", lambda data, sample_rate=16000: data)
-    monkeypatch.setattr(
-        service, "_wav_bytes_to_samples", lambda wav: np.zeros(16000, dtype=np.float32)
-    )
-    monkeypatch.setattr(svc, "transcribe_wav_bytes", lambda *a, **k: "hello")
-
-    turns = {"segments": [], "exclusiveDiarization": []}
-    with patch.object(
-        svc.DiarizationService, "process", new=AsyncMock(return_value=turns)
-    ) as scheduled:
-        asyncio.run(
-            service.diarized_transcription(
-                DiarizationRequest(file=b"RIFFWAVE"),
-                "asr-model+pyannote/speaker-diarization-community-1",
-            )
-        )
-
-    assert scheduled.await_count == 1
 
 
 def test_wav_bytes_to_waveform_decodes_without_torchcodec():

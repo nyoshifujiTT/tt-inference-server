@@ -11,19 +11,8 @@ base URL only. Unlike /v1/audio/transcriptions this returns speaker turns only
 (DiarizeRequest).
 """
 
-from typing import Optional
-
 from domain.diarization_request import DiarizationRequest
-from fastapi import (
-    APIRouter,
-    Body,
-    Depends,
-    File,
-    Form,
-    HTTPException,
-    Security,
-    UploadFile,
-)
+from fastapi import APIRouter, Body, Depends, HTTPException, Security
 from resolver.service_resolver import service_resolver
 from security.api_key_checker import get_api_key
 
@@ -205,56 +194,6 @@ async def _run_diarization_job(job_id, request, service, webhook, webhook_status
         if job is not None:
             payload = job.created_dict() if webhook_status_only else job.job_dict()
             await asyncio.to_thread(post_webhook, webhook, payload)
-
-
-async def parse_diarized_transcription_request(
-    file: UploadFile = File(...),
-    model: str = Form(...),
-    num_speakers: Optional[int] = Form(None, alias="numSpeakers"),
-    min_speakers: Optional[int] = Form(None, alias="minSpeakers"),
-    max_speakers: Optional[int] = Form(None, alias="maxSpeakers"),
-    language: Optional[str] = Form(None),
-    prompt: Optional[str] = Form(None),
-) -> dict:
-    file_content = await file.read()
-    return {
-        "request": DiarizationRequest(
-            file=file_content,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            exclusive=True,
-        ),
-        "model": model,
-        "language": language,
-        "prompt": prompt,
-    }
-
-
-@router.post("/diarized-transcriptions")
-async def diarized_transcriptions(
-    parsed: dict = Depends(parse_diarized_transcription_request),
-    service=Depends(service_resolver),
-    api_key: str = Security(get_api_key),
-):
-    """Speaker-diarized transcription (OpenAI diarized_json).
-
-    ``model`` is a composite id "<asr_model>+<diarization_model>". Diarization is
-    run by this service (community-1); each speaker turn is transcribed by the
-    ASR model via the configured ASR endpoint (settings.asr_url).
-    """
-    try:
-        result = await service.diarized_transcription(
-            parsed["request"],
-            model=parsed["model"],
-            language=parsed["language"],
-            prompt=parsed["prompt"],
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(e))
-    return result
 
 
 # ---------------------------------------------------------------------------
