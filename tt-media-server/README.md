@@ -588,7 +588,7 @@ Retention is a **bucket lifecycle policy on the store**, not a sweeper in this s
 Any S3-compatible service works. For a self-hosted one, [RustFS](https://github.com/rustfs/rustfs) is the straightforward pick: Apache-2.0 (MinIO's community edition is AGPL and archived, Garage is AGPL), a single container configured by two variables, and S3-native lifecycle. Staged media is temporary, so backing it with `tmpfs` keeps it off disk and clears it with the container:
 
 ```bash
-docker run -d --name rustfs --network tt-media \
+docker run -d --name rustfs \
   --tmpfs /data:rw,size=8g \
   -e RUSTFS_ACCESS_KEY=media -e RUSTFS_SECRET_KEY=media-secret \
   -p 9000:9000 rustfs/rustfs:latest
@@ -602,14 +602,18 @@ AWS_ACCESS_KEY_ID=media AWS_SECRET_ACCESS_KEY=media-secret AWS_DEFAULT_REGION=us
   '{"Rules":[{"ID":"expire-staged-media","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":1}}]}'
 ```
 
-Then point the server at it — the server needs to resolve the endpoint's hostname, so put both on the same Docker network (`--network tt-media`) or use a reachable address:
+Then point the server at it. `run.py` passes the repository-root `.env` to the container with `--env-file`, so that is where these belong:
 
 ```bash
--e MEDIA_STORAGE_ENDPOINT=http://rustfs:9000 \
--e MEDIA_STORAGE_BUCKET=media \
--e MEDIA_STORAGE_ACCESS_KEY=media \
--e MEDIA_STORAGE_SECRET_KEY=media-secret
+cat >> .env <<'VARS'
+MEDIA_STORAGE_ENDPOINT=http://10.0.0.5:9000
+MEDIA_STORAGE_BUCKET=media
+MEDIA_STORAGE_ACCESS_KEY=media
+MEDIA_STORAGE_SECRET_KEY=media-secret
+VARS
 ```
+
+The endpoint has to be reachable **from inside the container**, which `run.py` starts on the default bridge network with no `--link` and no shared user-defined network. A container name will not resolve; use an address the container can route to, such as the host address the store's port is published on. Both the client that `PUT`s and this server resolve the same endpoint string, so it has to be valid for both.
 
 ## Benchmarking and accuracy
 
