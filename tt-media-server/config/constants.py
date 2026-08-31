@@ -1214,6 +1214,13 @@ ModelConfigs = {
         "is_galaxy": False,
         "device_ids": DeviceIds.DEVICE_IDS_1.value,
         "max_batch_size": 1,
+        # The server-wide default (7,500,000) is sized for one input image: it
+        # is what base64-encodes to the video request's MAX_BASE64_IMAGE_LEN. A
+        # recording does not fit in it -- 16 kHz mono 16-bit PCM is 1.92 MB per
+        # minute, so the default stops at four minutes of audio. 64 MiB carries
+        # a ~35-minute recording, which covers a meeting. Raised per model
+        # rather than globally so the image and video paths keep their own cap.
+        "media_url_max_bytes": 67_108_864,
     },
     (ModelRunners.TT_WHISPER, DeviceTypes.P300): {
         "device_mesh_shape": (1, 1),
