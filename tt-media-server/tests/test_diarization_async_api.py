@@ -219,6 +219,10 @@ def test_media_staged_audio_flows_through_the_job_api(monkeypatch):
     the server read the object back. Nothing is stubbed between the declaration
     and the audio arriving at the service, which is the whole point: the bytes
     have to reach the model without ever passing through this API.
+
+    media_url_allowed_domains is deliberately left empty: the storage host the
+    server signed the url against is allowed on its own, so the documented flow
+    works without an operator widening the allowlist by hand.
     """
     import utils.diarization_jobs as dj
     import utils.media_downloader as md
@@ -238,9 +242,6 @@ def test_media_staged_audio_flows_through_the_job_api(monkeypatch):
         monkeypatch.setattr(settings, "media_storage_bucket", "media", False)
         monkeypatch.setattr(settings, "media_storage_access_key", "key", False)
         monkeypatch.setattr(settings, "media_storage_secret_key", "secret", False)
-        monkeypatch.setattr(
-            md.settings, "media_url_allowed_domains", "127.0.0.1", False
-        )
         mos.reset_client()
         dj._STORE = None
 
