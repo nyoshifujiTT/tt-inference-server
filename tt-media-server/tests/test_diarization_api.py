@@ -32,12 +32,25 @@ class _FakeService:
 
 
 def _make_client(fake):
+    """Client over the official job API.
+
+    There is no synchronous route to test: the official spec has none, so the
+    one this service used to publish at /v1/audio/diarize was removed. Request
+    validation is the same code either way -- both routes parse the body
+    through ``_read_json_body`` + ``_build_request_from_body`` -- so these cases
+    exercise it through POST /v1/diarize.
+    """
     app = FastAPI()
-    app.include_router(diarization.router, prefix="/v1/audio")
+    app.include_router(diarization.async_router, prefix="/v1")
     app.dependency_overrides[service_resolver] = lambda: fake
     # Authenticate every request: NO_AUTH is only honoured when this module wins
     # the import race against security.api_key_checker (see diarization_auth).
     return TestClient(app, headers=auth_headers())
+
+
+def _diarize(client, body):
+    """POST a diarize body; return the create-job response."""
+    return client.post("/v1/diarize", json=body)
 
 
 @pytest.fixture(autouse=True)
@@ -59,11 +72,13 @@ def test_diarize_endpoint_returns_pyannoteai_shape():
     fake = _FakeService()
     client = _make_client(fake)
     resp = client.post(
-        "/v1/audio/diarize",
+        "/v1/diarize",
         json={"url": _URL, "numSpeakers": 2, "exclusive": True},
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
+    assert resp.status_code == 201, resp.text
+    job_id = resp.json()["jobId"]
+
+    body = client.get(f"/v1/jobs/{job_id}").json()["output"]
     assert body["diarization"][0] == {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}
     assert body["exclusiveDiarization"][0]["speaker"] == "SPEAKER_00"
     assert fake.last.num_speakers == 2
@@ -74,15 +89,15 @@ def test_diarize_endpoint_returns_pyannoteai_shape():
 def test_diarize_endpoint_default_exclusive_and_no_hints():
     fake = _FakeService()
     client = _make_client(fake)
-    resp = client.post("/v1/audio/diarize", json={"url": _URL})
-    assert resp.status_code == 200, resp.text
+    resp = client.post("/v1/diarize", json={"url": _URL})
+    assert resp.status_code == 201, resp.text
     assert fake.last.num_speakers is None
     assert fake.last.exclusive is True
 
 
 def test_diarize_requires_url():
     fake = _FakeService()
-    resp = _make_client(fake).post("/v1/audio/diarize", json={"numSpeakers": 2})
+    resp = _make_client(fake).post("/v1/diarize", json={"numSpeakers": 2})
     assert resp.status_code == 400, resp.text
     assert "url" in resp.json()["detail"]
     assert fake.last is None
@@ -99,7 +114,7 @@ _OFFICIAL_ERROR_STATUSES = {400, 401, 429, 422}
 def test_a_non_json_body_is_rejected_without_inventing_a_status():
     fake = _FakeService()
     resp = _make_client(fake).post(
-        "/v1/audio/diarize",
+        "/v1/diarize",
         content=b"not json",
         headers={"content-type": "text/plain"},
     )
@@ -116,7 +131,7 @@ def test_a_multipart_upload_is_rejected_without_inventing_a_status():
     """
     fake = _FakeService()
     resp = _make_client(fake).post(
-        "/v1/audio/diarize",
+        "/v1/diarize",
         files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
     )
     assert resp.status_code == 422, resp.text
@@ -127,7 +142,7 @@ def test_a_multipart_upload_is_rejected_without_inventing_a_status():
 def test_diarize_bad_media_url():
     fake = _FakeService()
     resp = _make_client(fake).post(
-        "/v1/audio/diarize", json={"url": "media://does-not-exist.wav"}
+        "/v1/diarize", json={"url": "media://does-not-exist.wav"}
     )
     assert resp.status_code == 400, resp.text
     assert fake.last is None
@@ -135,24 +150,24 @@ def test_diarize_bad_media_url():
 
 def test_diarize_unsupported_scheme():
     fake = _FakeService()
-    resp = _make_client(fake).post("/v1/audio/diarize", json={"url": "ftp://h/a.wav"})
+    resp = _make_client(fake).post("/v1/diarize", json={"url": "ftp://h/a.wav"})
     assert resp.status_code == 400, resp.text
     assert fake.last is None
 
 
 def test_diarize_accepts_served_community_1_model():
     fake = _FakeService()
-    resp = _make_client(fake).post(
-        "/v1/audio/diarize", json={"url": _URL, "model": "community-1"}
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["diarization"][0]["speaker"] == "SPEAKER_00"
+    client = _make_client(fake)
+    resp = client.post("/v1/diarize", json={"url": _URL, "model": "community-1"})
+    assert resp.status_code == 201, resp.text
+    output = client.get(f"/v1/jobs/{resp.json()['jobId']}").json()["output"]
+    assert output["diarization"][0]["speaker"] == "SPEAKER_00"
 
 
 def test_diarize_rejects_precision_2_model():
     fake = _FakeService()
     resp = _make_client(fake).post(
-        "/v1/audio/diarize", json={"url": _URL, "model": "precision-2"}
+        "/v1/diarize", json={"url": _URL, "model": "precision-2"}
     )
     assert resp.status_code == 400, resp.text
     assert "not served" in resp.json()["detail"]
@@ -162,7 +177,7 @@ def test_diarize_rejects_precision_2_model():
 def test_diarize_rejects_unknown_model():
     fake = _FakeService()
     resp = _make_client(fake).post(
-        "/v1/audio/diarize", json={"url": _URL, "model": "totally-made-up"}
+        "/v1/diarize", json={"url": _URL, "model": "totally-made-up"}
     )
     assert resp.status_code == 400, resp.text
     assert "unknown diarization model" in resp.json()["detail"]
@@ -180,9 +195,7 @@ def test_diarize_rejects_unknown_model():
 )
 def test_diarize_rejects_precision2_only_options(field, value):
     fake = _FakeService()
-    resp = _make_client(fake).post(
-        "/v1/audio/diarize", json={"url": _URL, field: value}
-    )
+    resp = _make_client(fake).post("/v1/diarize", json={"url": _URL, field: value})
     assert resp.status_code == 400, resp.text
     assert "precision-2" in resp.json()["detail"]
     assert fake.last is None
@@ -191,7 +204,7 @@ def test_diarize_rejects_precision2_only_options(field, value):
 def test_diarize_allows_precision2_options_when_false():
     fake = _FakeService()
     resp = _make_client(fake).post(
-        "/v1/audio/diarize",
+        "/v1/diarize",
         json={"url": _URL, "confidence": False, "transcription": False},
     )
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 201, resp.text

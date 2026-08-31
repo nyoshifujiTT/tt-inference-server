@@ -158,7 +158,6 @@ def test_the_diarization_api_is_served_for_this_model():
 
     # The pyannoteAI-shaped surface, plus the media staging the diarize body
     # references by media:// url.
-    assert "/v1/audio/diarize" in served
     assert "/v1/diarize" in served
-    assert "/v1/jobs/{job_id}" in served
+    assert "/v1/jobs/{jobId}" in served
     assert "/v1/media/input" in served

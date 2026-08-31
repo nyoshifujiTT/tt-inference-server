@@ -41,7 +41,11 @@ async def create_media_input(
     return {"url": f"{base}/v1/media/input/{key}"}
 
 
-@router.put("/input/{object_key:path}")
+# Not in the published schema: the official API returns a pre-signed URL on the
+# storage service, so no client is written against an upload path on the API
+# host. Publishing one put it inside the official /v1/media namespace, where a
+# spec comparison flags it as an invented path.
+@router.put("/input/{object_key:path}", include_in_schema=False)
 async def put_media_input(
     object_key: str,
     request: Request,

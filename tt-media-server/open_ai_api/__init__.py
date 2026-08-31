@@ -63,12 +63,9 @@ SERVICE_ROUTER_MAP: dict[str, list[ServiceRoute]] = {
         ),
     ],
     ModelServices.DIARIZATION.value: [
-        ServiceRoute(
-            diarization.router, "/v1/audio", "/audio", ["Speaker diarization"]
-        ),
-        ServiceRoute(
-            diarization.async_router, "/v1", None, ["Speaker diarization (async)"]
-        ),
+        # Only the official pyannoteAI paths: POST /v1/diarize,
+        # GET /v1/jobs/{jobId}, POST /v1/media/input.
+        ServiceRoute(diarization.async_router, "/v1", None, ["Speaker diarization"]),
         ServiceRoute(media.router, "/v1/media", None, ["Media input"]),
     ],
     ModelServices.VIDEO.value: [

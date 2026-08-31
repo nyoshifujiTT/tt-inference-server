@@ -174,18 +174,18 @@ def test_we_do_not_answer_a_status_the_official_api_never_uses():
             raise AssertionError("a rejected body must not reach the service")
 
     app = FastAPI()
-    app.include_router(diarization.router, prefix="/v1/audio")
+    app.include_router(diarization.async_router, prefix="/v1")
     app.dependency_overrides[service_resolver] = lambda: _NeverCalled()
     app.dependency_overrides[diarization.get_api_key] = lambda: "test"
     client = TestClient(app)
 
     rejected = [
         client.post(
-            "/v1/audio/diarize",
+            "/v1/diarize",
             files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
         ),
         client.post(
-            "/v1/audio/diarize",
+            "/v1/diarize",
             content=b"not json",
             headers={"content-type": "text/plain"},
         ),
@@ -213,3 +213,63 @@ def test_the_statuses_we_do_use_are_the_official_ones(official_diarize_statuses)
         f"statuses we answer that the official spec does not document: {sorted(unknown)}; "
         f"official set is {sorted(official_diarize_statuses)}"
     )
+
+
+@pytest.fixture(scope="module")
+def official_paths() -> set:
+    """Every path the official spec documents."""
+    spec = _fetch_official_spec()
+    paths = set(spec.get("paths") or {})
+    assert paths, "pyannoteAI spec has no paths"
+    return paths
+
+
+def _our_served_paths() -> set:
+    """Paths this service registers, as the OpenAPI document reports them.
+
+    Built the way ``open_ai_api`` mounts them for MODEL_SERVICE=diarization, so
+    the prefixes are the served ones rather than the router-local ones.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from resolver.service_resolver import service_resolver
+
+    from open_ai_api import diarization, media
+
+    app = FastAPI()
+    app.include_router(diarization.async_router, prefix="/v1")
+    app.include_router(media.router, prefix="/v1/media")
+    app.dependency_overrides[service_resolver] = lambda: object()
+    app.dependency_overrides[diarization.get_api_key] = lambda: "test"
+    app.dependency_overrides[media.get_api_key] = lambda: "test"
+
+    served = TestClient(app).get("/openapi.json").json()["paths"]
+    return set(served)
+
+
+def test_every_path_we_publish_is_one_the_official_spec_has(official_paths):
+    """A path outside the official set breaks "switch base URL only".
+
+    The rest of this file compares field names and status codes, so it never
+    noticed that the service published /v1/audio/diarize, /audio/diarize and
+    PUT /v1/media/input/{object_key} -- none of which exist upstream. Compare
+    the paths too, and fail on anything invented.
+    """
+    ours = _our_served_paths()
+    invented = ours - official_paths
+    assert not invented, (
+        f"paths we publish that the official spec does not document: "
+        f"{sorted(invented)}; official set is {sorted(official_paths)}"
+    )
+
+
+def test_the_paths_we_publish_use_the_official_parameter_names(official_paths):
+    """`{job_id}` and `{jobId}` are different paths to a spec differ."""
+    ours = _our_served_paths()
+    templated = {p for p in ours if "{" in p}
+    for path in templated:
+        assert path in official_paths, (
+            f"{path} is templated but not spelled as the official spec spells it; "
+            f"official templated paths are "
+            f"{sorted(p for p in official_paths if '{' in p)}"
+        )

@@ -16,8 +16,6 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Security
 from resolver.service_resolver import service_resolver
 from security.api_key_checker import get_api_key
 
-router = APIRouter()
-
 # pyannoteAI DiarizeRequest fields this server implements (accepted in the JSON
 # body) vs. deliberately-unsupported ones. Kept explicit so the schema
 # conformance test can assert the union covers the whole official schema and
@@ -159,20 +157,6 @@ async def parse_diarization_request(
     return await _build_request_from_body(body)
 
 
-@router.post("/diarize")
-async def diarize(
-    request: DiarizationRequest = Depends(parse_diarization_request),
-    service=Depends(service_resolver),
-    api_key: str = Security(get_api_key),
-):
-    """Run speaker diarization and return pyannoteAI-shaped segments."""
-    try:
-        result = await service.process_request(request)
-    except Exception as e:  # noqa: BLE001 - surface as HTTP 500 like audio route
-        raise HTTPException(status_code=500, detail=str(e))
-    return result.to_dict()
-
-
 async def _run_diarization_job(job_id, request, service, webhook, webhook_status_only):
     """Background worker: run diarization, store the job output, fire webhook."""
     import asyncio
@@ -197,12 +181,12 @@ async def _run_diarization_job(job_id, request, service, webhook, webhook_status
 
 
 # ---------------------------------------------------------------------------
-# pyannoteAI-native asynchronous job API
+# pyannoteAI job API
 #
-# These live at the pyannoteAI paths (POST /v1/diarize, GET /v1/jobs/{jobId})
-# rather than under /v1/audio, so a pyannoteAI client can switch base URL only.
-# The synchronous /v1/audio/diarize above is kept as a convenience that returns
-# the DiarizationJobOutput directly.
+# These sit at the official paths (POST /v1/diarize, GET /v1/jobs/{jobId}) so a
+# pyannoteAI client can switch base URL only. There is deliberately no
+# synchronous variant: the official API has none, and one published under
+# /v1/audio/diarize was a path no pyannoteAI client would ever call.
 # ---------------------------------------------------------------------------
 
 async_router = APIRouter()
@@ -233,15 +217,15 @@ async def create_diarization_job(
     return job.created_dict()
 
 
-@async_router.get("/jobs/{job_id}")
+@async_router.get("/jobs/{jobId}")
 async def get_diarization_job(
-    job_id: str,
+    jobId: str,  # noqa: N803 - the official spec spells the path parameter this way
     api_key: str = Security(get_api_key),
 ):
     """Return the pyannoteAI DiarizationJob for a job id."""
     from utils.diarization_jobs import get_job_store
 
-    job = get_job_store().get(job_id)
+    job = get_job_store().get(jobId)
     if job is None:
-        raise HTTPException(status_code=404, detail=f"job {job_id!r} not found")
+        raise HTTPException(status_code=404, detail=f"job {jobId!r} not found")
     return job.job_dict()
