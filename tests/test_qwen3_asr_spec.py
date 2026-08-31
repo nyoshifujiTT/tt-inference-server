@@ -101,7 +101,6 @@ SUPERSEDED_TT_METAL_COMMITS = (
     "d53d8d7",  # decode trace default ON
     "ddb7ace",  # head before the rebase onto upstream/yito/qwen3_asr_pr
     "986aad1",  # pre-rebase branch head
-    "3b1b9ad",  # rebased head before the dropped-coverage restoration
 )
 
 
@@ -113,6 +112,22 @@ def test_no_superseded_commit_is_referenced_anywhere():
             assert stale not in text, (
                 f"{rel} still references the superseded tt-metal commit {stale}"
             )
+
+
+def test_the_readme_states_when_the_pin_may_lag_the_head():
+    """The pin names the BUILT tree, so test-only commits need no bump.
+
+    Without this written down the next reader either rebuilds for ~7 h on a
+    test-only commit, or bumps the pin without rebuilding and ships an image
+    that does not correspond to the pinned tree.
+    """
+    readme = open(
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "README.md")
+    ).read()
+    assert "Why the pin may lag the branch head" in readme
+    # the documented check must be the one that proves there is no runtime diff
+    assert "git diff --name-only" in readme
+    assert "grep -v '/tests/'" in readme
 
 
 def test_the_current_pin_is_not_itself_listed_as_superseded():

@@ -17,12 +17,29 @@ build the base with Bake first and tag it the way the script expects:
 ```
 cd $TT_METAL_HOME
 docker buildx bake -f dockerfile/docker-bake.hcl \
-  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:0a22af6 \
+  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:3b1b9ad \
   --set ci-build.output=type=docker \
   ci-build
 ```
 
 The script then sees the base locally and only builds the dev image.
+
+### Why the pin may lag the branch head
+
+`tt_metal_commit` names the tree the image is BUILT from, so it only has to move
+when a commit changes something the image contains. Commits that touch only
+`models/demos/audio/qwen3_asr/tests/` (host-only tests, run from a checkout and
+never copied into the image) produce a byte-identical image, so bumping the pin
+for them would force a ~7 h rebuild that cannot change the result.
+
+Before leaving the pin behind the branch head, verify there is no runtime diff:
+
+```
+git diff --name-only <pinned> <head> -- models/demos/audio/qwen3_asr \
+  | grep -v '/tests/'      # must print nothing
+```
+
+If that prints anything, bump the pin and rebuild.
 
 ### 2. Dev image (from the bring-up forks)
 
@@ -33,7 +50,7 @@ upstream, so both clone URLs have to be overridden:
 cd $TT_INFERENCE_SERVER
 TT_VLLM_REPO_URL=https://github.com/nyoshifujiTT/vllm.git \
 TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git \
-  python3 scripts/build_docker_images.py --build-metal-commit 0a22af6 --single-threaded
+  python3 scripts/build_docker_images.py --build-metal-commit 3b1b9ad --single-threaded
 ```
 
 Without `TT_METAL_REPO_URL` the image lacks the vLLM adapter and the server dies
@@ -49,7 +66,7 @@ it is replaced, so keep at least 60 GB free.
 ```
 python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 --workflow server \
   --docker-server --dev-mode --no-auth --service-port 8110 --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-0a22af6-5e69638
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-3b1b9ad-5e69638
 ```
 
 `/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the
