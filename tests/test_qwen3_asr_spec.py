@@ -172,6 +172,22 @@ def test_the_readme_says_which_clip_to_sanity_check_with():
     assert "インターネットで" in readme, "the reference transcript must be quoted"
 
 
+def test_the_readme_does_not_overstate_the_16khz_requirement():
+    """16 kHz is where the mel front-end is calibrated, not an API constraint.
+
+    Stating it as an input requirement makes callers build conversion they do
+    not need, and hides that the served path already resamples and downmixes
+    (measured: 44.1 kHz mono/stereo and 16 kHz stereo all return the golden
+    transcript).
+    """
+    readme = _readme()
+    assert "preprocessor_config.json" in readme, "cite where 16 kHz comes from"
+    assert "not a requirement on" in readme.replace("*", ""), (
+        "the README must say the client is not required to convert"
+    )
+    assert "44.1 kHz" in readme, "the measurement that proves it must be recorded"
+
+
 def test_the_readme_rejects_the_synthetic_fixtures_for_accuracy():
     """ja_words.wav / test15s.wav have no reference transcript.
 
