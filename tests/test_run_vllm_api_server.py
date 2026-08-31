@@ -447,3 +447,116 @@ def test_ensure_weights_available_raises_when_unreachable_and_no_weights(
 
     with pytest.raises(RuntimeError):
         run_vllm_api_server_module.ensure_weights_available(_weights_spec())
+
+
+class TestTtMetalRelativeEnvPaths:
+    """The catalog writes TT_MESH_GRAPH_DESC_PATH relative to the tt-metal
+    checkout (``../../tt-metal/...``). That resolves only when the process starts
+    exactly two levels below tt-metal, which is true in the image and false under
+    ``run.py --local-server`` -- where it died in device init with
+    ``TT_FATAL ... std::filesystem::exists(mesh_graph_desc_path)``."""
+
+    RELATIVE = "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+
+    def _descriptor(self, tt_metal_home):
+        path = (
+            tt_metal_home
+            / "tt_metal"
+            / "fabric"
+            / "mesh_graph_descriptors"
+            / "p150_mesh_graph_descriptor.textproto"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+        return path
+
+    def test_relative_path_is_anchored_to_tt_metal_home(
+        self, monkeypatch, tmp_path, run_vllm_api_server_module
+    ):
+        tt_metal_home = tmp_path / "tt-metal"
+        descriptor = self._descriptor(tt_metal_home)
+        monkeypatch.setenv("TT_METAL_HOME", str(tt_metal_home))
+        monkeypatch.chdir(tmp_path)  # the relative form does not resolve here
+
+        resolved = run_vllm_api_server_module._resolve_tt_metal_relative_path(
+            "TT_MESH_GRAPH_DESC_PATH", self.RELATIVE
+        )
+
+        assert resolved == str(descriptor)
+
+    def test_a_path_that_already_resolves_is_left_alone(
+        self, monkeypatch, tmp_path, run_vllm_api_server_module
+    ):
+        """The image must keep working byte-for-byte: when the relative path does
+        resolve from the current directory, it is passed through untouched."""
+        tt_metal_home = tmp_path / "tt-metal"
+        self._descriptor(tt_metal_home)
+        start = tmp_path / "app" / "src"
+        start.mkdir(parents=True)
+        monkeypatch.setenv("TT_METAL_HOME", str(tt_metal_home))
+        monkeypatch.chdir(start)  # ../../tt-metal/... resolves from here
+
+        resolved = run_vllm_api_server_module._resolve_tt_metal_relative_path(
+            "TT_MESH_GRAPH_DESC_PATH", self.RELATIVE
+        )
+
+        assert resolved == self.RELATIVE
+
+    def test_absolute_paths_are_never_rewritten(
+        self, monkeypatch, tmp_path, run_vllm_api_server_module
+    ):
+        monkeypatch.setenv("TT_METAL_HOME", str(tmp_path / "tt-metal"))
+        absolute = "/somewhere/else/p150_mesh_graph_descriptor.textproto"
+
+        assert (
+            run_vllm_api_server_module._resolve_tt_metal_relative_path(
+                "TT_MESH_GRAPH_DESC_PATH", absolute
+            )
+            == absolute
+        )
+
+    def test_other_env_vars_are_never_rewritten(
+        self, monkeypatch, tmp_path, run_vllm_api_server_module
+    ):
+        """Only the listed path vars are touched; an unrelated relative value must
+        not be silently turned into a path."""
+        monkeypatch.setenv("TT_METAL_HOME", str(tmp_path / "tt-metal"))
+
+        assert (
+            run_vllm_api_server_module._resolve_tt_metal_relative_path(
+                "SOME_OTHER_VAR", self.RELATIVE
+            )
+            == self.RELATIVE
+        )
+
+    def test_unresolvable_path_is_left_alone_with_a_warning(
+        self, monkeypatch, tmp_path, run_vllm_api_server_module
+    ):
+        """If neither form exists, keep the original so the failure names what the
+        catalog actually asked for."""
+        monkeypatch.setenv("TT_METAL_HOME", str(tmp_path / "tt-metal"))
+        monkeypatch.chdir(tmp_path)
+
+        assert (
+            run_vllm_api_server_module._resolve_tt_metal_relative_path(
+                "TT_MESH_GRAPH_DESC_PATH", self.RELATIVE
+            )
+            == self.RELATIVE
+        )
+
+    def test_set_runtime_env_vars_applies_the_resolution(
+        self, monkeypatch, tmp_path, run_vllm_api_server_module
+    ):
+        """The whole point is that the spec's env var lands resolved in the
+        environment the engine reads."""
+        tt_metal_home = tmp_path / "tt-metal"
+        descriptor = self._descriptor(tt_metal_home)
+        monkeypatch.setenv("TT_METAL_HOME", str(tt_metal_home))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TT_MESH_GRAPH_DESC_PATH", raising=False)
+
+        run_vllm_api_server_module.set_runtime_env_vars(
+            {"device_model_spec": {"env_vars": {"TT_MESH_GRAPH_DESC_PATH": self.RELATIVE}}}
+        )
+
+        assert os.environ["TT_MESH_GRAPH_DESC_PATH"] == str(descriptor)

@@ -539,6 +539,49 @@ def set_metal_timeout_env_vars():
     logger.info(f"Set TT_METAL_DISPATCH_TIMEOUT_COMMAND_TO_EXECUTE={timeout_cmd}")
 
 
+# Catalog env vars whose value is a path written relative to the tt-metal
+# checkout. Listed explicitly rather than guessed from the value, so an unrelated
+# relative value is never rewritten behind the caller's back.
+_TT_METAL_RELATIVE_PATH_ENV_VARS = frozenset({"TT_MESH_GRAPH_DESC_PATH"})
+
+
+def _resolve_tt_metal_relative_path(key: str, value: str) -> str:
+    """Anchor a tt-metal-relative catalog path to TT_METAL_HOME.
+
+    The catalog writes these as ``../../tt-metal/...``, which resolves only when
+    the process starts exactly two levels below the tt-metal checkout. That holds
+    in the image (cwd ``<app>/src``, with tt-metal a sibling of ``app``) and not
+    under ``run.py --local-server``, where the server runs from the repo checkout
+    and tt-metal is wherever ``--tt-metal-home`` points.
+
+    Leaves the value alone when it is already absolute, when TT_METAL_HOME is
+    unset, or when the relative path does resolve from the current directory, so
+    the image path stays byte-for-byte what it was.
+    """
+    if key not in _TT_METAL_RELATIVE_PATH_ENV_VARS:
+        return value
+    path = Path(value)
+    if path.is_absolute() or path.exists():
+        return value
+    tt_metal_home = os.getenv("TT_METAL_HOME")
+    if not tt_metal_home:
+        return value
+    # The value points at tt-metal from outside it, so drop the leading hops and
+    # the "tt-metal" component and re-anchor what remains.
+    parts = list(path.parts)
+    if "tt-metal" not in parts:
+        return value
+    anchored = Path(tt_metal_home).joinpath(*parts[parts.index("tt-metal") + 1 :])
+    if not anchored.exists():
+        logger.warning(
+            f"{key}={value} does not resolve from {os.getcwd()} and "
+            f"{anchored} does not exist either; leaving it unchanged"
+        )
+        return value
+    logger.info(f"resolved {key} against TT_METAL_HOME: {value} -> {anchored}")
+    return str(anchored)
+
+
 def set_runtime_env_vars(model_spec_json):
     """Set runtime environment variables from model spec.
 
@@ -547,6 +590,15 @@ def set_runtime_env_vars(model_spec_json):
     2. Nested: model_spec_json["device_model_spec"]["env_vars"] (raw JSON)
 
     Both locations are checked and merged, with top-level taking precedence.
+
+    Paths that the catalog writes relative to the tt-metal checkout are resolved
+    against TT_METAL_HOME. The catalog spells them as ``../../tt-metal/...``,
+    which only resolves when the process happens to start two levels below
+    tt-metal -- true for the image (cwd ``<app>/src``, tt-metal a sibling of
+    ``app``), false for ``run.py --local-server``, where the server runs from the
+    repo checkout and tt-metal lives wherever ``--tt-metal-home`` points. There
+    the relative form dies in device init with
+    ``TT_FATAL ... std::filesystem::exists(mesh_graph_desc_path)``.
     """
     env_vars = {}
 
@@ -577,6 +629,8 @@ def set_runtime_env_vars(model_spec_json):
                 f"env var value:={value} is not a string, converting to string: {value}"
             )
             value = str(value)
+
+        value = _resolve_tt_metal_relative_path(key, value)
 
         original_value = os.getenv(key)
         if original_value is not None:

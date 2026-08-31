@@ -242,3 +242,50 @@ templates:
         USE_DYNAMIC_BATCHER: "false"
         DEFAULT_THROTTLE_LEVEL: "0"
         TT_METAL_INSPECTOR_RPC: "0"
+
+# =============================================================================
+# Cross-encoder reranker templates
+# =============================================================================
+# bge-reranker-v2-m3 is a cross-encoder: it scores (query, document) pairs and
+# returns one relevance logit per pair, so it is served through /score and
+# /rerank rather than as an embedding model. It reuses the bge-m3 XLM-RoBERTa
+# encoder backbone on device (models/demos/bge_reranker_v2_m3 in tt-metal) and
+# is registered with the standalone TT vLLM plugin through the EXTRA_MODELS_DIR
+# bundle in vllm-tt-metal/extra_models/bge-reranker-v2-m3.
+#
+# The commits below are the upstream defaults. To build and serve a branch that
+# is not upstream yet, patch this template (and the clone URLs in
+# vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile) locally, build, then restore
+# both with git checkout -- never commit the fork pins.
+- weights:
+    - BAAI/bge-reranker-v2-m3
+  tt_metal_commit: "f32a181affd"
+  vllm_commit: "e3fc849"
+  version: "0.20.0"
+  impl: tt_vllm_plugin
+  min_disk_gb: 15
+  min_ram_gb: 6
+  model_type: LLM
+  inference_engine: VLLM
+  device_model_specs:
+    - device: P150
+      max_concurrency: 1
+      max_context: 8192
+      default_impl: true
+      vllm_args:
+        # The reranker is prefill-only and the device model batches a whole
+        # request in one pass, so the scheduler must be allowed to put every
+        # sequence of a request into a single step. Both defaults derived from
+        # max_context would cap a step at one 8192-token sequence, which
+        # serialises an 8-document rerank into 8 device passes (measured: 7.3 s
+        # -> 58.6 s at B=8, and 15.8x at B=32).
+        max_num_seqs: 32
+        max_num_batched_tokens: 262144
+      env_vars:
+        TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150_mesh_graph_descriptor.textproto"
+        VLLM__MAX_NUM_BATCHED_TOKENS: "262144"
+        VLLM__MAX_MODEL_LENGTH: "8192"
+        VLLM__MIN_CONTEXT_LENGTH: "32"
+        VLLM__MAX_NUM_SEQS: "32"
+        MAX_BATCH_SIZE: "32"
+        DEFAULT_THROTTLE_LEVEL: "0"

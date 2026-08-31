@@ -26,7 +26,7 @@ from workflows.validate_setup import (
     validate_local_setup,
 )
 from workflows.device_utils import _get_tt_smi_board_type_counts, infer_default_device
-from workflows.model_spec import get_runtime_model_spec
+from workflows.model_spec import ModelType, get_runtime_model_spec
 from workflows.run_docker_server import (
     generate_docker_run_command,
     get_media_server_docker_env_vars,
@@ -1310,5 +1310,56 @@ class TestUtilityFunctions:
         mock_ensure_dir.assert_called_once_with(mock_log_dir)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__])
+class TestBgeModelCodeComesFromTheImage:
+    """The BGE family lives in tt-metal, and an image built from a tt-metal
+    commit that carries it already contains the model code (the image bakes in
+    the whole tt-metal tree). Serving must therefore never mount model sources
+    over the image: doing so mixes model code from one revision with a C++
+    runtime and Python packages from another, and the image tag stops
+    describing what actually ran."""
+
+    def _make_bge_spec(self):
+        spec = MagicMock()
+        spec.model_id = "id_tt-vllm-plugin_bge-reranker-v2-m3_p150"
+        spec.model_name = "bge-reranker-v2-m3"
+        spec.device_type = "p150"
+        spec.docker_image = "test:reranker-image"
+        spec.impl.impl_name = "tt-vllm-plugin"
+        spec.impl.impl_id = "tt_vllm_plugin"
+        spec.hf_model_repo = "BAAI/bge-reranker-v2-m3"
+        spec.subdevice_type = None
+        spec.inference_engine = "vLLM"
+        spec.model_type = ModelType.LLM
+        return spec
+
+    def _model_code_mounts(self, docker_command):
+        return [
+            arg
+            for arg in docker_command
+            if "dst=" in str(arg) and "/tt-metal/models/demos/" in str(arg)
+        ]
+
+    @pytest.mark.parametrize("dev_mode", [False, True])
+    def test_no_model_code_is_ever_mounted(self, mock_setup_config, dev_mode):
+        runtime_config = RuntimeConfig(
+            model="bge-reranker-v2-m3",
+            workflow="server",
+            device="p150",
+            service_port="8000",
+        )
+        runtime_config.dev_mode = dev_mode
+        runtime_config.tt_metal_home = "/srv/tt-metal"
+
+        with patch(
+            "workflows.run_docker_server.get_repo_root_path", return_value=Path("/tmp")
+        ), patch("workflows.run_docker_server.DeviceTypes"), patch(
+            "workflows.run_docker_server.short_uuid", return_value="test123"
+        ):
+            docker_command, _ = generate_docker_run_command(
+                self._make_bge_spec(),
+                runtime_config,
+                mock_setup_config,
+                Path("/tmp/test-model-spec.json"),
+            )
+
+        assert self._model_code_mounts(docker_command) == []

@@ -1111,3 +1111,62 @@ class TestIsCheckFailing:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+class TestBgeRerankerSpec:
+    """bge-reranker-v2-m3 is served by the standalone TT vLLM plugin. It is a
+    cross-encoder (one relevance logit per query/document pair), catalogued in
+    the embedding YAML alongside the other bge models."""
+
+    MODEL_ID = "id_tt-vllm-plugin_bge-reranker-v2-m3_p150"
+
+    def test_reranker_spec_is_registered(self):
+        assert self.MODEL_ID in MODEL_SPECS
+
+    def test_reranker_uses_the_standalone_plugin_impl(self):
+        spec = MODEL_SPECS[self.MODEL_ID]
+        assert spec.impl.impl_id == "tt_vllm_plugin"
+
+    def test_reranker_is_the_default_impl_for_its_device(self):
+        spec = MODEL_SPECS[self.MODEL_ID]
+        assert spec.device_model_spec.default_impl is True
+
+    def test_image_tag_embeds_the_commits_it_was_built_from(self):
+        # docker_image is derived from (VERSION, tt_metal_commit, vllm_commit).
+        # That derivation is what makes an image traceable to a revision, and
+        # why bind-mounting sources over a prebuilt image is never a substitute
+        # for rebuilding it: once code is overlaid the tag stops describing what
+        # actually ran.
+        spec = MODEL_SPECS[self.MODEL_ID]
+        assert spec.tt_metal_commit
+        assert spec.vllm_commit
+        assert spec.tt_metal_commit in spec.docker_image
+        assert spec.vllm_commit in spec.docker_image
+
+    def test_commit_pins_point_at_upstream_not_a_fork(self):
+        # Fork pins must never be committed: they are applied as a local patch
+        # at build time and reverted afterwards. Nothing here should reference a
+        # personal fork.
+        spec = MODEL_SPECS[self.MODEL_ID]
+        assert "nyoshifuji" not in spec.docker_image.lower()
+        assert "nyoshifuji" not in spec.impl.repo_url.lower()
+
+    def test_a_whole_rerank_request_fits_in_one_scheduler_step(self):
+        # The device model scores a whole batch in one pass, but the scheduler
+        # decides how much of a request reaches it at a time. Both scheduler
+        # defaults are derived from max_context (8192), which caps a step at a
+        # single full-length sequence and turns an 8-document rerank into 8
+        # device passes. Measured on p150: 7.3 s -> 58.6 s at B=8 (8.0x, i.e.
+        # exactly serialised) and 15.8x at B=32, against a demo path that runs
+        # B=8 in the same time as B=1.
+        spec = MODEL_SPECS[self.MODEL_ID]
+        vllm_args = spec.device_model_spec.vllm_args
+        max_seqs = int(vllm_args["max_num_seqs"])
+        max_batched = int(vllm_args["max_num_batched_tokens"])
+
+        assert max_seqs > 1, "a step limited to one sequence serialises every rerank"
+        assert max_batched >= spec.device_model_spec.max_context * max_seqs, (
+            f"max_num_batched_tokens={max_batched} cannot hold {max_seqs} "
+            f"sequences of {spec.device_model_spec.max_context} tokens, so full-length "
+            "requests will still be split across steps"
+        )
