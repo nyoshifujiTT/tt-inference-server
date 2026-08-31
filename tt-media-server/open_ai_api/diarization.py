@@ -138,7 +138,9 @@ async def _read_json_body(body: dict = Body(...)) -> dict:
 async def _fetch_audio(url: str) -> bytes:
     """Fetch the bytes a pyannoteAI ``DiarizeRequest.url`` points at.
 
-    ``media://`` keys come out of this server's temporary storage; everything
+    ``media://`` keys name an object in the configured storage service: they
+    are signed into a GET url and then fetched down the same path as any other
+    url, so there is one place that reads from the network. Everything
     else is either an http(s) URL or inline base64. http(s) goes through the
     server's hardened
     ``media_downloader`` -- the same path ``open_ai_api/video.py`` uses for
@@ -162,7 +164,7 @@ async def _fetch_audio(url: str) -> bytes:
     import base64
     import binascii
 
-    from config.settings import settings
+    from utils import media_downloader
     from utils.media_downloader import (
         MediaDownloadFetchError,
         MediaDownloadPolicyError,
@@ -170,17 +172,20 @@ async def _fetch_audio(url: str) -> bytes:
         download_media_url,
         is_media_url,
     )
-    from utils.media_storage import (
+    from utils.media_object_storage import (
         MEDIA_SCHEME,
         MediaStorageError,
-        get_media_storage,
+        MediaStorageNotConfigured,
+        presigned_get_url,
     )
 
     if url.startswith(MEDIA_SCHEME):
         try:
-            return get_media_storage().get(url)
+            url = presigned_get_url(url)
         except MediaStorageError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except MediaStorageNotConfigured as e:
+            raise HTTPException(status_code=501, detail=str(e))
 
     if is_media_url(url):
         try:
@@ -203,9 +208,11 @@ async def _fetch_audio(url: str) -> bytes:
             ),
         )
 
-    # The same cap the downloader enforces: how the bytes arrived should not
-    # change how many of them this server is willing to hold.
-    max_bytes = settings.media_url_max_bytes
+    # The same cap the downloader enforces, read off the downloader's own
+    # settings object rather than a fresh import: how the bytes arrived should
+    # not change how many of them this server is willing to hold, and two
+    # imports could not drift apart.
+    max_bytes = media_downloader.settings.media_url_max_bytes
     if len(url) > _base64_len_for(max_bytes):
         raise HTTPException(
             status_code=413,

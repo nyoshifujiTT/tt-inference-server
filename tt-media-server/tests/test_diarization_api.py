@@ -54,15 +54,36 @@ def _diarize(client, body):
 
 
 @pytest.fixture(autouse=True)
-def _media(tmp_path, monkeypatch):
-    """Back the media:// resolver with a temp store and stage a dummy audio object."""
-    monkeypatch.setenv("MEDIA_INPUT_DIR", str(tmp_path))
-    import utils.media_storage as ms
+def _media(monkeypatch):
+    """Point media:// at a configured object store and stub the fetch.
 
-    ms._STORAGE = None
-    ms.get_media_storage().put("audio.wav", b"RIFFxxxxWAVE")
+    ``media://`` keys are now signed into a GET url on the storage service and
+    read back through ``media_downloader`` — the bytes never sit on this host.
+    These cases are about request validation, so the fetch is stubbed and only
+    the storage configuration is real.
+    """
+    from unittest.mock import AsyncMock
+
+    import utils.media_downloader as md
+    import utils.media_object_storage as mos
+
+    # Patch through the modules under test, not ``config.settings``: other test
+    # modules replace ``sys.modules["config.settings"]`` with a Mock at import
+    # time and never restore it, so patching there reaches the Mock while the
+    # code keeps its reference to the real settings object (the same reason
+    # tests/test_video_api.py patches ``open_ai_api.video.settings``).
+    settings = mos.settings
+
+    monkeypatch.setattr(settings, "media_storage_endpoint", "https://s3.test", False)
+    monkeypatch.setattr(settings, "media_storage_bucket", "media", False)
+    monkeypatch.setattr(settings, "media_storage_access_key", "key", False)
+    monkeypatch.setattr(settings, "media_storage_secret_key", "secret", False)
+    mos.reset_client()
+    monkeypatch.setattr(
+        md, "download_media_url", AsyncMock(return_value=b"RIFFxxxxWAVE")
+    )
     yield
-    ms._STORAGE = None
+    mos.reset_client()
 
 
 _URL = "media://audio.wav"
@@ -140,10 +161,9 @@ def test_a_multipart_upload_is_rejected_without_inventing_a_status():
 
 
 def test_diarize_bad_media_url():
+    """A malformed object key is rejected before anything is signed."""
     fake = _FakeService()
-    resp = _make_client(fake).post(
-        "/v1/diarize", json={"url": "media://does-not-exist.wav"}
-    )
+    resp = _make_client(fake).post("/v1/diarize", json={"url": "media://../etc/passwd"})
     assert resp.status_code == 400, resp.text
     assert fake.last is None
 

@@ -2,23 +2,28 @@
 #
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 
-"""pyannoteAI-compatible temporary media input endpoints.
+"""pyannoteAI-compatible temporary media input endpoint.
 
-Implements the two-step upload flow from
-https://docs.pyannote.ai/api-reference/upload-media:
+``POST /v1/media/input`` with ``{"url": "media://<object-key>"}`` declares an
+object key and answers ``{"url": "<put-url>"}`` (MediaResponse), exactly as
+https://docs.pyannote.ai/api-reference/upload-media describes. The put-url is a
+pre-signed URL **on the object storage service**, which is what the official
+API returns and what its clients expect: the upload goes straight to storage
+and never through the process that schedules device work.
 
-  - ``POST /v1/media/input`` with ``{"url": "media://<object-key>"}`` declares an
-    object key and returns ``{"url": "<put-url>"}`` (MediaResponse). The put-url
-    is served by this same server.
-  - ``PUT /v1/media/input/{object_key}`` receives the raw file bytes.
-
-The staged ``media://<object-key>`` can then be passed as
-``DiarizeRequest.url``.
+There is deliberately no ``PUT`` route here. This server used to serve the
+upload itself, which put a receive path inside the official ``/v1/media``
+namespace that no pyannoteAI client would ever call, and made every staged
+recording travel through the inference API twice.
 """
 
-from fastapi import APIRouter, HTTPException, Request, Security
+from fastapi import APIRouter, HTTPException, Security
 from security.api_key_checker import get_api_key
-from utils.media_storage import MediaStorageError, get_media_storage
+from utils.media_object_storage import (
+    MediaStorageError,
+    MediaStorageNotConfigured,
+    presigned_put_url,
+)
 
 router = APIRouter()
 
@@ -26,37 +31,18 @@ router = APIRouter()
 @router.post("/input", status_code=201)
 async def create_media_input(
     body: dict,
-    request: Request,
     api_key: str = Security(get_api_key),
 ):
-    """Declare a media:// object key and return a PUT url (MediaResponse)."""
+    """Declare a media:// object key and return a pre-signed PUT url."""
     url = body.get("url") if isinstance(body, dict) else None
     if not url:
         raise HTTPException(status_code=400, detail="'url' (media://<key>) is required")
     try:
-        key = get_media_storage().declare(url)
+        return {"url": presigned_put_url(url)}
     except MediaStorageError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    base = str(request.base_url).rstrip("/")
-    return {"url": f"{base}/v1/media/input/{key}"}
-
-
-# Not in the published schema: the official API returns a pre-signed URL on the
-# storage service, so no client is written against an upload path on the API
-# host. Publishing one put it inside the official /v1/media namespace, where a
-# spec comparison flags it as an invented path.
-@router.put("/input/{object_key:path}", include_in_schema=False)
-async def put_media_input(
-    object_key: str,
-    request: Request,
-    api_key: str = Security(get_api_key),
-):
-    """Store the raw bytes for a previously-declared object key."""
-    data = await request.body()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty request body")
-    try:
-        get_media_storage().put(object_key, data)
-    except MediaStorageError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"url": f"media://{object_key}"}
+    except MediaStorageNotConfigured as e:
+        # 501, not 500: the server is working as configured, this optional
+        # capability was simply not turned on, and the message names the two
+        # inputs that work without it.
+        raise HTTPException(status_code=501, detail=str(e))

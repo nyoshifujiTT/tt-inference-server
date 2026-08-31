@@ -154,6 +154,23 @@ class Settings(BaseSettings):
     media_url_timeout_seconds: float = 30.0
     media_url_max_redirects: int = 5
 
+    # Object storage for the pyannoteAI two-step upload (media:// keys).
+    # This server is only an S3 *client* here: it signs a PUT url and reads the
+    # object back, and the bytes never pass through it (see
+    # utils/media_object_storage.py). Leave the endpoint empty and
+    # POST /v1/media/input answers 501, pointing at the two inputs that need no
+    # storage: an http(s) url, or inline base64.
+    media_storage_endpoint: str = ""
+    media_storage_bucket: str = ""
+    media_storage_access_key: str = ""
+    media_storage_secret_key: str = ""
+    # Self-hosted S3 services ignore the region but SigV4 requires one in the
+    # string it signs, so it has to be some fixed value on both sides.
+    media_storage_region: str = "us-east-1"
+    # Long enough to upload a recording over a slow link, short enough that a
+    # leaked url is not a standing grant.
+    media_storage_presign_expiry_seconds: int = 3600
+
     # Telemetry settings
     enable_telemetry: bool = True
     prometheus_endpoint: str = "/metrics"
