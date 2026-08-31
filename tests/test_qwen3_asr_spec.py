@@ -92,9 +92,41 @@ def test_tt_metal_commit_matches_the_rebased_bring_up_head():
     )
 
 
-def test_no_pre_rebase_commit_is_referenced_anywhere():
-    # ddb7ace was the head before the rebase onto upstream/yito/qwen3_asr_pr.
+# Every tt-metal commit this repo has pinned and then moved past. A superseded
+# pin builds a docker image from a tree the repo no longer tests, so the served
+# model silently differs from what CI checked. Append (never remove) an entry
+# when bumping the pin.
+SUPERSEDED_TT_METAL_COMMITS = (
+    "97b36e1",  # pre-bring-up base
+    "d53d8d7",  # decode trace default ON
+    "ddb7ace",  # head before the rebase onto upstream/yito/qwen3_asr_pr
+    "986aad1",  # pre-rebase branch head
+    "3b1b9ad",  # rebased head before the dropped-coverage restoration
+)
+
+
+def test_no_superseded_commit_is_referenced_anywhere():
     root = os.path.join(os.path.dirname(__file__), "..")
     for rel in ("workflows/model_spec.py", "scripts/qwen3_asr/README.md"):
         text = open(os.path.join(root, rel)).read()
-        assert "ddb7ace" not in text, f"{rel} still references the pre-rebase commit"
+        for stale in SUPERSEDED_TT_METAL_COMMITS:
+            assert stale not in text, (
+                f"{rel} still references the superseded tt-metal commit {stale}"
+            )
+
+
+def test_the_current_pin_is_not_itself_listed_as_superseded():
+    """Guard the bookkeeping: bumping the pin must also retire the old entry.
+
+    Without this, someone could add the NEW commit to the list above and the
+    test would then demand the spec not reference the very commit it pins.
+    """
+    import re
+
+    spec_src = open(os.path.join(os.path.dirname(__file__), "..", "workflows", "model_spec.py")).read()
+    anchor = spec_src.index("Qwen3-ASR-1.7B-JA")
+    window = spec_src[anchor : anchor + 4000]
+    pinned = re.search(r'tt_metal_commit="([0-9a-f]{7,})"', window).group(1)
+    assert pinned not in SUPERSEDED_TT_METAL_COMMITS, (
+        f"the active pin {pinned} is listed as superseded"
+    )
