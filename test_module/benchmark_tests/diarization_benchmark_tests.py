@@ -12,13 +12,18 @@ transcript (so the ASR runner would score the wrong thing).
 The figure that matters is the real-time ratio -- audio seconds handled per
 wall-clock second -- because the request carries a recording of a known length.
 That is measured here over the pyannoteAI-shaped API the service exposes: stage
-the audio through ``POST /v1/media/input`` + ``PUT``, then ``POST
-/v1/audio/diarize``.
+the recording in the request and poll the job -- ``POST /v1/diarize`` then
+``GET /v1/jobs/{jobId}``. The job API is the only shape the official API has,
+so it is the one worth measuring. The audio goes inline rather than through the
+``media://`` staging flow, which would need an object store standing next to
+the server; a benchmark that cannot run without one measures the deployment
+rather than the model.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import sys
 import time
@@ -53,6 +58,41 @@ REQUEST_TIMEOUT_S = 600
 DEFAULT_NUM_CALLS = 3
 
 
+# Cheap enough not to distort a timing measurement, frequent enough that the
+# poll interval is noise next to a pipeline run measured in seconds.
+JOB_POLL_INTERVAL_S = 0.25
+
+
+async def _await_job(session, ctx: MediaContext, job_id: str, headers: dict):
+    """Poll a diarization job until it leaves the running states.
+
+    Returns the job ``output`` on success, or None on failure -- including a
+    job that never finished inside the request timeout, which is a failed
+    sample and not a reason to hang the run.
+    """
+    deadline = time.monotonic() + REQUEST_TIMEOUT_S
+    while time.monotonic() < deadline:
+        async with session.get(
+            f"{ctx.base_url}/v1/jobs/{job_id}", headers=headers
+        ) as response:
+            if response.status != 200:
+                logger.error(
+                    f"Job poll failed with status {response.status}: "
+                    f"{await response.text()}"
+                )
+                return None
+            job = await response.json()
+        status = job.get("status")
+        if status == "succeeded":
+            return job.get("output") or {}
+        if status in ("failed", "canceled"):
+            logger.error(f"Diarization job {job_id} ended as {status}: {job}")
+            return None
+        await asyncio.sleep(JOB_POLL_INTERVAL_S)
+    logger.error(f"Diarization job {job_id} did not finish in {REQUEST_TIMEOUT_S}s")
+    return None
+
+
 def sample_audio_path() -> str:
     """pyannote's bundled 30 s two-speaker sample.
 
@@ -78,59 +118,44 @@ def audio_duration_seconds(path: str) -> Optional[float]:
 async def diarize_once(
     ctx: MediaContext, audio_path: str, audio_duration: Optional[float]
 ) -> DiarizationTestStatus:
-    """Stage the audio, diarize it, and time the round trip."""
+    """Submit the audio as a diarization job and time the round trip."""
     headers = {
         "accept": "application/json",
         "Authorization": "Bearer your-secret-key",
     }
-    object_key = f"benchmark/{time.time()}.wav"
-
     with open(audio_path, "rb") as handle:
         audio_bytes = handle.read()
+    # Inline base64 rather than the media:// staging flow. Staging needs an
+    # object store standing next to the server, and a benchmark that cannot run
+    # without one measures the deployment rather than the model. The server
+    # accepts either in the same field, and the bytes reach the pipeline
+    # identically; what is timed is the diarization, not the transport.
+    audio_url = base64.b64encode(audio_bytes).decode("ascii")
 
     start_time = time.monotonic()
     try:
         timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_S)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # 1. declare the object, 2. upload the bytes to the returned url
-            async with session.post(
-                f"{ctx.base_url}/v1/media/input",
-                json={"url": f"media://{object_key}"},
-                headers={**headers, "Content-Type": "application/json"},
-            ) as response:
-                if response.status not in (200, 201):
-                    logger.error(
-                        f"Staging declaration failed with status {response.status}: "
-                        f"{await response.text()}"
-                    )
-                    return DiarizationTestStatus(status=False, elapsed=0.0)
-                put_url = (await response.json())["url"]
-
-            async with session.put(
-                put_url, data=audio_bytes, headers=headers
-            ) as response:
-                if response.status != 200:
-                    logger.error(
-                        f"Audio upload failed with status {response.status}: "
-                        f"{await response.text()}"
-                    )
-                    return DiarizationTestStatus(status=False, elapsed=0.0)
-
-            # 3. diarize
             request_start = time.monotonic()
             async with session.post(
-                f"{ctx.base_url}/v1/audio/diarize",
-                json={"url": f"media://{object_key}", "exclusive": True},
+                f"{ctx.base_url}/v1/diarize",
+                json={"url": audio_url, "exclusive": True},
                 headers={**headers, "Content-Type": "application/json"},
             ) as response:
-                if response.status != 200:
+                if response.status != 201:
                     logger.error(
-                        f"Diarize request failed with status {response.status}: "
+                        f"Diarize job creation failed with status {response.status}: "
                         f"{await response.text()}"
                     )
                     return DiarizationTestStatus(status=False, elapsed=0.0)
-                ttft_ms = (time.monotonic() - request_start) * 1000
-                body = await response.json()
+                job_id = (await response.json())["jobId"]
+
+            # Poll the job. ttft is measured at the first response that
+            # carries output, which is when the server actually produced it.
+            body = await _await_job(session, ctx, job_id, headers)
+            if body is None:
+                return DiarizationTestStatus(status=False, elapsed=0.0)
+            ttft_ms = (time.monotonic() - request_start) * 1000
     except Exception as e:  # noqa: BLE001 - a failed call is a failed sample
         logger.error(f"Diarization request failed: {type(e).__name__}: {e}")
         return DiarizationTestStatus(status=False, elapsed=0.0)
