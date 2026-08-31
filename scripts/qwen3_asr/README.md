@@ -58,6 +58,29 @@ with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`;
 without `TT_VLLM_REPO_URL` it lacks the HF-config fix and dies with
 `AttributeError: 'Qwen3ASRConfig' object has no attribute 'thinker_config'`.
 
+#### If the branch is not pushed yet
+
+The commands above assume the pinned commits are reachable on the forks. While
+the bring-up branch only exists locally, serve it over the loopback instead of
+pushing -- the build still performs an ordinary `git clone`, only the URL
+differs:
+
+```
+# once, on the docker host
+git clone --bare <local tt-metal checkout> /tmp/ttmetal-src.git
+cd /tmp/ttmetal-src.git && git update-server-info
+git daemon --reuseaddr --base-path=/tmp --export-all --enable=upload-pack \
+  --listen=0.0.0.0 --port=9418 &
+
+# then build against it (172.17.0.1 is the docker0 gateway)
+TT_METAL_REPO_URL=git://172.17.0.1:9418/ttmetal-src.git \
+TT_VLLM_REPO_URL=https://github.com/nyoshifujiTT/vllm.git \
+  python3 scripts/build_docker_images.py --build-metal-commit <pin> --single-threaded
+```
+
+Push the branch and drop this step before handing the recipe over: an image
+built from a daemon on one host is not reproducible by anyone else.
+
 Disk: the dev image is ~21 GB and a rebuild keeps the previous generation until
 it is replaced, so keep at least 60 GB free.
 

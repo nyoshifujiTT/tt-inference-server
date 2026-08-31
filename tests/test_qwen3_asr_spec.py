@@ -130,6 +130,25 @@ def test_the_readme_states_when_the_pin_may_lag_the_head():
     assert "grep -v '/tests/'" in readme
 
 
+def test_the_readme_documents_the_unpushed_branch_path():
+    """The recipe must not imply the forks already carry the pinned commits.
+
+    While the bring-up branch is local-only the build cannot clone from GitHub,
+    so the actual images were built against a git daemon on the docker host. A
+    README that only shows the fork URLs hides that, and the next reader gets a
+    clone failure with no idea why.
+    """
+    readme = open(
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "README.md")
+    ).read()
+    assert "If the branch is not pushed yet" in readme
+    assert "git daemon" in readme, "the loopback-serving workaround must be spelled out"
+    assert "git://172.17.0.1:9418" in readme, "the URL that was actually used must be shown"
+    assert "Push the branch and drop this step" in readme, (
+        "the workaround must be marked as temporary, not as the delivered recipe"
+    )
+
+
 def test_the_current_pin_is_not_itself_listed_as_superseded():
     """Guard the bookkeeping: bumping the pin must also retire the old entry.
 
