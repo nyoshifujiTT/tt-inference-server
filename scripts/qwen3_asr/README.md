@@ -123,6 +123,42 @@ curl -X POST http://127.0.0.1:8110/v1/audio/transcriptions \
   -F file=@clip.wav -F model=neosophie/Qwen3-ASR-1.7B-JA -F language=ja
 ```
 
+#### The clip to check with
+
+Use a clip that has a published reference transcript, so the output can actually
+be judged. The sanity clip used throughout this bring-up is FLEURS `ja_jp`
+`test[0]`; fetch it rather than copying a wav from someone's scratch directory:
+
+```python
+from datasets import load_dataset
+import soundfile as sf, librosa, numpy as np
+
+ds = load_dataset("google/fleurs", "ja_jp", split="test", streaming=True)
+ex = next(iter(ds))
+w = np.asarray(ex["audio"]["array"], dtype="float32")
+sr = ex["audio"]["sampling_rate"]
+if sr != 16000:
+    w = librosa.resample(w, orig_sr=sr, target_sr=16000)
+sf.write("real_ja.wav", w, 16000)   # 10.44 s
+print(ex["transcription"])
+```
+
+Reference: `インターネットで 敵対的環境コース について検索すると おそらく現地企業の住所が出てくるでしょう`
+
+Served output on p150 (bf8 weights, greedy) differs from the reference only in
+homophones, e.g. `インターネットで適体適環境コースについて検索すると、おそらく現地企業の住所が出てくるでしょう。`
+That is the expected result; treat a materially different string as a
+regression.
+
+**Do not use `ja_words.wav` or `test15s.wav` for this.** Both are synthetic
+fixtures with no reference transcript: `ja_words.wav` is a concatenation of
+isolated words made during bring-up to compare the TT and CPU decoders against
+each other, and `test15s.wav` is the warmup waveform pointed at by
+`QWEN3ASR_WARMUP_WAV` (looped English, which the JA model ends immediately).
+They are fine for "does the server answer at all", but any accuracy claim based
+on them is meaningless. Accuracy is measured with the corpus evals (TED,
+MagicHub, LibriSpeech), not with a single clip.
+
 The very first transcription JIT-compiles kernels into the container's cache and
 can take minutes; subsequent ones settle at ~2 s for an 11 s clip. Do not mistake
 that first request for a hang.

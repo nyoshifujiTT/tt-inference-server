@@ -158,6 +158,34 @@ def test_the_readme_explains_the_vllm_fork_clone():
     assert "vllm-tt-plugin" in readme, "the upstream layout must be contrasted"
 
 
+def test_the_readme_says_which_clip_to_sanity_check_with():
+    """A bare "clip.wav" leaves the reader to grab any file they can find.
+
+    During bring-up that meant synthetic fixtures with no reference transcript
+    got picked up by others as if they were sanity clips.
+    """
+    readme = _readme()
+    assert "The clip to check with" in readme
+    assert "google/fleurs" in readme, "the clip must be fetchable, not copied around"
+    assert "ja_jp" in readme and "test" in readme, "the exact split must be pinned"
+    # the reference transcript must be present, or the output cannot be judged
+    assert "インターネットで" in readme, "the reference transcript must be quoted"
+
+
+def test_the_readme_rejects_the_synthetic_fixtures_for_accuracy():
+    """ja_words.wav / test15s.wav have no reference transcript.
+
+    They were made during bring-up (a word concatenation for TT-vs-CPU decoder
+    comparison, and the looped-English warmup waveform). Judging accuracy with
+    either is meaningless, so the README has to say so explicitly.
+    """
+    readme = _readme()
+    for fixture in ("ja_words.wav", "test15s.wav"):
+        assert fixture in readme, f"{fixture} must be called out"
+    assert "Do not use" in readme
+    assert "QWEN3ASR_WARMUP_WAV" in readme, "say what test15s.wav actually is"
+
+
 def test_the_readme_documents_the_unpushed_branch_path():
     """The recipe must not imply the forks already carry the pinned commits.
 
