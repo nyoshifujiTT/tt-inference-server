@@ -113,6 +113,57 @@ async def _read_json_body(body: dict = Body(...)) -> dict:
     return body
 
 
+async def _fetch_audio(url: str) -> bytes:
+    """Fetch the bytes a pyannoteAI ``DiarizeRequest.url`` points at.
+
+    ``media://`` keys come out of this server's temporary storage; everything
+    else has to be an http(s) URL, and those go through the server's hardened
+    ``media_downloader`` -- the same path ``open_ai_api/video.py`` uses for
+    presigned image URLs. That downloader is where the SSRF guard lives: a
+    required hostname allowlist re-checked on every redirect hop, one deadline
+    covering all hops, a streamed body checked against ``media_url_max_bytes``,
+    and query strings kept out of logs because presigned URLs carry credentials
+    there. A second fetch helper next to it would be a second hole to keep
+    closed, which is exactly how the reference servers reintroduced SSRF.
+
+    Statuses follow video.py so one taxonomy covers every URL-valued field:
+    policy violation 400, over the cap 413, origin/network/deadline 422.
+    """
+    from utils.media_downloader import (
+        MediaDownloadFetchError,
+        MediaDownloadPolicyError,
+        MediaDownloadTooLargeError,
+        download_media_url,
+        is_media_url,
+    )
+    from utils.media_storage import (
+        MEDIA_SCHEME,
+        MediaStorageError,
+        get_media_storage,
+    )
+
+    if url.startswith(MEDIA_SCHEME):
+        try:
+            return get_media_storage().get(url)
+        except MediaStorageError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    if not is_media_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported audio url scheme: {url!r}; use http(s):// or media://",
+        )
+
+    try:
+        return await download_media_url(url)
+    except MediaDownloadPolicyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except MediaDownloadTooLargeError as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    except MediaDownloadFetchError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
 async def _build_request_from_body(body: dict) -> DiarizationRequest:
     """Validate a pyannoteAI DiarizeRequest body and resolve it to a request.
 
@@ -120,8 +171,6 @@ async def _build_request_from_body(body: dict) -> DiarizationRequest:
     (http(s):// or media://), fetches the audio bytes, and builds the internal
     DiarizationRequest. See https://docs.pyannote.ai/openapi.json.
     """
-    from utils.audio_url_resolver import AudioUrlError, resolve_audio_url
-
     _validate_served_model(body.get("model"))
     _reject_precision2_only_options(
         confidence=body.get("confidence"),
@@ -135,10 +184,7 @@ async def _build_request_from_body(body: dict) -> DiarizationRequest:
         raise HTTPException(
             status_code=400, detail="'url' is required (http(s):// or media://)"
         )
-    try:
-        audio_bytes = resolve_audio_url(url)
-    except AudioUrlError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    audio_bytes = await _fetch_audio(url)
 
     exclusive = body.get("exclusive")
     return DiarizationRequest(

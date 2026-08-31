@@ -45,10 +45,10 @@ def test_declare_then_put_roundtrip(client):
     assert r2.status_code == 200, r2.text
     assert r2.json()["url"] == "media://sess/a.wav"
 
-    # 3. bytes are retrievable via the resolver
-    from utils.audio_url_resolver import resolve_audio_url
+    # 3. the staged bytes come back for the media:// url the diarize body uses
+    from utils.media_storage import get_media_storage
 
-    assert resolve_audio_url("media://sess/a.wav") == b"RIFFDATA"
+    assert get_media_storage().get("media://sess/a.wav") == b"RIFFDATA"
 
 
 def test_declare_requires_url(client):
