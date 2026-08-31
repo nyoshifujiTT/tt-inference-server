@@ -43,7 +43,9 @@ All API endpoints use the `/v1` prefix to match the OpenAI API standard. Legacy 
 | `/v1/images/edits`                                          | `/image/edits`                                       | POST   | Image editing (SDXL edit)                  |
 | `/v1/audio/transcriptions`                                  | `/audio/transcriptions`                              | POST   | Speech-to-text                             |
 | `/v1/audio/translations`                                    | `/audio/translations`                                | POST   | Speech-to-English (translation)            |
-| `/v1/audio/diarize`                                         | `/audio/diarize`                                     | POST   | Speaker diarization (who spoke when)       |
+| `/v1/diarize`                                               | —                                                    | POST   | Speaker diarization job (who spoke when)   |
+| `/v1/jobs/{jobId}`                                          | —                                                    | GET    | Diarization job status and result          |
+| `/v1/media/input`                                           | —                                                    | POST   | Pre-signed upload url for `media://` audio |
 | `/v1/audio/speech`                                          | `/audio/speech`                                      | POST   | Text-to-speech                             |
 | `/v1/videos/generations`                                    | `/video/generations`                                 | POST   | Text-to-video generation                   |
 | `/v1/videos/generations/i2v`                                | `/video/generations/i2v`                             | POST   | Image-to-video generation (Wan2.2 I2V)     |
@@ -492,9 +494,9 @@ Served when the model resolves to the diarization service — `MODEL=speaker-dia
 
 Weights default to the `pyannote/speaker-diarization-community-1` repo id, which is gated: export `HF_TOKEN` after accepting the terms on the model page, or point `HF_MODEL` at the ungated mirror `pyannote-community/speaker-diarization-community-1`, which carries the same checkpoints.
 
-There are two ways to call it: a synchronous convenience endpoint that returns the result directly, and the pyannoteAI-native asynchronous job API (below).
+Diarization is a job: `POST /v1/diarize` creates one and `GET /v1/jobs/{jobId}` returns it. That is the only shape the official API has, so there is no synchronous convenience route here — one published at `/v1/audio/diarize` was a path no pyannoteAI client would ever call.
 
-**Endpoint:** `POST /v1/audio/diarize` (legacy: `POST /audio/diarize`)
+**Endpoint:** `POST /v1/diarize`
 **Content-Type:** `application/json`
 
 The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a public `http(s)://` URL, a `media://<object-key>` staged via the media API (see below), or — as an extension for deployments with no reachable object storage — the audio itself as inline base64. The official schema types `url` as a bare string with no pattern, so base64 in that field is not a schema violation, and it is the same "URL or base64 in one field" shape the video endpoint uses for images; it costs a third in wire size, so prefer a URL when you have one. There is no multipart file field, matching pyannoteAI. Whichever form is used, the payload is capped at `media_url_max_bytes` (64 MiB for this model, about 35 minutes of 16 kHz mono audio); over that the server answers 413.
@@ -510,13 +512,16 @@ The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a pub
 | `exclusive`    | No       | When `true` (default), also return non-overlapping turns as `exclusiveDiarization` (pyannoteAI `exclusive`). |
 
 ```bash
-curl -X POST 'http://127.0.0.1:8000/v1/audio/diarize' \
+JOB=$(curl -s -X POST 'http://127.0.0.1:8000/v1/diarize' \
   -H 'Authorization: Bearer your-secret-key' \
   -H 'Content-Type: application/json' \
-  -d '{"url": "https://example.com/audio.wav", "exclusive": true}'
+  -d '{"url": "https://example.com/audio.wav", "exclusive": true}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["jobId"])')
+
+curl -s "http://127.0.0.1:8000/v1/jobs/$JOB" -H 'Authorization: Bearer your-secret-key'
 ```
 
-Response (pyannoteAI `DiarizationJobOutput`; `exclusiveDiarization` present when `exclusive=true`):
+The job's `output` is the pyannoteAI `DiarizationJobOutput` (`exclusiveDiarization` present when `exclusive=true`):
 
 ```json
 {
@@ -537,20 +542,20 @@ Response (pyannoteAI `DiarizationJobOutput`; `exclusiveDiarization` present when
 
 The following pyannoteAI options are **precision-2-only** and cannot be produced by community-1, so requesting them returns HTTP 400 (they are never silently ignored): `confidence`, `turnLevelConfidence`, `transcription`, `transcriptionConfig`. Correspondingly, the precision-2-only response fields (`confidence`, `wordLevelTranscription`, `turnLevelTranscription`) are never emitted. See https://docs.pyannote.ai/openapi.json.
 
-## Asynchronous job API (pyannoteAI-native)
-
-In addition to the synchronous `POST /v1/audio/diarize` above, the server exposes the pyannoteAI-native asynchronous flow so a pyannoteAI client can switch base URL only:
+## Job API (pyannoteAI-native)
 
 - `POST /v1/diarize` — create a job. Body is the pyannoteAI `DiarizeRequest` (`url` plus optional `numSpeakers`/`minSpeakers`/`maxSpeakers`/`exclusive`/`model` and `webhook`/`webhookStatusOnly`). Returns `201` with `JobCreated` (`{jobId, status}`).
 - `GET /v1/jobs/{jobId}` — returns the `DiarizationJob` (`{jobId, status, createdAt, updatedAt, output}`); `output` is the `DiarizationJobOutput` once `status` is `succeeded`. Status values are the pyannoteAI enum `created|running|succeeded|failed|canceled`.
 - `webhook` / `webhookStatusOnly` — when `webhook` is set, the job payload is POSTed to that URL on completion (`webhookStatusOnly=true` sends only `{jobId, status}`).
 
 ```bash
-# 1. stage a private file (optional; or pass a public https url)
+# 1. stage a private file (optional; or pass a public https url, or inline base64)
 UP=$(curl -s -X POST http://127.0.0.1:8000/v1/media/input \
   -H 'Authorization: Bearer your-secret-key' -H 'Content-Type: application/json' \
   -d '{"url":"media://sess/audio.wav"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')
-curl -s -X PUT "$UP" --data-binary @/path/to/audio.wav -H 'Authorization: Bearer your-secret-key'
+# the signature in $UP is the only credential this needs, and it goes to the
+# object store rather than back through the inference server
+curl -s -X PUT "$UP" --upload-file /path/to/audio.wav
 
 # 2. create the job
 JOB=$(curl -s -X POST http://127.0.0.1:8000/v1/diarize \
@@ -564,7 +569,47 @@ curl -s http://127.0.0.1:8000/v1/jobs/$JOB -H 'Authorization: Bearer your-secret
 
 ## Media input (staging private files)
 
-`POST /v1/media/input` with `{"url":"media://<object-key>"}` returns a PUT url; `PUT` the file bytes there, then pass `media://<object-key>` as the diarize `url`. This mirrors the pyannoteAI temporary media storage (https://docs.pyannote.ai/api-reference/upload-media). Objects expire after `MEDIA_INPUT_RETENTION_SECONDS` (default 24h); the storage dir is `MEDIA_INPUT_DIR` (default `/tmp/tt_media_input`).
+`POST /v1/media/input` with `{"url":"media://<object-key>"}` returns a **pre-signed `PUT` url on an S3-compatible object store**; `PUT` the file bytes straight there, then pass `media://<object-key>` as the diarize `url`. This is the pyannoteAI temporary media storage flow (https://docs.pyannote.ai/api-reference/upload-media), including the part that matters operationally: the upload goes to storage, not through this server, so a long recording never occupies the process that is scheduling device work. The signature is SigV4, so plain `curl -T` is enough — no SDK, no credentials on the client.
+
+This is optional. With no store configured the endpoint answers `501` and names the two inputs that need none: an `http(s)://` url, or the audio inline as base64. Configure it with:
+
+| Variable | Description |
+|---|---|
+| `MEDIA_STORAGE_ENDPOINT` | Base url of the S3-compatible service, e.g. `http://rustfs:9000`. Empty disables `media://`. |
+| `MEDIA_STORAGE_BUCKET` | Bucket the objects are staged in. |
+| `MEDIA_STORAGE_ACCESS_KEY` / `MEDIA_STORAGE_SECRET_KEY` | Credentials used to sign. Never sent to the client — only the signature is. |
+| `MEDIA_STORAGE_REGION` | Region string SigV4 signs over; self-hosted services ignore the value but it has to match on both sides. Default `us-east-1`. |
+| `MEDIA_STORAGE_PRESIGN_EXPIRY_SECONDS` | Lifetime of a signed url. Default `3600`. |
+
+The store's hostname is downloadable without appearing in `MEDIA_URL_ALLOWED_DOMAINS`: a `media://` key resolves to a url this server signed against its own endpoint, so it is not a client-chosen destination. Client-supplied `http(s)` urls still need that allowlist.
+
+Retention is a **bucket lifecycle policy on the store**, not a sweeper in this server — that is where the official "at least 24 hours" guarantee belongs, and it keeps working while this server is down.
+
+Any S3-compatible service works. For a self-hosted one, [RustFS](https://github.com/rustfs/rustfs) is the straightforward pick: Apache-2.0 (MinIO's community edition is AGPL and archived, Garage is AGPL), a single container configured by two variables, and S3-native lifecycle. Staged media is temporary, so backing it with `tmpfs` keeps it off disk and clears it with the container:
+
+```bash
+docker run -d --name rustfs --network tt-media \
+  --tmpfs /data:rw,size=8g \
+  -e RUSTFS_ACCESS_KEY=media -e RUSTFS_SECRET_KEY=media-secret \
+  -p 9000:9000 rustfs/rustfs:latest
+
+# create the bucket and expire its objects after a day
+AWS_ACCESS_KEY_ID=media AWS_SECRET_ACCESS_KEY=media-secret AWS_DEFAULT_REGION=us-east-1 \
+  aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://media
+AWS_ACCESS_KEY_ID=media AWS_SECRET_ACCESS_KEY=media-secret AWS_DEFAULT_REGION=us-east-1 \
+  aws --endpoint-url http://127.0.0.1:9000 s3api put-bucket-lifecycle-configuration \
+  --bucket media --lifecycle-configuration \
+  '{"Rules":[{"ID":"expire-staged-media","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":1}}]}'
+```
+
+Then point the server at it — the server needs to resolve the endpoint's hostname, so put both on the same Docker network (`--network tt-media`) or use a reachable address:
+
+```bash
+-e MEDIA_STORAGE_ENDPOINT=http://rustfs:9000 \
+-e MEDIA_STORAGE_BUCKET=media \
+-e MEDIA_STORAGE_ACCESS_KEY=media \
+-e MEDIA_STORAGE_SECRET_KEY=media-secret
+```
 
 ## Benchmarking and accuracy
 
