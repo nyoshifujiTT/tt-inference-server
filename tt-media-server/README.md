@@ -587,9 +587,12 @@ Retention is a **bucket lifecycle policy on the store**, not a sweeper in this s
 
 Any S3-compatible service works. For a self-hosted one, [RustFS](https://github.com/rustfs/rustfs) is the straightforward pick: Apache-2.0 (MinIO's community edition is AGPL and archived, Garage is AGPL), a single container configured by two variables, and S3-native lifecycle. Staged media is temporary, so backing it with `tmpfs` keeps it off disk and clears it with the container:
 
+The image runs as uid/gid 10001, and a `tmpfs` mount defaults to root-owned `0755`, so the ownership has to be given on the mount or the server exits with `Permission denied (os error 13)`:
+
 ```bash
 docker run -d --name rustfs \
-  --tmpfs /data:rw,size=8g \
+  --tmpfs /data:rw,size=8g,uid=10001,gid=10001 \
+  --tmpfs /logs:rw,size=64m,uid=10001,gid=10001 \
   -e RUSTFS_ACCESS_KEY=media -e RUSTFS_SECRET_KEY=media-secret \
   -p 9000:9000 rustfs/rustfs:latest
 
