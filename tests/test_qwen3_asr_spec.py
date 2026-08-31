@@ -130,6 +130,23 @@ def test_the_readme_states_when_the_pin_may_lag_the_head():
     assert "grep -v '/tests/'" in readme
 
 
+BRING_UP_BRANCH = "nyoshifujiTT/qwen3-asr-17b_p150x1"
+
+
+def _readme():
+    return open(
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "README.md")
+    ).read()
+
+
+def test_the_readme_names_the_branch_the_forks_must_carry():
+    """The clone URLs are useless without knowing which branch holds the pins."""
+    readme = _readme()
+    assert BRING_UP_BRANCH in readme, "the bring-up branch name must be documented"
+    for repo in ("nyoshifujiTT/tt-metal", "nyoshifujiTT/vllm"):
+        assert repo in readme, f"{repo} must be listed with its branch"
+
+
 def test_the_readme_documents_the_unpushed_branch_path():
     """The recipe must not imply the forks already carry the pinned commits.
 

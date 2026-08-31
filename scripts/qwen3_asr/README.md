@@ -44,7 +44,18 @@ If that prints anything, bump the pin and rebuild.
 ### 2. Dev image (from the bring-up forks)
 
 The spec pins the bring-up branch heads, which live on the forks until they land
-upstream, so both clone URLs have to be overridden:
+upstream, so both clone URLs have to be overridden. Every repository in this
+bring-up uses the same branch name:
+
+| repository | branch | pinned commit |
+|---|---|---|
+| `nyoshifujiTT/tt-metal` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `tt_metal_commit` in the spec |
+| `nyoshifujiTT/vllm` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `vllm_commit` in the spec |
+
+The clone checks out the pinned commit, not the branch, so the branch only has
+to *contain* it. The pins live in `workflows/model_spec.py`; this old spec
+format keeps every model's commits there directly, so the Qwen3-ASR entry is
+ordinary committed source and needs no build-time patching.
 
 ```
 cd $TT_INFERENCE_SERVER
