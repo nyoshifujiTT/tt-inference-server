@@ -88,14 +88,39 @@ def test_diarize_requires_url():
     assert fake.last is None
 
 
-def test_diarize_requires_json():
+# The official API documents 400, 401 and 429 -- never 415. A hand-rolled
+# Content-Type check here used to answer 415, which reads as "that format is not
+# supported yet" and sent people hunting for a multipart upload that the
+# official API does not offer either. Letting FastAPI validate the body gives
+# its own 422 for anything that is not a JSON object.
+_OFFICIAL_ERROR_STATUSES = {400, 401, 429, 422}
+
+
+def test_a_non_json_body_is_rejected_without_inventing_a_status():
     fake = _FakeService()
     resp = _make_client(fake).post(
         "/v1/audio/diarize",
         content=b"not json",
         headers={"content-type": "text/plain"},
     )
-    assert resp.status_code == 415, resp.text
+    assert resp.status_code == 422, resp.text
+    assert fake.last is None
+
+
+def test_a_multipart_upload_is_rejected_without_inventing_a_status():
+    """There is no multipart path to invent a bespoke 415 for.
+
+    The official API takes audio by url only: either http(s) or a media:// key
+    staged through POST /v1/media/input. A 415 here implied a format this
+    server had merely not implemented yet.
+    """
+    fake = _FakeService()
+    resp = _make_client(fake).post(
+        "/v1/audio/diarize",
+        files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.status_code in _OFFICIAL_ERROR_STATUSES
     assert fake.last is None
 
 

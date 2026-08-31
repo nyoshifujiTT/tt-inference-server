@@ -139,3 +139,77 @@ def test_response_fields_cover_official_schema(official_schemas):
     assert not missing, (
         f"official DiarizationJobOutput fields not classified: {missing}"
     )
+
+
+@pytest.fixture(scope="module")
+def official_diarize_statuses() -> set:
+    """Status codes the official POST /v1/diarize documents."""
+    spec = _fetch_official_spec()
+    for path, operations in spec.get("paths", {}).items():
+        if not path.endswith("/diarize"):
+            continue
+        post = operations.get("post")
+        if isinstance(post, dict) and post.get("responses"):
+            return {str(code) for code in post["responses"]}
+    raise AssertionError("pyannoteAI spec has no POST .../diarize responses")
+
+
+def test_we_do_not_answer_a_status_the_official_api_never_uses():
+    """A bespoke status is a compatibility break even when the body is right.
+
+    This endpoint used to hand-check the Content-Type and answer 415, which the
+    official API never returns. To a client it read as "this format is not
+    supported yet", so someone went looking for a multipart upload that the
+    official API does not offer either. FastAPI's own 422 for a malformed body
+    is the honest answer, and this test pins that the invented status is gone.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from resolver.service_resolver import service_resolver
+
+    from open_ai_api import diarization
+
+    class _NeverCalled:
+        async def process_request(self, request):
+            raise AssertionError("a rejected body must not reach the service")
+
+    app = FastAPI()
+    app.include_router(diarization.router, prefix="/v1/audio")
+    app.dependency_overrides[service_resolver] = lambda: _NeverCalled()
+    app.dependency_overrides[diarization.get_api_key] = lambda: "test"
+    client = TestClient(app)
+
+    rejected = [
+        client.post(
+            "/v1/audio/diarize",
+            files={"file": ("a.wav", b"RIFFxxxxWAVE", "audio/wav")},
+        ),
+        client.post(
+            "/v1/audio/diarize",
+            content=b"not json",
+            headers={"content-type": "text/plain"},
+        ),
+    ]
+
+    for response in rejected:
+        assert response.status_code != 415, (
+            "415 is not in the official spec; a malformed body must not be "
+            f"reported with it (got {response.status_code})"
+        )
+        assert response.status_code == 422, response.text
+
+
+def test_the_statuses_we_do_use_are_the_official_ones(official_diarize_statuses):
+    """Every status this endpoint answers deliberately is one the spec has.
+
+    422 is FastAPI's validation status rather than a pyannoteAI one, so it is
+    allowed alongside the official set: the point of the check is that nothing
+    outside those two groups creeps in.
+    """
+    deliberate = {"200", "400", "422"}
+    framework_supplied = {"422"}
+    unknown = deliberate - framework_supplied - official_diarize_statuses
+    assert not unknown, (
+        f"statuses we answer that the official spec does not document: {sorted(unknown)}; "
+        f"official set is {sorted(official_diarize_statuses)}"
+    )

@@ -16,11 +16,11 @@ from typing import Optional
 from domain.diarization_request import DiarizationRequest
 from fastapi import (
     APIRouter,
+    Body,
     Depends,
     File,
     Form,
     HTTPException,
-    Request,
     Security,
     UploadFile,
 )
@@ -109,14 +109,16 @@ def _reject_precision2_only_options(**options) -> None:
         )
 
 
-async def _read_json_body(request: Request) -> dict:
-    """Require application/json and return the parsed object body."""
-    if "application/json" not in request.headers.get("content-type", "").lower():
-        raise HTTPException(
-            status_code=415,
-            detail="diarize requires application/json with a 'url' field",
-        )
-    body = await request.json()
+async def _read_json_body(body: dict = Body(...)) -> dict:
+    """The pyannoteAI DiarizeRequest body.
+
+    Declared as a body parameter rather than sniffed off the raw request: a
+    request that is not a JSON object then gets FastAPI's own 422, which is
+    what the official API documents (400/401/429 -- never 415). Hand-checking
+    the Content-Type here used to answer 415 instead, an invented status that
+    read like "this format is not supported yet" and sent people looking for a
+    multipart upload the official API does not have either.
+    """
     if not isinstance(body, dict):
         raise HTTPException(
             status_code=400, detail="request body must be a JSON object"
@@ -161,9 +163,10 @@ async def _build_request_from_body(body: dict) -> DiarizationRequest:
     )
 
 
-async def parse_diarization_request(request: Request) -> DiarizationRequest:
+async def parse_diarization_request(
+    body: dict = Depends(_read_json_body),
+) -> DiarizationRequest:
     """Parse a pyannoteAI-style diarization JSON body into a DiarizationRequest."""
-    body = await _read_json_body(request)
     return await _build_request_from_body(body)
 
 
@@ -268,7 +271,7 @@ async_router = APIRouter()
 
 @async_router.post("/diarize", status_code=201)
 async def create_diarization_job(
-    request: Request,
+    body: dict = Depends(_read_json_body),
     service=Depends(service_resolver),
     api_key: str = Security(get_api_key),
 ):
@@ -277,7 +280,6 @@ async def create_diarization_job(
 
     from utils.diarization_jobs import get_job_store
 
-    body = await _read_json_body(request)
     diar_request = await _build_request_from_body(body)
 
     webhook = body.get("webhook")
