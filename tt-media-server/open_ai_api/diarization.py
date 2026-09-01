@@ -7,9 +7,15 @@
 Schema aligned with the pyannoteAI cloud diarization API so a client can switch
 base URL only. Unlike /v1/audio/transcriptions this returns speaker turns only
 (no transcript). The /diarize input is a pyannoteAI-style JSON body with a
-``url`` (http(s)://, media://, or inline base64); see
-https://docs.pyannote.ai/openapi.json
+``url`` (http(s):// or media://); see https://docs.pyannote.ai/openapi.json
 (DiarizeRequest).
+
+NON-STANDARD EXTENSION: ``url`` additionally accepts inline base64 audio, which
+the official API does NOT support -- it documents the field as "URL of the audio
+file to be processed" and accepts only a fetchable location. Code written
+against this extension will not work against pyannoteAI's cloud service. It
+exists so a deployment with no object storage the server can reach still has a
+way to send audio; see ``_fetch_audio``.
 """
 
 import re
@@ -151,11 +157,19 @@ async def _fetch_audio(url: str) -> bytes:
     there. A second fetch helper next to it would be a second hole to keep
     closed, which is exactly how the reference servers reintroduced SSRF.
 
-    Inline base64 is the fallback for a deployment with no object storage
-    reachable from the server: ``DiarizeRequest.url`` is ``{"type": "string"}``
-    with no pattern in the official schema, so carrying the audio in it is not
-    a schema violation, and it is the same "URL or base64 in one field" shape
-    ``domain/video_i2v_generate_request.py`` already uses for images. It costs
+    Inline base64 is a NON-STANDARD EXTENSION -- the official API does not
+    accept it. The official schema describes ``url`` as "URL of the audio file
+    to be processed" and types it as a bare ``{"type": "string"}``; the absence
+    of a pattern is what makes the extension *possible* without emitting a
+    request the spec would reject, but it does not make base64 *supported*
+    upstream. A client relying on it is no longer "switch base URL only": point
+    it at pyannoteAI's cloud service and the request fails.
+
+    It exists because the official request carries audio in exactly one field
+    and that field is a location, so a deployment with no object storage the
+    server can reach otherwise has no way to send audio at all. It follows the
+    same "URL or base64 in one field" shape
+    ``domain/video_i2v_generate_request.py`` already uses for images, and costs
     a third in wire size, so it is the fallback and not the recommendation.
 
     Statuses follow video.py so one taxonomy covers every URL-valued field:
@@ -203,8 +217,9 @@ async def _fetch_audio(url: str) -> bytes:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"unsupported audio url scheme: {url!r}; use http(s)://, "
-                "media://, or inline base64"
+                f"unsupported audio url scheme: {url!r}; use http(s):// or "
+                "media://, or this server's non-standard extension of inline "
+                "base64 audio in the same field"
             ),
         )
 
@@ -217,8 +232,9 @@ async def _fetch_audio(url: str) -> bytes:
         raise HTTPException(
             status_code=413,
             detail=(
-                f"inline base64 audio is over the {max_bytes}-byte cap for this "
-                "server; upload it and pass a url instead"
+                f"inline base64 audio (a non-standard extension) is over the "
+                f"{max_bytes}-byte cap for this server; upload it and pass a "
+                "url instead"
             ),
         )
     try:
@@ -228,7 +244,8 @@ async def _fetch_audio(url: str) -> bytes:
             status_code=400,
             detail=(
                 "'url' is neither an http(s):// url, a media:// key, nor valid "
-                "base64 audio"
+                "base64 audio (inline base64 is a non-standard extension of "
+                "this server; the official API takes a url only)"
             ),
         )
     if not audio_bytes:
@@ -248,7 +265,8 @@ async def _build_request_from_body(body: dict) -> DiarizationRequest:
     """Validate a pyannoteAI DiarizeRequest body and resolve it to a request.
 
     Validates ``model`` and rejects precision-2-only options, requires ``url``
-    (http(s)://, media://, or inline base64), fetches the audio bytes, and
+    (http(s):// or media://, or inline base64 as a non-standard extension of
+    this server -- the official API takes a url only), fetches the audio, and
     builds the internal
     DiarizationRequest. See https://docs.pyannote.ai/openapi.json.
     """
@@ -264,7 +282,10 @@ async def _build_request_from_body(body: dict) -> DiarizationRequest:
     if not url:
         raise HTTPException(
             status_code=400,
-            detail="'url' is required (http(s)://, media://, or inline base64)",
+            detail=(
+                "'url' is required: an http(s):// url or a media:// key, or "
+                "inline base64 audio (a non-standard extension of this server)"
+            ),
         )
     audio_bytes = await _fetch_audio(url)
 

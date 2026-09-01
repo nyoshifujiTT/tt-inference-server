@@ -499,13 +499,15 @@ Diarization is a job: `POST /v1/diarize` creates one and `GET /v1/jobs/{jobId}` 
 **Endpoint:** `POST /v1/diarize`
 **Content-Type:** `application/json`
 
-The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a public `http(s)://` URL, a `media://<object-key>` staged via the media API (see below), or — as an extension for deployments with no reachable object storage — the audio itself as inline base64. The official schema types `url` as a bare string with no pattern, so base64 in that field is not a schema violation, and it is the same "URL or base64 in one field" shape the video endpoint uses for images; it costs a third in wire size, so prefer a URL when you have one. There is no multipart file field, matching pyannoteAI. Whichever form is used, the payload is capped at `media_url_max_bytes` (64 MiB for this model, about 35 minutes of 16 kHz mono audio); over that the server answers 413.
+The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a public `http(s)://` URL, or a `media://<object-key>` staged via the media API (see below). There is no multipart file field, matching pyannoteAI. Whichever form is used, the payload is capped at `media_url_max_bytes` (64 MiB for this model, about 35 minutes of 16 kHz mono audio); over that the server answers 413.
+
+> **Non-standard extension:** this server *also* accepts the audio itself as inline base64 in the same `url` field. **The pyannoteAI cloud API does not** — it documents `url` as "URL of the audio file to be processed" and takes a fetchable location only, so a client written against this extension will fail the moment it is pointed at the official service. It exists because the official request carries audio in exactly one field and that field is a location, which leaves a deployment with no object storage the server can reach no way to send audio at all. It is expressible without emitting a request the spec would reject only because the official schema types `url` as a bare string with no pattern, and it follows the same "URL or base64 in one field" shape the video endpoint uses for images. Base64 costs a third in wire size, so use a URL whenever you have one, and stay on `http(s)://` / `media://` if portability to pyannoteAI matters.
 
 ## Request parameters
 
 | Parameter      | Required | Description |
 |----------------|----------|-------------|
-| `url`          | Yes      | Audio location: `http(s)://…`, `media://<object-key>`, or the audio itself as inline base64. |
+| `url`          | Yes      | Audio location: `http(s)://…` or `media://<object-key>`. Inline base64 audio is also accepted as a non-standard extension (not supported by pyannoteAI). |
 | `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
 | `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
 | `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |
@@ -549,7 +551,8 @@ The following pyannoteAI options are **precision-2-only** and cannot be produced
 - `webhook` / `webhookStatusOnly` — when `webhook` is set, the job payload is POSTed to that URL on completion (`webhookStatusOnly=true` sends only `{jobId, status}`).
 
 ```bash
-# 1. stage a private file (optional; or pass a public https url, or inline base64)
+# 1. stage a private file (optional; or pass a public https url, or inline
+#    base64 via this server's non-standard extension)
 UP=$(curl -s -X POST http://127.0.0.1:8000/v1/media/input \
   -H 'Authorization: Bearer your-secret-key' -H 'Content-Type: application/json' \
   -d '{"url":"media://sess/audio.wav"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')
@@ -571,7 +574,7 @@ curl -s http://127.0.0.1:8000/v1/jobs/$JOB -H 'Authorization: Bearer your-secret
 
 `POST /v1/media/input` with `{"url":"media://<object-key>"}` returns a **pre-signed `PUT` url on an S3-compatible object store**; `PUT` the file bytes straight there, then pass `media://<object-key>` as the diarize `url`. This is the pyannoteAI temporary media storage flow (https://docs.pyannote.ai/api-reference/upload-media), including the part that matters operationally: the upload goes to storage, not through this server, so a long recording never occupies the process that is scheduling device work. The signature is SigV4, so plain `curl -T` is enough — no SDK, no credentials on the client.
 
-This is optional. With no store configured the endpoint answers `501` and names the two inputs that need none: an `http(s)://` url, or the audio inline as base64. Configure it with:
+This is optional. With no store configured the endpoint answers `501` and names the two inputs that need none: an `http(s)://` url, or the audio inline as base64 (the non-standard extension above). Configure it with:
 
 | Variable | Description |
 |---|---|

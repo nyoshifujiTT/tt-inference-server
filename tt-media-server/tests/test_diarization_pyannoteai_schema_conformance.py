@@ -121,6 +121,46 @@ def test_request_fields_cover_official_schema(official_schemas):
     assert not missing, f"official DiarizeRequest fields not classified: {missing}"
 
 
+def test_inline_base64_is_a_documented_extension_not_official_behaviour(
+    official_schemas,
+):
+    """Accepting base64 in ``url`` is ours, not pyannoteAI's.
+
+    The official field is a location -- "URL of the audio file to be processed"
+    -- and nothing in the spec offers an inline form. This test reads that
+    description off the live spec rather than trusting a comment, so if
+    pyannoteAI ever does adopt an inline form the assertion fails and the
+    "non-standard" wording gets revisited instead of quietly going stale.
+
+    The extension is deliberate (see open_ai_api/diarization.py) and this test
+    is what keeps it labelled: a reader must not conclude from the rest of this
+    file that every input this server accepts is portable to the cloud service.
+    """
+    url_schema = official_schemas["DiarizeRequest"]["properties"]["url"]
+
+    # A bare string with no pattern is what makes the extension expressible
+    # without emitting a request the spec would reject. It is not permission.
+    assert url_schema["type"] == "string"
+    assert "pattern" not in url_schema
+
+    description = url_schema.get("description", "").lower()
+    assert "url" in description, (
+        "the official url field no longer describes itself as a URL; recheck "
+        f"whether inline audio is now supported upstream: {description!r}"
+    )
+    for inline_word in ("base64", "inline", "data:"):
+        assert inline_word not in description, (
+            f"the official spec now mentions {inline_word!r} in DiarizeRequest."
+            "url; inline audio may no longer be a non-standard extension"
+        )
+
+    # The docstring has to keep saying so, since that is where a reader looks.
+    from open_ai_api import diarization
+
+    assert "NON-STANDARD EXTENSION" in diarization.__doc__
+    assert "NON-STANDARD EXTENSION" in diarization._fetch_audio.__doc__
+
+
 def test_response_fields_cover_official_schema(official_schemas):
     """Every official DiarizationJobOutput field is either emitted or explicitly
     documented as not-emitted (precision-2-only)."""

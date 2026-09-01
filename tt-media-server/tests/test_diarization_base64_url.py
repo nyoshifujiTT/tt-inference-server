@@ -83,6 +83,26 @@ def test_a_string_that_is_neither_a_url_nor_base64_is_rejected(client, fake):
     assert fake.last is None
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},  # url missing entirely
+        {"url": "not base64!!"},  # unparseable
+        {"url": "ftp://h/a.wav"},  # a scheme we do not serve
+    ],
+)
+def test_the_errors_that_offer_base64_say_it_is_non_standard(client, body):
+    """Whoever reads these is being told base64 is an option, and must be told
+    in the same breath that pyannoteAI's own service will not take it.
+
+    Otherwise the error is an invitation to write a client that works here and
+    fails the moment it is pointed at the cloud API -- the exact portability
+    this endpoint exists to preserve."""
+    detail = client.post("/v1/diarize", json=body).json()["detail"]
+    assert "base64" in detail
+    assert "non-standard" in detail
+
+
 def test_an_unserved_scheme_is_named_rather_than_read_as_base64(client, fake):
     """``ftp://...`` is a url the server does not serve. Reporting it as
     malformed base64 would send the caller looking in the wrong place."""

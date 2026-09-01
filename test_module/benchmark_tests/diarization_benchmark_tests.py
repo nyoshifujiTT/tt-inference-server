@@ -14,7 +14,8 @@ wall-clock second -- because the request carries a recording of a known length.
 That is measured here over the pyannoteAI-shaped API the service exposes: stage
 the recording in the request and poll the job -- ``POST /v1/diarize`` then
 ``GET /v1/jobs/{jobId}``. The job API is the only shape the official API has,
-so it is the one worth measuring. The audio goes inline rather than through the
+so it is the one worth measuring. The audio goes inline (a non-standard
+extension of our server; pyannoteAI takes a url only) rather than through the
 ``media://`` staging flow, which would need an object store standing next to
 the server; a benchmark that cannot run without one measures the deployment
 rather than the model.
@@ -127,9 +128,13 @@ async def diarize_once(
         audio_bytes = handle.read()
     # Inline base64 rather than the media:// staging flow. Staging needs an
     # object store standing next to the server, and a benchmark that cannot run
-    # without one measures the deployment rather than the model. The server
-    # accepts either in the same field, and the bytes reach the pipeline
-    # identically; what is timed is the diarization, not the transport.
+    # without one measures the deployment rather than the model. The bytes
+    # reach the pipeline identically either way; what is timed is the
+    # diarization, not the transport.
+    #
+    # Note this is a non-standard extension of tt-media-server: the pyannoteAI
+    # cloud API takes a url only. Fine here because this benchmark targets our
+    # own server, but it is not a pattern to copy into client code.
     audio_url = base64.b64encode(audio_bytes).decode("ascii")
 
     start_time = time.monotonic()
