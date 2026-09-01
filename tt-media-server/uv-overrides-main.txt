@@ -1,0 +1,14 @@
+# Overrides for the MAIN venv resolve (requirements.txt).
+#
+# Only one thing needs overriding here. pyannote.audio 4.x declares
+# `torch>=2.8.0` / `torchaudio>=2.8.0`, but this venv is pinned to 2.7.1 by
+# tt-metal and tt-vllm-plugin, and pyannote runs fine on it -- the community-1
+# pipeline builds and the ttnn ports match torch on a p150 (WeSpeaker cos
+# 0.99954, PyanNet cos 0.99997). Without this, resolving pyannote pulls torch
+# up to 2.13 and takes torchaudio, triton and the vLLM install with it.
+#
+# Note the versions carry no local segment, unlike uv-overrides.txt, which
+# pins `2.7.1+cpu` for the audio venv. The main venv holds `2.7.1+cu126`, so a
+# `+cpu` override makes the resolve unsatisfiable.
+torch==2.7.1
+torchaudio==2.7.1

@@ -113,12 +113,30 @@ def _normalize_hostname(hostname: str) -> str:
         raise MediaDownloadPolicyError(f"Invalid hostname {hostname!r}") from exc
 
 
+def _storage_hostname() -> Optional[str]:
+    """Hostname of this deployment's object storage, if one is configured.
+
+    Imported inside the call to keep the two modules from importing each
+    other at module scope.
+    """
+    from utils.media_object_storage import storage_hostname
+
+    return storage_hostname()
+
+
 def _allowed_domains() -> "tuple[frozenset, frozenset]":
     """Parse the allowlist into (exact hostnames, wildcard suffixes).
 
     A ``*.suffix`` entry contributes its normalized suffix; anything else is
     an exact hostname. A bare ``*`` is refused — "allow everything" must not
     be expressible through the allowlist.
+
+    The configured object-storage host is always included. A ``media://`` key
+    resolves to a URL this server signed against its own storage endpoint, so
+    it is not a client-chosen destination and the allowlist has nothing to
+    guard there — while leaving it out would make the staging flow fail
+    closed on every deployment, and the natural fix for that is an operator
+    widening the allowlist by hand, which is the larger hole.
     """
     raw = settings.media_url_allowed_domains or ""
     exact = set()
@@ -134,6 +152,9 @@ def _allowed_domains() -> "tuple[frozenset, frozenset]":
                 suffixes.add(_normalize_hostname(domain[2:]))
             else:
                 exact.add(_normalize_hostname(domain))
+        storage_host = _storage_hostname()
+        if storage_host:
+            exact.add(_normalize_hostname(storage_host))
     except MediaDownloadPolicyError as exc:
         # A bad allowlist entry is operator error, not client error: raise the
         # base class so the endpoint surfaces 500 instead of blaming the caller.

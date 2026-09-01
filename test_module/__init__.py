@@ -27,6 +27,7 @@ _LAZY_FROM_BENCHMARK_TESTS = {
     "run_embedding_benchmark",
     "run_image_benchmark",
     "run_tts_benchmark",
+    "run_diarization_benchmark",
     "run_video_benchmark",
 }
 
@@ -37,6 +38,7 @@ _LAZY_FROM_EVAL_TESTS = {
     "run_embedding_eval",
     "run_image_eval",
     "run_tts_eval",
+    "run_diarization_eval",
     "run_video_eval",
 }
 

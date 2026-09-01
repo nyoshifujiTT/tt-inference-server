@@ -191,3 +191,41 @@ class VideoGenerationTestStatus(BaseTestStatus):
             "video_path": self.video_path,
             "prompt": self.prompt,
         }
+
+
+class DiarizationTestStatus(BaseTestStatus):
+    """Test status for speaker-diarization models.
+
+    ``rtr`` is the real-time ratio (audio duration / processing time), which is
+    the meaningful throughput figure here: a diarization request carries a
+    recording of a known length rather than a token count.
+    """
+
+    def __init__(
+        self,
+        status: bool,
+        elapsed: float,
+        ttft_ms: Optional[float] = None,
+        rtr: Optional[float] = None,
+        num_speakers: Optional[int] = None,
+        num_turns: Optional[int] = None,
+        turns: Optional[list] = None,
+    ):
+        super().__init__(status, elapsed)
+        self.ttft_ms = ttft_ms
+        self.rtr = rtr
+        self.num_speakers = num_speakers
+        self.num_turns = num_turns
+        # Left out of to_dict(): the eval scores these into a DER, while the
+        # per-call report should stay a summary rather than raw segments.
+        self.turns = turns or []
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "elapsed": self.elapsed,
+            "ttft_ms": self.ttft_ms,
+            "rtr": self.rtr,
+            "num_speakers": self.num_speakers,
+            "num_turns": self.num_turns,
+        }

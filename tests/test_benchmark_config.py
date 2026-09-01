@@ -281,6 +281,51 @@ def test_select_smoke_test_benchmark_config_skips_non_text_sweeps(monkeypatch):
     assert smoke_config.tasks == []
 
 
+def test_diarization_sweeps_are_not_llm_text_sweeps():
+    """A diarization model must not be benchmarked with prompt-length sweeps.
+
+    Every non-LLM MEDIA model type gets its own sweep shape (asr / tts /
+    embedding); without a DIARIZATION branch the model falls through to the LLM
+    ``else`` and is swept over BENCHMARK_ISL_OSL_PAIRS, which is meaningless for
+    a model that consumes audio and emits speaker turns.
+
+    The diarization entry lives in the dev catalog, which is selected at import
+    time, so this runs in a subprocess with MODEL_SPECS_ENV=dev.
+    """
+    import json
+    import os
+    import subprocess
+
+    script = (
+        "import json;"
+        "from workflows.model_spec import MODEL_SPECS;"
+        "from workflows.workflow_types import ModelType;"
+        "from reference_config.benchmarking.benchmark_config import build_benchmark_config;"
+        "specs=[s for s in MODEL_SPECS.values()"
+        " if s.model_type==ModelType.DIARIZATION.value];"
+        "cfgs=[build_benchmark_config(s) for s in specs];"
+        "print(json.dumps([[p.task_type for t in c.tasks"
+        " for v in t.param_map.values() for p in v] for c in cfgs]))"
+    )
+    env = dict(os.environ, MODEL_SPECS_ENV="dev", PYTHONPATH=".")
+    env.pop("ONLY_BENCHMARK_TARGETS", None)
+    out = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    per_model = json.loads(out.stdout.strip().splitlines()[-1])
+
+    assert per_model, "the dev catalog should carry at least one diarization spec"
+    for task_types in per_model:
+        assert "text" not in task_types, (
+            "diarization was swept as an LLM text model: " f"{task_types}"
+        )
+        assert "diarization" in task_types
+
+
 def test_get_num_prompts_min_floor(monkeypatch):
     benchmark_config = _import_benchmark_config(monkeypatch)
 

@@ -12,6 +12,8 @@ from fastapi import APIRouter
 from open_ai_api import (
     audio,
     chat,
+    diarization,
+    media,
     cnn,
     embedding,
     fine_tuning,
@@ -59,6 +61,12 @@ SERVICE_ROUTER_MAP: dict[str, list[ServiceRoute]] = {
         ServiceRoute(
             text_to_speech.router, "/v1/audio", "/audio", ["Text to speech processing"]
         ),
+    ],
+    ModelServices.DIARIZATION.value: [
+        # Only the official pyannoteAI paths: POST /v1/diarize,
+        # GET /v1/jobs/{jobId}, POST /v1/media/input.
+        ServiceRoute(diarization.async_router, "/v1", None, ["Speaker diarization"]),
+        ServiceRoute(media.router, "/v1/media", None, ["Media input"]),
     ],
     ModelServices.VIDEO.value: [
         ServiceRoute(video.router, "/v1/videos", "/video", ["Video processing"]),

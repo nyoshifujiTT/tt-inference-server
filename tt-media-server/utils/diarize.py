@@ -141,6 +141,39 @@ class TorchLoadPatcher:
         return self._original_load(*args, **kwargs)
 
 
+class PyannoteAuthTokenPatcher:
+    """Accept `use_auth_token=` on `Pipeline.from_pretrained` under pyannote 4.x.
+
+    `whisperx==3.4.3` passes `use_auth_token=`, the name pyannote-audio 3.x
+    used. 4.x renamed it to `token` and rejects the old name with TypeError, so
+    the diarization pipeline cannot be built at all. The audio venv now resolves
+    to pyannote 4.x because the speaker-diarization service requires it (only
+    4.x can load community-1), so translate the old kwarg rather than pinning
+    whisperx's transitive dependency back.
+
+    A no-op when the installed pyannote still accepts `use_auth_token`, so this
+    stays correct if the pin ever moves back to 3.x.
+    """
+
+    def __init__(self, pipeline_class):
+        self._pipeline_class = pipeline_class
+
+    def install(self) -> None:
+        import inspect
+
+        original = self._pipeline_class.from_pretrained
+        parameters = inspect.signature(original).parameters
+        if "use_auth_token" in parameters or "token" not in parameters:
+            return
+
+        def _from_pretrained_with_legacy_token(*args, **kwargs):
+            if "use_auth_token" in kwargs:
+                kwargs.setdefault("token", kwargs.pop("use_auth_token"))
+            return original(*args, **kwargs)
+
+        self._pipeline_class.from_pretrained = _from_pretrained_with_legacy_token
+
+
 class AudioProcessor(ABC):
     """Base class for an audio analysis pipeline run by this script."""
 
@@ -185,6 +218,12 @@ class DiarizationProcessor(AudioProcessor):
         # whisperx is only installed in the audio_venv; the linter running in
         # the main venv will flag this import as unresolved which is expected.
         from whisperx.diarize import DiarizationPipeline  # type: ignore[import-not-found]
+
+        # Must run before whisperx builds the pipeline: it passes the 3.x kwarg
+        # name, which 4.x rejects outright.
+        from pyannote.audio import Pipeline  # type: ignore[import-not-found]
+
+        PyannoteAuthTokenPatcher(Pipeline).install()
 
         self._pipeline = DiarizationPipeline(
             model_name=self._model_name,

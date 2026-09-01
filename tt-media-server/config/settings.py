@@ -154,6 +154,42 @@ class Settings(BaseSettings):
     media_url_timeout_seconds: float = 30.0
     media_url_max_redirects: int = 5
 
+    # Cap on audio sent inline in the request body rather than fetched from a
+    # url. Same 1 GiB the official pyannoteAI API allows for a diarization job,
+    # so neither input form is refused at a size the official service would
+    # have accepted.
+    #
+    # This is only safe because BodySizeLimitMiddleware refuses an oversized
+    # body on its declared Content-Length, before the ASGI layer receives it.
+    # Without that, an inline cap is spent memory by the time it is applied:
+    # measured on a p150, a 1 GiB body the endpoint *rejected* still cost +1289
+    # MiB RSS, and a 900 MiB one OOM-killed a 6 GiB container. With the
+    # middleware, a 900 MiB announced body against a 64 MiB limit costs +1 MiB
+    # instead of +894 MiB.
+    #
+    # An accepted 1 GiB body is still ~1.33 GiB of base64 resident while it is
+    # decoded, so a deployment with a tight memory allotment should lower this;
+    # it is the one input that cannot be streamed. Set to 0 to follow
+    # media_url_max_bytes.
+    media_inline_max_bytes: int = 1024 * 1024 * 1024
+
+    # Object storage for the pyannoteAI two-step upload (media:// keys).
+    # This server is only an S3 *client* here: it signs a PUT url and reads the
+    # object back, and the bytes never pass through it (see
+    # utils/media_object_storage.py). Leave the endpoint empty and
+    # POST /v1/media/input answers 501, pointing at the two inputs that need no
+    # storage: an http(s) url, or inline base64.
+    media_storage_endpoint: str = ""
+    media_storage_bucket: str = ""
+    media_storage_access_key: str = ""
+    media_storage_secret_key: str = ""
+    # Self-hosted S3 services ignore the region but SigV4 requires one in the
+    # string it signs, so it has to be some fixed value on both sides.
+    media_storage_region: str = "us-east-1"
+    # Long enough to upload a recording over a slow link, short enough that a
+    # leaked url is not a standing grant.
+    media_storage_presign_expiry_seconds: int = 3600
+
     # Telemetry settings
     enable_telemetry: bool = True
     prometheus_endpoint: str = "/metrics"

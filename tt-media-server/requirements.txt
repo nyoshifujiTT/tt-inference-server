@@ -27,3 +27,7 @@ tqdm
 uvicorn
 requests
 num2words
+
+# Speaker diarization dependencies live in diarization-requirements.txt; they go
+# into this same venv, but keeping them in their own file shows what that one
+# model adds.

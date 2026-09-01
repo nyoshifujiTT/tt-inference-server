@@ -18,6 +18,7 @@ from utils.diarize import (
     DiarizeService,
     OperationMode,
     ProcessorFactory,
+    PyannoteAuthTokenPatcher,
     TorchLoadPatcher,
     VADProcessor,
 )
@@ -127,6 +128,67 @@ def test_torch_load_patcher_respects_explicit_true():
     TorchLoadPatcher(fake_torch).install()
     fake_torch.load("/tmp/model.pt", weights_only=True)
     assert call_log[0][1] == {"weights_only": True}
+
+
+# ---------------------------------------------------------------------------
+# PyannoteAuthTokenPatcher
+# ---------------------------------------------------------------------------
+
+
+def _fake_pipeline_class(parameter_names, call_log):
+    """Stand-in for pyannote's Pipeline with a chosen from_pretrained signature.
+
+    The patcher decides what to do by inspecting that signature, so the fake
+    has to declare real parameters rather than **kwargs.
+    """
+    parameters = ", ".join(f"{name}=None" for name in parameter_names)
+    captured = ", ".join(f"'{name}': {name}" for name in parameter_names)
+    namespace = {"call_log": call_log}
+    exec(
+        f"def from_pretrained(checkpoint, {parameters}):\n"
+        f"    call_log.append((checkpoint, {{{captured}}}))\n"
+        f"    return 'pipeline'\n",
+        namespace,
+    )
+
+    class FakePipeline:
+        from_pretrained = staticmethod(namespace["from_pretrained"])
+
+    return FakePipeline
+
+
+def test_auth_token_patcher_translates_use_auth_token_to_token():
+    """whisperx passes the 3.x name; 4.x only accepts `token`."""
+    call_log = []
+    FakePipeline = _fake_pipeline_class(["token"], call_log)
+
+    PyannoteAuthTokenPatcher(FakePipeline).install()
+
+    assert FakePipeline.from_pretrained("model", use_auth_token="hf_x") == "pipeline"
+    assert call_log[0] == ("model", {"token": "hf_x"})
+
+
+def test_auth_token_patcher_leaves_an_explicit_token_alone():
+    call_log = []
+    FakePipeline = _fake_pipeline_class(["token"], call_log)
+
+    PyannoteAuthTokenPatcher(FakePipeline).install()
+
+    FakePipeline.from_pretrained("model", token="hf_real", use_auth_token="hf_old")
+    assert call_log[0] == ("model", {"token": "hf_real"})
+
+
+def test_auth_token_patcher_is_a_noop_on_pyannote_3x():
+    """Stays correct if the pin ever moves back to a pyannote that accepts it."""
+    call_log = []
+    FakePipeline = _fake_pipeline_class(["use_auth_token"], call_log)
+    original = FakePipeline.from_pretrained
+
+    PyannoteAuthTokenPatcher(FakePipeline).install()
+
+    assert FakePipeline.from_pretrained is original
+    FakePipeline.from_pretrained("model", use_auth_token="hf_x")
+    assert call_log[0] == ("model", {"use_auth_token": "hf_x"})
 
 
 def test_torch_load_patcher_respects_explicit_false():

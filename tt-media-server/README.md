@@ -43,6 +43,9 @@ All API endpoints use the `/v1` prefix to match the OpenAI API standard. Legacy 
 | `/v1/images/edits`                                          | `/image/edits`                                       | POST   | Image editing (SDXL edit)                  |
 | `/v1/audio/transcriptions`                                  | `/audio/transcriptions`                              | POST   | Speech-to-text                             |
 | `/v1/audio/translations`                                    | `/audio/translations`                                | POST   | Speech-to-English (translation)            |
+| `/v1/diarize`                                               | —                                                    | POST   | Speaker diarization job (who spoke when)   |
+| `/v1/jobs/{jobId}`                                          | —                                                    | GET    | Diarization job status and result          |
+| `/v1/media/input`                                           | —                                                    | POST   | Pre-signed upload url for `media://` audio |
 | `/v1/audio/speech`                                          | `/audio/speech`                                      | POST   | Text-to-speech                             |
 | `/v1/videos/generations`                                    | `/video/generations`                                 | POST   | Text-to-video generation                   |
 | `/v1/videos/generations/i2v`                                | `/video/generations/i2v`                             | POST   | Image-to-video generation (Wan2.2 I2V)     |
@@ -483,6 +486,195 @@ curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
 **Note:** Replace `your-secret-key` with the value of your `API_KEY` environment variable.
 
 *Please note that test_data.json is within docker container or within tests folder*
+
+
+# Speaker diarization test call
+
+Served when the model resolves to the diarization service — `MODEL=speaker-diarization-community-1`, which is all `run.py` passes. Speaker diarization answers "who spoke when": it returns speaker turns only (no transcript). The request/response schema follows the **pyannoteAI cloud diarization API** — the request matches [`DiarizeRequest`](https://docs.pyannote.ai/api-reference/diarize) and the response matches [`DiarizationJobOutput`](https://docs.pyannote.ai/api-reference/get-job) / `DiarizationSegment` (machine-readable spec: https://docs.pyannote.ai/openapi.json) — so a pyannoteAI client can switch base URL only. The `tests/test_diarization_pyannoteai_schema_conformance.py` test fetches the official OpenAPI spec live on every run and fails if these fields drift. The diarization neural nets run on the Tenstorrent device the catalog resolved (`settings.device_ids`), so no device id has to be passed. `DIARIZATION_TT_SEGMENTATION` additionally offloads the segmentation net, which is slower and mainly useful for device coverage; it is declared in the model spec's `env_vars` because the host environment does not reach the container, so exporting it in a shell has no effect. If the device cannot be opened the service fails to start rather than continuing on CPU: this model is served because it runs on the accelerator, and a silent fallback would keep answering while delivering none of that.
+
+Weights default to the `pyannote/speaker-diarization-community-1` repo id, which is gated: export `HF_TOKEN` after accepting the terms on the model page, or point `HF_MODEL` at the ungated mirror `pyannote-community/speaker-diarization-community-1`, which carries the same checkpoints.
+
+Diarization is a job: `POST /v1/diarize` creates one and `GET /v1/jobs/{jobId}` returns it. That is the only shape the official API has, so there is no synchronous convenience route here — one published at `/v1/audio/diarize` was a path no pyannoteAI client would ever call.
+
+**Endpoint:** `POST /v1/diarize`
+**Content-Type:** `application/json`
+
+The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a public `http(s)://` URL, or a `media://<object-key>` staged via the media API (see below). There is no multipart file field, matching pyannoteAI. Whichever form is used, the payload is capped at `media_url_max_bytes` (64 MiB for this model, about 35 minutes of 16 kHz mono audio); over that the server answers 413.
+
+> **Non-standard extension:** this server *also* accepts the audio itself as inline base64 in the same `url` field. **The pyannoteAI cloud API does not** — it documents `url` as "URL of the audio file to be processed" and takes a fetchable location only, so a client written against this extension will fail the moment it is pointed at the official service. It exists because the official request carries audio in exactly one field and that field is a location, which leaves a deployment with no object storage the server can reach no way to send audio at all. It is expressible without emitting a request the spec would reject only because the official schema types `url` as a bare string with no pattern, and it follows the same "URL or base64 in one field" shape the video endpoint uses for images.
+
+### Choosing between inline base64 and `media://`
+
+**Both forms are capped at 1 GiB**, matching [what the pyannoteAI cloud API accepts](https://docs.pyannote.ai/support/faqs) for a diarization job, so a client that works against the official service is not refused here for a reason the official service would not have refused it. `MEDIA_URL_MAX_BYTES` bounds fetched audio (`media://`, `http(s)://`); `MEDIA_INLINE_MAX_BYTES` bounds inline base64.
+
+An oversized request is refused on its declared `Content-Length` **before the body is received** (`BodySizeLimitMiddleware`). That matters more than it sounds: an endpoint cannot defend itself against a large body, because the ASGI layer has already buffered the whole request by the time a handler runs. Measured on a p150 — a 1 GiB inline body that the *endpoint* rejected still cost **+1289 MiB** RSS, and a 900 MiB one OOM-killed a 6 GiB container; with the middleware, a 900 MiB announced body against a 64 MiB limit costs **+1 MiB** instead of +894 MiB. Verified on the running server: a 2 GiB declared body is answered 413 with **no measurable memory increase**.
+
+A fetched object is additionally refused on the declared `Content-Length` when the store sends one, and otherwise mid-stream once the bytes read pass the cap. Neither limit can be dodged by switching form.
+
+*One caveat on inline.* An **accepted** body still has to be held: 1 GiB of audio is ~1.33 GiB of base64 resident while it decodes, and it is the one input that cannot be streamed. Measured: a 200 MiB inline body (109 minutes of PCM16) submitted in 5 s at **+634 MiB** RSS and diarized in 739 s. On a tight memory allotment, lower `MEDIA_INLINE_MAX_BYTES` — it is there to be lowered. Prefer `media://` regardless: it is the only form the official API takes, it does not inflate the payload by a third, and the upload does not sit inside the inference request.
+
+### Where the numbers come from
+
+Nothing below the application enforces a body size: `run_uvicorn.sh` sets no `--limit-*` flags and there is no proxy in the container, so these settings are the only thing standing between a client and an arbitrarily large upload. Removing them is not an option — with the caps raised to 1 TiB inside an 8 GiB memory limit, a 256 MiB inline body was accepted, 1 GiB reached 5.9 GiB RSS, and 3 GiB killed the server outright (`OOMKilled=true`, exit 137, no recovery). An unbounded request body is a way for one client to take the service down, so the question is only where the limit sits.
+
+That 8 GiB is not a hypothetical: `run.py` sets no memory limit, but the Helm chart does, and the nearest precedent — `whisper-large-v3`, the other audio model — is allotted **6 GiB** (`charts/tt-inference-server/values.yaml`; media models cluster at 6–32 GiB, with the large LLMs at 175–300 GiB). Idle diarization measures 1.6 GiB resident, leaving ~4.4 GiB of headroom in a whisper-sized allotment. That is the figure to size an inline body against, since an accepted one is resident: 200 MiB inline measured +634 MiB, so the 1 GiB default assumes a roomier allotment than whisper's and should be lowered where that is not available. A fetched object is streamed and stays near the audio size regardless. Under `docker run` with no limit the ceiling is the host instead, which is why the caps do the work rather than the container. Diarization has no chart entry yet; when one is added, 6 GiB is the figure to start from, on the evidence above.
+
+The defaults come from the official API rather than from a guess about what a recording ought to be, and were then checked against what they cost here:
+
+| | Setting | Default | Chosen because |
+|---|---|---|---|
+| `media://`, `http(s)://` | `MEDIA_URL_MAX_BYTES` | 1 GiB | The official pyannoteAI limit for a diarization job. Verified on a p150: a 300 MiB file (163 min of PCM16) diarized successfully in 802 s, 12.3× realtime. |
+| inline base64 | `MEDIA_INLINE_MAX_BYTES` | 1 GiB | The same official limit. Safe to match only because the declared `Content-Length` is refused before the body arrives; an accepted body is still ~1.33× resident, so lower it on a tight allotment. Measured: 200 MiB inline, +634 MiB RSS, diarized in 739 s. |
+| multipart | — | — | No such route: pyannoteAI has no file field, so one was never added. |
+
+The byte cap is deliberately *not* the binding constraint at that size — `request_processing_timeout_seconds` (1000 s) is. The official API also allows 24 hours of audio and this server cannot: at ~12–18× realtime a p150 needs over an hour for 24 hours of audio. Compressed input makes the gap wider, since 1 GiB of ~100 kbps mp3 *is* the full 24 hours while 1 GiB of PCM16 is 9.3 hours. A long file inside the cap can therefore still exceed the request deadline, and that is the timeout's job to report: refusing on a byte count a file the official API accepts would be the wrong error for the wrong reason. Requests are also serialised (one pipeline, `max_batch_size: 1`), so a long recording blocks the queue for its whole run — the 300 MiB run above held it for 13 minutes. And the inline path must stay well inside the container's memory, since the whole body is resident before decoding — the measurements above put the practical inline limit at a fraction of available RAM, not at whatever number looks generous. Sizes are for uncompressed PCM16; a compressed input of the same byte count carries far more audio and takes proportionally longer.
+
+*These are the only size limits on this path.* `max_audio_size_bytes` (50 MiB) is **not** a second, universal check underneath it: it is enforced by `AudioManager`, which only the transcription service goes through (`audio_service.py` → `to_audio_array` → `_validate_file_size`). `DiarizationService.pre_process` decodes with `decode_to_wav` directly and never enters `AudioManager`. Measured on a p150: a 300 MiB file — far above `max_audio_size_bytes`, below `media_url_max_bytes` — diarizes successfully via `media://`. So to bound diarization audio, change `MEDIA_URL_MAX_BYTES` and `MEDIA_INLINE_MAX_BYTES`; changing `max_audio_size_bytes` affects transcription only.
+
+Verified on a p150: with `MEDIA_INLINE_MAX_BYTES=1 MiB` a 3 MiB clip is refused as base64 and still accepted via `media://`, and with `MEDIA_URL_MAX_BYTES=1 MiB` the same clip is refused on both.
+
+What actually differs:
+
+| | Inline base64 | `media://` (or `http(s)://`) |
+|---|---|---|
+| Portable to pyannoteAI | **No** — non-standard extension | Yes |
+| Needs object storage | No | Yes (`media://`); or any reachable URL |
+| Bytes on the wire | **1.333×** the audio | 1.0× |
+| Upload path | Through this server, inside the request | Straight to the store, separate from the request |
+| Re-diarizing the same audio | Re-uploads every time | Stage once, reference by key |
+
+Prefer `media://` (or a plain `http(s)://` URL) — it is what the official API takes, it does not inflate the payload, and the upload does not sit inside the request to the inference server. Reach for base64 when there is no object store the server can reach, or for a one-off small clip where standing up storage is not worth it.
+
+## Request parameters
+
+| Parameter      | Required | Description |
+|----------------|----------|-------------|
+| `url`          | Yes      | Audio location: `http(s)://…` or `media://<object-key>` (capped at 64 MiB). Inline base64 audio is also accepted as a non-standard extension (not supported by pyannoteAI), capped at 16 MiB. |
+| `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
+| `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
+| `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |
+| `exclusive`    | No       | When `true` (default), also return non-overlapping turns as `exclusiveDiarization` (pyannoteAI `exclusive`). |
+
+```bash
+JOB=$(curl -s -X POST 'http://127.0.0.1:8000/v1/diarize' \
+  -H 'Authorization: Bearer your-secret-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com/audio.wav", "exclusive": true}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["jobId"])')
+
+curl -s "http://127.0.0.1:8000/v1/jobs/$JOB" -H 'Authorization: Bearer your-secret-key'
+```
+
+The job's `output` is the pyannoteAI `DiarizationJobOutput` (`exclusiveDiarization` present when `exclusive=true`):
+
+```json
+{
+  "diarization": [
+    {"speaker": "SPEAKER_00", "start": 0.5, "end": 4.2},
+    {"speaker": "SPEAKER_01", "start": 4.2, "end": 7.8}
+  ],
+  "exclusiveDiarization": [
+    {"speaker": "SPEAKER_00", "start": 0.5, "end": 4.2},
+    {"speaker": "SPEAKER_01", "start": 4.2, "end": 7.8}
+  ]
+}
+```
+
+## Model and unsupported options
+
+`model` follows the pyannoteAI `DiarizeRequest.model` enum. This server serves **`community-1`** only; `model=precision-2` (the paid cloud model) or any unknown value is rejected with HTTP 400.
+
+The following pyannoteAI options are **precision-2-only** and cannot be produced by community-1, so requesting them returns HTTP 400 (they are never silently ignored): `confidence`, `turnLevelConfidence`, `transcription`, `transcriptionConfig`. Correspondingly, the precision-2-only response fields (`confidence`, `wordLevelTranscription`, `turnLevelTranscription`) are never emitted. See https://docs.pyannote.ai/openapi.json.
+
+## Job API (pyannoteAI-native)
+
+- `POST /v1/diarize` — create a job. Body is the pyannoteAI `DiarizeRequest` (`url` plus optional `numSpeakers`/`minSpeakers`/`maxSpeakers`/`exclusive`/`model` and `webhook`/`webhookStatusOnly`). Returns `201` with `JobCreated` (`{jobId, status}`).
+- `GET /v1/jobs/{jobId}` — returns the `DiarizationJob` (`{jobId, status, createdAt, updatedAt, output}`); `output` is the `DiarizationJobOutput` once `status` is `succeeded`. Status values are the pyannoteAI enum `created|running|succeeded|failed|canceled`.
+- `webhook` / `webhookStatusOnly` — when `webhook` is set, the job payload is POSTed to that URL on completion (`webhookStatusOnly=true` sends only `{jobId, status}`).
+
+```bash
+# 1. stage a private file (optional; or pass a public https url, or inline
+#    base64 via this server's non-standard extension)
+UP=$(curl -s -X POST http://127.0.0.1:8000/v1/media/input \
+  -H 'Authorization: Bearer your-secret-key' -H 'Content-Type: application/json' \
+  -d '{"url":"media://sess/audio.wav"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')
+# the signature in $UP is the only credential this needs, and it goes to the
+# object store rather than back through the inference server
+curl -s -X PUT "$UP" --upload-file /path/to/audio.wav
+
+# 2. create the job
+JOB=$(curl -s -X POST http://127.0.0.1:8000/v1/diarize \
+  -H 'Authorization: Bearer your-secret-key' -H 'Content-Type: application/json' \
+  -d '{"url":"media://sess/audio.wav","exclusive":true}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["jobId"])')
+
+# 3. poll for the result
+curl -s http://127.0.0.1:8000/v1/jobs/$JOB -H 'Authorization: Bearer your-secret-key'
+```
+
+## Media input (staging private files)
+
+`POST /v1/media/input` with `{"url":"media://<object-key>"}` returns a **pre-signed `PUT` url on an S3-compatible object store**; `PUT` the file bytes straight there, then pass `media://<object-key>` as the diarize `url`. This is the pyannoteAI temporary media storage flow (https://docs.pyannote.ai/api-reference/upload-media), including the part that matters operationally: the upload goes to storage, not through this server, so a long recording never occupies the process that is scheduling device work. The signature is SigV4, so plain `curl -T` is enough — no SDK, no credentials on the client.
+
+This is optional. With no store configured the endpoint answers `501` and names the two inputs that need none: an `http(s)://` url, or the audio inline as base64 (the non-standard extension above). Configure it with:
+
+| Variable | Description |
+|---|---|
+| `MEDIA_STORAGE_ENDPOINT` | Base url of the S3-compatible service, e.g. `http://rustfs:9000`. Empty disables `media://`. |
+| `MEDIA_STORAGE_BUCKET` | Bucket the objects are staged in. |
+| `MEDIA_STORAGE_ACCESS_KEY` / `MEDIA_STORAGE_SECRET_KEY` | Credentials used to sign. Never sent to the client — only the signature is. |
+| `MEDIA_STORAGE_REGION` | Region string SigV4 signs over; self-hosted services ignore the value but it has to match on both sides. Default `us-east-1`. |
+| `MEDIA_STORAGE_PRESIGN_EXPIRY_SECONDS` | Lifetime of a signed url. Default `3600`. |
+
+The store's hostname is downloadable without appearing in `MEDIA_URL_ALLOWED_DOMAINS`: a `media://` key resolves to a url this server signed against its own endpoint, so it is not a client-chosen destination. Client-supplied `http(s)` urls still need that allowlist.
+
+Retention is a **bucket lifecycle policy on the store**, not a sweeper in this server — that is where the official "at least 24 hours" guarantee belongs, and it keeps working while this server is down.
+
+Any S3-compatible service works. For a self-hosted one, [RustFS](https://github.com/rustfs/rustfs) is the straightforward pick: Apache-2.0 (MinIO's community edition is AGPL and archived, Garage is AGPL), a single container configured by two variables, and S3-native lifecycle. Staged media is temporary, so backing it with `tmpfs` keeps it off disk and clears it with the container:
+
+The image runs as uid/gid 10001, and a `tmpfs` mount defaults to root-owned `0755`, so the ownership has to be given on the mount or the server exits with `Permission denied (os error 13)`:
+
+```bash
+docker run -d --name rustfs \
+  --tmpfs /data:rw,size=8g,uid=10001,gid=10001 \
+  --tmpfs /logs:rw,size=64m,uid=10001,gid=10001 \
+  -e RUSTFS_ACCESS_KEY=media -e RUSTFS_SECRET_KEY=media-secret \
+  -p 9000:9000 rustfs/rustfs:latest
+
+# create the bucket and expire its objects after a day
+AWS_ACCESS_KEY_ID=media AWS_SECRET_ACCESS_KEY=media-secret AWS_DEFAULT_REGION=us-east-1 \
+  aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://media
+AWS_ACCESS_KEY_ID=media AWS_SECRET_ACCESS_KEY=media-secret AWS_DEFAULT_REGION=us-east-1 \
+  aws --endpoint-url http://127.0.0.1:9000 s3api put-bucket-lifecycle-configuration \
+  --bucket media --lifecycle-configuration \
+  '{"Rules":[{"ID":"expire-staged-media","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":1}}]}'
+```
+
+Then point the server at it. `run.py` passes the repository-root `.env` to the container with `--env-file`, so that is where these belong:
+
+```bash
+cat >> .env <<'VARS'
+MEDIA_STORAGE_ENDPOINT=http://10.0.0.5:9000
+MEDIA_STORAGE_BUCKET=media
+MEDIA_STORAGE_ACCESS_KEY=media
+MEDIA_STORAGE_SECRET_KEY=media-secret
+VARS
+```
+
+The endpoint has to be reachable **from inside the container**, which `run.py` starts on the default bridge network with no `--link` and no shared user-defined network. A container name will not resolve; use an address the container can route to, such as the host address the store's port is published on. Both the client that `PUT`s and this server resolve the same endpoint string, so it has to be valid for both.
+
+## Benchmarking and accuracy
+
+`benchmarking/run_benchmarks.py` covers the served endpoint: `ModelType.DIARIZATION` selects `BenchmarkTaskDiarization`, so the sweep is a single diarization-typed run rather than the LLM prompt-length sweep.
+
+`evals/run_evals.py` covers it too. Media model types are dispatched to `run_media_evals`, which calls the client's `run_eval` directly rather than going through `lm-evaluation-harness` — so the absence of an lm-eval diarization task is no obstacle, the same way the TTS model scores itself.
+
+The metric is the diarization error rate, the standard for this task: the fraction of speaking time attributed to the wrong speaker, plus missed speech and false alarm. The reference is the hand annotation (`sample.rttm`) that ships beside pyannote's sample recording, so the eval scores the served pipeline against ground truth rather than against another run of itself. The speaker count is reported and checked alongside the DER, because a pipeline that splits or merges speakers can still post an acceptable DER.
+
+Measured on a p150: `DER = 0.052` with the two annotated speakers. That is not a porting error — the all-CPU pipeline scores **the same 0.052** against the same annotation, and the device run reproduces the CPU run exactly (`DER = 0.000` between them). It is the ordinary gap between any diarizer and a human transcript at turn boundaries. Nor does it contradict community-1's published 0.17: that figure is measured on AMI / DIHARD / VoxConverse, full corpora of hard meeting and broadcast audio, whereas this is a clean 30 s two-speaker clip.
+
+The scoring is shared with tt-metal rather than reimplemented: both this eval and `models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py` call `models.demos.audio.pyannote_diarization.accuracy`, so the served model and the on-device tests report the same figure against the same thresholds. That test asserts both directions — `DER < 0.05` for the device run against the host run (fidelity: the port has not drifted from the reference implementation) and `DER < 0.15` against the human annotation (accuracy: the pipeline is right in absolute terms, which fidelity alone cannot show, since host and device could be wrong together).
+
 
 
 # Text-to-Speech (TTS) test call
