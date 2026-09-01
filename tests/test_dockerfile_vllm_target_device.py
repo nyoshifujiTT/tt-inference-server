@@ -32,6 +32,17 @@ def _vllm_install_step() -> str:
     return match.group(0)
 
 
+def _tt_metal_build_step() -> str:
+    text = DOCKERFILE.read_text()
+    match = re.search(
+        r"RUN /bin/bash -c \"git clone \$\{TT_METAL_REPO_URL\}.*?\"\n",
+        text,
+        re.DOTALL,
+    )
+    assert match, "tt-metal build RUN step not found in dev Dockerfile"
+    return match.group(0)
+
+
 def test_vllm_editable_install_forces_empty_target_device():
     step = _vllm_install_step()
     assert "VLLM_TARGET_DEVICE=empty uv pip install" in step, (
@@ -93,4 +104,37 @@ def test_torchaudio_is_installed_and_pinned_to_the_installed_torch():
     assert "TORCH_VERSION" in step, (
         "torchaudio must be pinned to the torch tt-metal already installed, so "
         "resolution cannot swap in a different torch build"
+    )
+
+
+def test_tt_metal_repo_url_is_overridable_and_defaults_upstream():
+    """Model code for a bring-up can live only on a tt-metal fork.
+
+    Qwen3-ASR's vLLM adapter (models/demos/audio/qwen3_asr/tt/generator_vllm.py)
+    is not on the pinned upstream commit, so a hardcoded clone URL makes the
+    server fail with
+    "ModuleNotFoundError: No module named
+    'models.demos.audio.qwen3_asr.tt.generator_vllm'".
+    """
+    text = DOCKERFILE.read_text()
+    assert (
+        "ARG TT_METAL_REPO_URL=https://github.com/tenstorrent-metal/tt-metal.git"
+        in text
+    ), "TT_METAL_REPO_URL must exist and keep the upstream default"
+    assert "git clone ${TT_METAL_REPO_URL}" in _tt_metal_build_step()
+
+
+def test_tt_metal_repo_url_arg_is_declared_late_to_preserve_cache():
+    """Declaring the ARG up top would bust the cache of every preceding layer.
+
+    tt-metal's C++ build takes hours, so the ARG must sit immediately before the
+    step that uses it.
+    """
+    text = DOCKERFILE.read_text()
+    arg_pos = text.index("ARG TT_METAL_REPO_URL=")
+    metal_clone_pos = text.index("git clone ${TT_METAL_REPO_URL}")
+    apt_pos = text.index("# Install only essential build dependencies")
+    assert apt_pos < arg_pos < metal_clone_pos, (
+        "ARG TT_METAL_REPO_URL must be declared just before the tt-metal clone, "
+        "after the long cacheable layers"
     )
