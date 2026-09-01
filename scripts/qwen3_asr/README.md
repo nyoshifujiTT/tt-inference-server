@@ -137,10 +137,19 @@ Two routes serve this model, and both are kept working on purpose:
 | **fork** | `tenstorrent/vllm` fork | the fork's bundled `plugins/vllm-tt-plugin` | `run.py --local-server` against a fork checkout |
 
 Each route registers the adapter separately, so both registrations have to be
-maintained; neither is redundant. The two were measured under identical shipped
-defaults (decode trace on, eager, conc=4, seq=4) and agree on accuracy --
-LibriSpeech WER 6.7288, TED CER 0.100, MagicHub CER 0.1681 on both -- with the
-plugin route slightly faster.
+maintained; neither is redundant. Measured on the same board under identical
+shipped defaults (decode trace on, eager, conc=4, seq=4), they agree:
+
+| | plugin route | fork route |
+|---|---|---|
+| golden transcript | identical | identical |
+| TED 509 CER | 0.1002 (494 ok) | 0.1002 (494 ok) |
+| MagicHub 600 CER | 0.1668 (600 ok) | 0.1668 (600 ok) |
+| bench 128 req | 11.97 audio-s/s, p50 2.24 s | 12.73 audio-s/s, p50 2.02 s |
+
+Accuracy matches to four decimal places on both corpora; the throughput gap is
+within the drift seen between sessions on this board (an earlier run had the
+plugin route ahead). An older run also had LibriSpeech WER 6.7288 on both.
 
 What changed here is only **what the docker image clones**. `--local-server`
 still takes a vLLM source tree via `--vllm-dir`, so the fork route is

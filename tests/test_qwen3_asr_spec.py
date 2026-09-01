@@ -385,3 +385,19 @@ def test_the_readme_backs_the_switch_with_measurements():
     readme = _readme()
     assert "0.1002" in readme, "the TED CER measured after the switch must be quoted"
     assert "0.1668" in readme, "the MagicHub CER measured after the switch must be quoted"
+
+
+def test_the_readme_shows_the_two_route_comparison_side_by_side():
+    """Equivalence is the claim, so both columns have to be visible.
+
+    Quoting one route's numbers and asserting the other matches is not
+    checkable by a reader; the table must carry both.
+    """
+    readme = _readme()
+    start = readme.index("Both vLLM routes are still supported")
+    section = readme[start : start + 2500]
+    # the fork column's own measurements, distinct from the plugin ones
+    assert "12.73" in section, "the fork route's measured throughput must be shown"
+    assert "11.97" in section, "the plugin route's measured throughput must be shown"
+    # and both corpora, since one corpus alone would not show accuracy parity
+    assert "0.1002" in section and "0.1668" in section
