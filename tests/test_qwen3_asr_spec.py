@@ -354,3 +354,34 @@ def test_the_readme_records_why_the_tree_is_not_on_upstream_main():
         "say that main splits the specs into yaml, which is why the inline pin "
         "here is not a licence to edit prod specs there"
     )
+
+
+def test_the_readme_keeps_both_vllm_routes_documented():
+    """Dropping the fork from the image is not dropping the fork route.
+
+    The agreed position is that both routes stay supported: the plugin route
+    (upstream vLLM + standalone vllm-tt-plugin, used by --docker-server) and
+    the fork route (tenstorrent/vllm with its bundled plugin, used by
+    --local-server). Each registers the TT adapter separately, so a reader who
+    concludes from "the image no longer needs the fork" that the fork route is
+    gone would drop a registration that is still required.
+    """
+    readme = _readme()
+    assert "Both vLLM routes are still supported" in readme
+    assert "--local-server" in readme, "the fork route's launch path must be named"
+    assert "--docker-server" in readme, "the plugin route's launch path must be named"
+    # the equivalence measurement is what justifies calling them interchangeable
+    assert "6.7288" in readme, "the two-route WER agreement must be recorded"
+    # and the scope of the change must be limited to the image
+    assert "what the docker image clones" in readme
+
+
+def test_the_readme_backs_the_switch_with_measurements():
+    """"Nothing is lost" is a claim about accuracy, so it needs numbers.
+
+    Without them the next reader cannot tell whether the fork was dropped after
+    verification or on reasoning alone.
+    """
+    readme = _readme()
+    assert "0.1002" in readme, "the TED CER measured after the switch must be quoted"
+    assert "0.1668" in readme, "the MagicHub CER measured after the switch must be quoted"

@@ -115,12 +115,36 @@ via its own `docs/install-vllm-tt.sh` -- the same layout `tt-inference-server`
 main uses. The field keeps its old name from when the image cloned the
 `tenstorrent/vllm` fork.
 
-That fork is no longer used. Every Qwen3-ASR change it carried has an
-equivalent on the standalone plugin (TT adapter registration, the
+**The image no longer needs that fork.** Every Qwen3-ASR change it carried has
+an equivalent on the standalone plugin (TT adapter registration, the
 audio/transcription wiring in `TTModelRunner`, surfacing the real
 `execute_model` error, forced eager execution), and its remaining change --
 ordering `thinker_config` before `super().__init__()` in the HF config -- ships
-in the `vllm==0.24.0` release the plugin pins.
+in the `vllm==0.24.0` release the plugin pins. Measured after the switch: TED
+CER 0.1002 and MagicHub CER 0.1668, identical to the last fork-built image, at
+higher throughput (11.97 vs 9.84 audio-s/s).
+
+This is a statement about **this image only**. The fork route itself is still
+supported and still tested -- see below.
+
+#### Both vLLM routes are still supported
+
+Two routes serve this model, and both are kept working on purpose:
+
+| route | vLLM | where the TT adapter is registered | how it is launched |
+|---|---|---|---|
+| **plugin** (this image) | upstream `vllm==0.24.0` | standalone `vllm-tt-plugin` built-in model map | `run.py --docker-server` |
+| **fork** | `tenstorrent/vllm` fork | the fork's bundled `plugins/vllm-tt-plugin` | `run.py --local-server` against a fork checkout |
+
+Each route registers the adapter separately, so both registrations have to be
+maintained; neither is redundant. The two were measured under identical shipped
+defaults (decode trace on, eager, conc=4, seq=4) and agree on accuracy --
+LibriSpeech WER 6.7288, TED CER 0.100, MagicHub CER 0.1681 on both -- with the
+plugin route slightly faster.
+
+What changed here is only **what the docker image clones**. `--local-server`
+still takes a vLLM source tree via `--vllm-dir`, so the fork route is
+unaffected by the switch.
 
 #### What this tree does *not* follow upstream on
 
