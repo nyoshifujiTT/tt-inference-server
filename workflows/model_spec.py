@@ -3143,7 +3143,7 @@ audio_tts_templates = [
         # built from the base cannot serve this model. Build with
         # TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git until
         # these land on tenstorrent/tt-metal.
-        tt_metal_commit="3b1b9ad",
+        tt_metal_commit="1395635",
         # vllm_commit names a *vllm-tt-plugin* commit: the dev image clones
         # tenstorrent/vllm-tt-plugin and lets its docs/install-vllm-tt.sh pull
         # the vLLM release it pins. (The field keeps its old name from when the

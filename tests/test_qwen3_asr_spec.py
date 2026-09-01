@@ -101,6 +101,7 @@ SUPERSEDED_TT_METAL_COMMITS = (
     "d53d8d7",  # decode trace default ON
     "ddb7ace",  # head before the rebase onto upstream/yito/qwen3_asr_pr
     "986aad1",  # pre-rebase branch head
+    "3b1b9ad",  # before the eval-side 16 kHz resample fix
 )
 
 

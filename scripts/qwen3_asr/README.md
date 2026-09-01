@@ -17,7 +17,7 @@ build the base with Bake first and tag it the way the script expects:
 ```
 cd $TT_METAL_HOME
 docker buildx bake -f dockerfile/docker-bake.hcl \
-  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:3b1b9ad \
+  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:1395635 \
   --set ci-build.output=type=docker \
   ci-build
 ```
@@ -88,7 +88,7 @@ diff --git a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile b/vllm-tt-metal/vllm
      && source ${PYTHON_ENV_DIR}/bin/activate \
 PATCH
 
-python3 scripts/build_docker_images.py --build-metal-commit 3b1b9ad --single-threaded
+python3 scripts/build_docker_images.py --build-metal-commit 1395635 --single-threaded
 
 git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 ```
@@ -172,7 +172,7 @@ it is replaced, so keep at least 60 GB free.
 ```
 python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 --workflow server \
   --docker-server --dev-mode --no-auth --service-port 8110 --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-3b1b9ad-2bcb717
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-1395635-2bcb717
 ```
 
 `/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the
