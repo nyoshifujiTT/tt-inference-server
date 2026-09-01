@@ -184,18 +184,31 @@ branch only exists locally, serve it over the loopback and point that half of
 the patch at it instead -- the build still performs an ordinary `git clone`,
 only the URL differs:
 
+Both clones need this, not just tt-metal — the patch points the plugin at a
+fork too:
+
 ```
-# once, on the docker host
-git clone --bare <local tt-metal checkout> /tmp/ttmetal-src.git
-cd /tmp/ttmetal-src.git && git update-server-info
+# once, on the docker host: one bare repo per fork, both under /tmp
+git clone --bare <local tt-metal checkout>       /tmp/ttmetal-src.git
+git clone --bare <local vllm-tt-plugin checkout> /tmp/vllmttplugin-src.git
+for d in /tmp/ttmetal-src.git /tmp/vllmttplugin-src.git; do
+  (cd "$d" && git update-server-info)
+done
+
+# one daemon exports everything under the base path
 git daemon --reuseaddr --base-path=/tmp --export-all --enable=upload-pack \
   --listen=0.0.0.0 --port=9418 &
+
+# confirm the pinned commits are reachable before starting a multi-hour build
+git ls-remote git://172.17.0.1:9418/ttmetal-src.git
+git ls-remote git://172.17.0.1:9418/vllmttplugin-src.git
 ```
 
-Then use `git://172.17.0.1:9418/ttmetal-src.git` (172.17.0.1 is the docker0
-gateway) as the tt-metal URL in the patch. Push the branch and drop this step
-before handing the recipe over: an image built from a daemon on one host is not
-reproducible by anyone else.
+Then substitute both URLs in the patch (172.17.0.1 is the docker0 gateway):
+`git://172.17.0.1:9418/ttmetal-src.git` and
+`git://172.17.0.1:9418/vllmttplugin-src.git`. Push the branches and drop this
+step before handing the recipe over: an image built from a daemon on one host
+is not reproducible by anyone else.
 
 Disk: the dev image is ~21 GB and a rebuild keeps the previous generation until
 it is replaced, so keep at least 60 GB free.

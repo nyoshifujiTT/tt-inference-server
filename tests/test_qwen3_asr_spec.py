@@ -263,7 +263,16 @@ def test_the_readme_documents_the_unpushed_branch_path():
     assert "If a branch is not pushed yet" in readme
     assert "git daemon" in readme, "the loopback-serving workaround must be spelled out"
     assert "git://172.17.0.1:9418" in readme, "the URL that was actually used must be shown"
-    assert "Push the branch and drop this step" in readme, (
+    # both clones point at forks now, so serving only tt-metal leaves the build
+    # failing on the plugin clone hours in
+    assert "/tmp/ttmetal-src.git" in readme
+    assert "/tmp/vllmttplugin-src.git" in readme, (
+        "the plugin fork needs the same loopback treatment as tt-metal"
+    )
+    assert "git ls-remote" in readme, (
+        "reachability must be checkable before a multi-hour build"
+    )
+    assert "Push the branches and drop this" in readme, (
         "the workaround must be marked as temporary, not as the delivered recipe"
     )
 
