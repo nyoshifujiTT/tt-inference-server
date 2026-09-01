@@ -114,6 +114,50 @@ def test_no_superseded_commit_is_referenced_anywhere():
             )
 
 
+def test_vllm_commit_pins_a_plugin_commit_not_a_fork_commit():
+    """vllm_commit names a vllm-tt-plugin commit, as it does upstream.
+
+    The dev image clones tenstorrent/vllm-tt-plugin and lets its
+    docs/install-vllm-tt.sh pull the vLLM release it pins, so a value left over
+    from the days of cloning the tenstorrent/vllm fork would check out a SHA
+    that does not exist in the plugin repo and fail the build.
+    """
+    import re
+
+    spec_src = open(
+        os.path.join(os.path.dirname(__file__), "..", "workflows", "model_spec.py")
+    ).read()
+    anchor = spec_src.index("Qwen3-ASR-1.7B-JA")
+    window = spec_src[anchor : anchor + 4000]
+    match = re.search(r'vllm_commit="([0-9a-f]{7,})"', window)
+    assert match, "the Qwen3-ASR spec must pin a vllm_commit"
+    assert match.group(1) not in SUPERSEDED_VLLM_FORK_COMMITS, (
+        "vllm_commit still points at a tenstorrent/vllm fork commit; it must "
+        "name a vllm-tt-plugin commit now that the image clones the plugin"
+    )
+    # the comment must say what the field means, or the next reader repeats the
+    # mistake the rename does not prevent
+    assert "vllm-tt-plugin* commit" in window or "vllm-tt-plugin commit" in window
+
+
+# vLLM *fork* commits this spec pinned back when the dev image cloned
+# tenstorrent/vllm. None of them exist in tenstorrent/vllm-tt-plugin.
+SUPERSEDED_VLLM_FORK_COMMITS = (
+    "e1a3825",  # fork upstream base
+    "5e69638",  # fork bring-up branch head
+)
+
+
+def test_no_superseded_vllm_fork_commit_is_referenced_anywhere():
+    root = os.path.join(os.path.dirname(__file__), "..")
+    for rel in ("workflows/model_spec.py", "scripts/qwen3_asr/README.md"):
+        text = open(os.path.join(root, rel)).read()
+        for stale in SUPERSEDED_VLLM_FORK_COMMITS:
+            assert stale not in text, (
+                f"{rel} still references the vLLM fork commit {stale}; the "
+                "image no longer clones that repo"
+            )
+
 def test_the_readme_states_when_the_pin_may_lag_the_head():
     """The pin names the BUILT tree, so test-only commits need no bump.
 
@@ -143,20 +187,22 @@ def test_the_readme_names_the_branch_the_forks_must_carry():
     """The clone URLs are useless without knowing which branch holds the pins."""
     readme = _readme()
     assert BRING_UP_BRANCH in readme, "the bring-up branch name must be documented"
-    for repo in ("nyoshifujiTT/tt-metal", "nyoshifujiTT/vllm"):
+    for repo in ("nyoshifujiTT/tt-metal", "nyoshifujiTT/vllm-tt-plugin"):
         assert repo in readme, f"{repo} must be listed with its branch"
 
 
-def test_the_readme_explains_the_vllm_fork_clone():
-    """This base still clones vLLM itself; upstream clones only the plugin.
+def test_the_readme_says_what_vllm_commit_names():
+    """The field name says vLLM but the value is a plugin commit.
 
-    Without the note, the next reader compares against upstream, sees no vLLM
-    clone there, and assumes vllm_commit names a vllm-tt-plugin commit.
+    Without the note the next reader pins a tenstorrent/vllm SHA, which does
+    not exist in the plugin repo, and the build fails at `git checkout`.
     """
     readme = _readme()
-    assert "Why this clones a vLLM fork at all" in readme
-    assert "vllm-tt-plugin" in readme, "the upstream layout must be contrasted"
-
+    assert "What `vllm_commit` names" in readme
+    assert "vllm-tt-plugin" in readme, "the repo actually cloned must be named"
+    assert "vllm==0.24.0" in readme, (
+        "record that the fork's HF-config fix already ships in the pinned vLLM"
+    )
 
 def test_the_readme_says_which_clip_to_sanity_check_with():
     """A bare "clip.wav" leaves the reader to grab any file they can find.

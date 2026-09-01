@@ -3144,14 +3144,21 @@ audio_tts_templates = [
         # TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git until
         # these land on tenstorrent/tt-metal.
         tt_metal_commit="3b1b9ad",
-        # Bring-up branch head (nyoshifujiTT/vllm, nyoshifujiTT/qwen3-asr-17b_p150x1).
-        # e1a3825 is its upstream base and lacks the Qwen3-ASR fixes this model
-        # needs (thinker_config ordering in the HF config, the TT adapter
-        # registration, and the audio/transcription wiring in TTModelRunner), so
-        # a --docker-server build pinned to the base cannot serve this model.
-        # Build with TT_VLLM_REPO_URL=https://github.com/nyoshifujiTT/vllm.git
-        # until these land on tenstorrent/vllm.
-        vllm_commit="5e69638",
+        # vllm_commit names a *vllm-tt-plugin* commit: the dev image clones
+        # tenstorrent/vllm-tt-plugin and lets its docs/install-vllm-tt.sh pull
+        # the vLLM release it pins. (The field keeps its old name from when the
+        # image cloned the tenstorrent/vllm fork.)
+        #
+        # Bring-up branch head (nyoshifujiTT/vllm-tt-plugin,
+        # nyoshifujiTT/qwen3-asr-17b_p150x1). 6ff2469 is its upstream base and
+        # lacks the Qwen3-ASR support this model needs - the TT adapter
+        # registration, the audio/transcription wiring in TTModelRunner,
+        # surfacing the real execute_model error, and forced eager execution -
+        # so a --docker-server build pinned to the base cannot serve this
+        # model. Until these land on tenstorrent/vllm-tt-plugin, point the
+        # clone at the fork with the temporary patch in
+        # scripts/qwen3_asr/README.md.
+        vllm_commit="2bcb717",
         impl=tt_vllm_plugin_impl,
         min_disk_gb=15,
         min_ram_gb=6,

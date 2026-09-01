@@ -50,7 +50,7 @@ bring-up uses the same branch name:
 | repository | branch | pinned commit |
 |---|---|---|
 | `nyoshifujiTT/tt-metal` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `tt_metal_commit` in the spec |
-| `nyoshifujiTT/vllm` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `vllm_commit` in the spec |
+| `nyoshifujiTT/vllm-tt-plugin` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `vllm_commit` in the spec |
 
 The clone checks out the pinned commit, not the branch, so the branch only has
 to *contain* it. The pins live in `workflows/model_spec.py`; this old spec
@@ -59,27 +59,30 @@ ordinary committed source and needs no build-time patching.
 
 ```
 cd $TT_INFERENCE_SERVER
-TT_VLLM_REPO_URL=https://github.com/nyoshifujiTT/vllm.git \
 TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git \
   python3 scripts/build_docker_images.py --build-metal-commit 3b1b9ad --single-threaded
 ```
 
 Without `TT_METAL_REPO_URL` the image lacks the vLLM adapter and the server dies
-with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`;
-without `TT_VLLM_REPO_URL` it lacks the HF-config fix and dies with
-`AttributeError: 'Qwen3ASRConfig' object has no attribute 'thinker_config'`.
+with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`.
 
-#### Why this clones a vLLM fork at all
+The plugin clone URL is not a build arg, so pointing it at the fork needs the
+temporary patch below.
 
-Upstream `tt-inference-server` has since dropped the vLLM clone entirely: the
-dev Dockerfile now clones only `tenstorrent/vllm-tt-plugin`, which owns the vLLM
-version pin and installs it via its own `docs/install-vllm-tt.sh`. On that
-layout `vllm_commit` names a *vllm-tt-plugin* commit, despite the name.
+#### What `vllm_commit` names
 
-This tree predates that change (branched 2026-04-30) and still clones vLLM
-itself, so here `vllm_commit` really is a commit on the vLLM fork. Keep it that
-way while on this base; switching to the plugin-only layout is a follow-up that
-belongs with the upstream merge, not with this recipe.
+A *vllm-tt-plugin* commit, despite the name. The dev Dockerfile clones only
+`tenstorrent/vllm-tt-plugin`, which owns the vLLM version pin and installs it
+via its own `docs/install-vllm-tt.sh` -- the same layout `tt-inference-server`
+main uses. The field keeps its old name from when the image cloned the
+`tenstorrent/vllm` fork.
+
+That fork is no longer used. Every Qwen3-ASR change it carried has an
+equivalent on the standalone plugin (TT adapter registration, the
+audio/transcription wiring in `TTModelRunner`, surfacing the real
+`execute_model` error, forced eager execution), and its remaining change --
+ordering `thinker_config` before `super().__init__()` in the HF config -- ships
+in the `vllm==0.24.0` release the plugin pins.
 
 #### If the branch is not pushed yet
 
@@ -97,7 +100,6 @@ git daemon --reuseaddr --base-path=/tmp --export-all --enable=upload-pack \
 
 # then build against it (172.17.0.1 is the docker0 gateway)
 TT_METAL_REPO_URL=git://172.17.0.1:9418/ttmetal-src.git \
-TT_VLLM_REPO_URL=https://github.com/nyoshifujiTT/vllm.git \
   python3 scripts/build_docker_images.py --build-metal-commit <pin> --single-threaded
 ```
 
@@ -112,7 +114,7 @@ it is replaced, so keep at least 60 GB free.
 ```
 python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 --workflow server \
   --docker-server --dev-mode --no-auth --service-port 8110 --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-3b1b9ad-5e69638
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-3b1b9ad-2bcb717
 ```
 
 `/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the
