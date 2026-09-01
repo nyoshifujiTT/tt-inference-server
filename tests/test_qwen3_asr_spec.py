@@ -335,3 +335,21 @@ def test_the_readme_says_the_patch_is_the_only_one():
         "record that clone-URL build args were withdrawn, so they are not "
         "reintroduced as a shortcut"
     )
+
+
+def test_the_readme_records_why_the_tree_is_not_on_upstream_main():
+    """The Dockerfile matches main; the rest of the tree does not.
+
+    Without this written down, the next reader either assumes the whole tree is
+    current, or re-opens "should we rebase onto main" without the numbers. It
+    also has to say why the pins sit in model_spec.py, which would be wrong on
+    main where prod specs are yaml and must not be edited.
+    """
+    readme = _readme()
+    assert "What this tree does *not* follow upstream on" in readme
+    # the reorganisation is the actual cost, so name what moved
+    assert "llm_module" in readme and "report_module" in readme
+    assert "workflows/model_specs" in readme, (
+        "say that main splits the specs into yaml, which is why the inline pin "
+        "here is not a licence to edit prod specs there"
+    )
