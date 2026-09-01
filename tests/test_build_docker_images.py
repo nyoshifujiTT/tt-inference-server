@@ -352,3 +352,59 @@ class TestLogResourceSummary:
 
         assert "Available memory after reserve" in caplog.text
         assert "below the minimum per-build requirement" in caplog.text
+
+
+class TestDevImageRepoUrlOverrides:
+    """Only tt-metal's clone URL is overridable.
+
+    The dev image installs the standalone ``tenstorrent/vllm-tt-plugin``, which
+    owns the vLLM pin, so there is nothing for a ``TT_VLLM_REPO_URL`` to
+    redirect. An earlier bring-up shape cloned the ``tenstorrent/vllm`` fork and
+    needed one; that shape is gone.
+    """
+
+    def _build_command(self, env):
+        from scripts import build_docker_images as mod
+
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+
+        with patch.dict("os.environ", env, clear=False), patch.object(
+            mod, "run_command_with_logging", side_effect=fake_run
+        ), patch.object(
+            mod, "generate_model_specs_json", return_value="/tmp/model_spec.json"
+        ):
+            mod.build_dev_image(
+                image_tags={"dev": "dev:tag", "tt_metal_base": "base:tag"},
+                tt_metal_commit="deadbee",
+                vllm_commit="cafe123",
+                container_app_uid=1000,
+                logger=MagicMock(),
+            )
+        return captured["command"]
+
+    def test_tt_metal_repo_url_is_forwarded_when_set(self):
+        command = self._build_command(
+            {"TT_METAL_REPO_URL": "https://example.invalid/tt-metal.git"}
+        )
+        assert (
+            "TT_METAL_REPO_URL=https://example.invalid/tt-metal.git" in command
+        ), "a bring-up must be able to point the clone at its tt-metal fork"
+
+    def test_no_vllm_repo_url_is_forwarded(self):
+        command = self._build_command(
+            {"TT_VLLM_REPO_URL": "https://example.invalid/vllm.git"}
+        )
+        assert not any("TT_VLLM_REPO_URL" in str(arg) for arg in command), (
+            "TT_VLLM_REPO_URL must not be forwarded: the Dockerfile no longer "
+            "clones vLLM, so the build arg would fail as an unknown ARG"
+        )
+
+    def test_the_plugin_commit_is_still_pinned(self):
+        command = self._build_command({})
+        assert "TT_VLLM_COMMIT_SHA_OR_TAG=cafe123" in command, (
+            "TT_VLLM_COMMIT_SHA_OR_TAG now names the vllm-tt-plugin commit and "
+            "must still be passed"
+        )
