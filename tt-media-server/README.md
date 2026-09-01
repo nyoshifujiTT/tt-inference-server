@@ -511,6 +511,18 @@ The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a pub
 
 16 MiB covers the clip-sized use the extension exists for. Longer audio wants the url path, which is what the official API takes anyway. Set `MEDIA_INLINE_MAX_BYTES=0` to opt out and follow `MEDIA_URL_MAX_BYTES` instead, if you would rather tune one number.
 
+### Where the numbers come from
+
+Nothing below the application enforces a body size: `run_uvicorn.sh` sets no `--limit-*` flags and there is no proxy in the container, so these settings are the only thing standing between a client and an arbitrarily large upload. They are policy, not a physical ceiling — the host has hundreds of GiB and the model streams in chunks. The figures were picked from what the audio *means*, then checked against what it costs:
+
+| | Setting | Default | Chosen because |
+|---|---|---|---|
+| `media://`, `http(s)://` | `MEDIA_URL_MAX_BYTES` | 64 MiB | ~35 min of 16 kHz mono PCM16 (1.92 MB/min) — a meeting. Measured: **117 s**, 17.9× realtime. |
+| inline base64 | `MEDIA_INLINE_MAX_BYTES` | 16 MiB | ~8.7 min — a clip. Measured: **30 s**, 17.3× realtime. Lower because the request-body path costs ~1.5× the memory. |
+| multipart | — | — | No such route: pyannoteAI has no file field, so one was never added. |
+
+Two things worth knowing before raising them. Requests are serialised (one pipeline, `max_batch_size: 1`), so a long recording blocks the queue for its whole run — the 64 MiB cap is roughly two minutes of exclusive occupancy. And `request_processing_timeout_seconds` (1000 s) is the real ceiling: at ~18× realtime that expires around 300 minutes of audio, so raising the byte caps past roughly 546 MiB buys nothing but a timeout. Sizes are for uncompressed PCM16; a compressed input of the same byte count carries far more audio and takes proportionally longer.
+
 *These are the only size limits on this path.* `max_audio_size_bytes` (50 MiB) is **not** a second, universal check underneath it: it is enforced by `AudioManager`, which only the transcription service goes through (`audio_service.py` → `to_audio_array` → `_validate_file_size`). `DiarizationService.pre_process` decodes with `decode_to_wav` directly and never enters `AudioManager`. Measured on a p150: a 55 MiB clip — above `max_audio_size_bytes`, below `media_url_max_bytes` — is accepted via `media://`. So to bound diarization audio, change `MEDIA_URL_MAX_BYTES` and `MEDIA_INLINE_MAX_BYTES`; changing `max_audio_size_bytes` affects transcription only.
 
 Verified on a p150: with `MEDIA_INLINE_MAX_BYTES=1 MiB` a 3 MiB clip is refused as base64 and still accepted via `media://`, and with `MEDIA_URL_MAX_BYTES=1 MiB` the same clip is refused on both.

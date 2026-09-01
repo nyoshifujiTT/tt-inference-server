@@ -294,3 +294,52 @@ def test_inline_is_capped_lower_than_fetched_audio_by_default():
         if runner is ModelRunners.TT_PYANNOTE_DIARIZATION
     )
     assert inline < entry["media_url_max_bytes"]
+
+
+def test_the_caps_stay_inside_what_the_request_timeout_allows():
+    """A byte cap that outlives the request deadline is not a limit, it is a
+    promise the server cannot keep.
+
+    Diarization runs at roughly 18x realtime on a p150 (measured: 35 min of
+    audio in 117 s), and request_processing_timeout_seconds bounds one request.
+    A cap admitting more audio than that budget covers would let a caller
+    upload for minutes only to be cut off mid-run, which reads as a server
+    fault rather than a size that was never going to fit.
+    """
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "config" / "settings.py"
+    ).read_text()
+    declared = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            try:
+                declared[node.target.id] = eval(  # noqa: S307 - our own source
+                    compile(ast.Expression(node.value), "<settings>", "eval"),
+                    {"__builtins__": {}},
+                    {},
+                )
+            except Exception:
+                continue
+
+    from config.constants import ModelConfigs, ModelRunners
+
+    entry = next(
+        cfg
+        for (runner, _device), cfg in ModelConfigs.items()
+        if runner is ModelRunners.TT_PYANNOTE_DIARIZATION
+    )
+
+    # 16 kHz mono PCM16, and the conservative end of the measured throughput
+    bytes_per_second_of_audio = 16000 * 2
+    realtime_factor = 17.0
+    budget_bytes = (
+        declared["request_processing_timeout_seconds"]
+        * realtime_factor
+        * bytes_per_second_of_audio
+    )
+
+    assert entry["media_url_max_bytes"] < budget_bytes
+    assert declared["media_inline_max_bytes"] < budget_bytes
