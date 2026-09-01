@@ -223,18 +223,22 @@ async def _fetch_audio(url: str) -> bytes:
             ),
         )
 
-    # The same cap the downloader enforces, and deliberately so: the limit
-    # protects the pipeline that decodes and diarizes the audio, and that
-    # pipeline cannot tell how the bytes arrived. A separate inline budget
-    # would mean one number is the real one and the other is the number
-    # somebody forgot to change -- and whichever is larger becomes the
-    # effective limit, since a caller who is refused on one route just uses
-    # the other.
+    # Nothing is downloaded on this path, so the limit is media_inline_max_bytes
+    # rather than the downloader's media_url_max_bytes. It defaults to 0,
+    # meaning "use media_url_max_bytes", which keeps one ceiling across every
+    # input route: the cap bounds what the decode-and-diarize pipeline is asked
+    # to hold, and that pipeline cannot tell how the bytes arrived, so a
+    # caller refused on one route would otherwise just use the other and the
+    # larger number would silently be the real limit.
     #
-    # This is how the rest of the server already behaves: the video path
-    # defaults media_url_max_bytes to 7,500,000 precisely because that
-    # base64-encodes to MAX_BASE64_IMAGE_LEN, so a downloaded image and an
-    # inline one land on the same ceiling.
+    # The indirection exists because reusing media_url_max_bytes outright made
+    # a base64 body answer to a setting that upstream uses only inside
+    # download_media_url (see #4983, which added it for presigned I2V image
+    # URLs); its name and docstring are about URL fetches, and an operator
+    # reading either would not expect it to govern inline audio. Upstream
+    # keeps the two apart -- an inline image is bounded by
+    # MAX_BASE64_IMAGE_LEN on the pydantic field -- and this restores that
+    # separation while keeping the defaults tied.
     #
     # Note this is the ONLY size limit on the diarization path.
     # settings.max_audio_size_bytes (50 MiB) belongs to AudioManager, which
@@ -243,12 +247,12 @@ async def _fetch_audio(url: str) -> bytes:
     # decodes with decode_to_wav directly and never enters AudioManager, so
     # that setting does not apply here -- confirmed on a p150, where 55 MiB
     # (above max_audio_size_bytes, below this cap) is accepted on both the
-    # base64 and media:// routes. Anyone tightening the audio limit for
-    # diarization wants this setting, not that one.
+    # base64 and media:// routes.
     #
-    # Read off the downloader's own settings object rather than a fresh
-    # import so the two cannot drift apart.
-    max_bytes = media_downloader.settings.media_url_max_bytes
+    # Read off the downloader's settings object rather than a fresh import so
+    # the two cannot drift apart.
+    settings = media_downloader.settings
+    max_bytes = settings.media_inline_max_bytes or settings.media_url_max_bytes
     if len(url) > _base64_len_for(max_bytes):
         raise HTTPException(
             status_code=413,
@@ -257,7 +261,7 @@ async def _fetch_audio(url: str) -> bytes:
                 f"more than the {max_bytes}-byte cap for this server. The cap "
                 "is on the audio itself, so staging it and passing a url does "
                 "not raise it; shorten the recording, or ask the operator to "
-                "raise media_url_max_bytes"
+                "raise the inline audio limit"
             ),
         )
     try:
@@ -280,8 +284,8 @@ async def _fetch_audio(url: str) -> bytes:
                 f"inline base64 audio decodes to {len(audio_bytes)} bytes, over "
                 f"the {max_bytes}-byte cap for this server. The cap is on the "
                 "audio itself, so staging it and passing a url does not raise "
-                "it; shorten the recording, or ask the operator to raise "
-                "media_url_max_bytes"
+                "it; shorten the recording, or ask the operator to raise the "
+                "inline audio limit"
             ),
         )
     return audio_bytes

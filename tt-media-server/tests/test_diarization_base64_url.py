@@ -142,7 +142,7 @@ def test_the_oversize_error_does_not_promise_a_url_would_get_through(
         "/v1/diarize", json={"url": base64.b64encode(b"x" * 64).decode("ascii")}
     ).json()["detail"]
     assert "does not raise it" in detail
-    assert "media_url_max_bytes" in detail
+    assert "inline audio limit" in detail
 
 
 def test_raising_the_cap_admits_audio_on_both_routes_at_once(client, fake, monkeypatch):
@@ -208,3 +208,47 @@ def test_max_audio_size_bytes_does_not_apply_to_diarization(client, fake, monkey
     )
     assert resp.status_code == 201, resp.text
     assert bytes(fake.last.file) == payload
+
+
+def test_inline_audio_has_its_own_setting_separate_from_the_download_cap(
+    client, fake, monkeypatch
+):
+    """Nothing is downloaded for a base64 body, so the download cap should not
+    be what governs it.
+
+    ``media_url_max_bytes`` arrived with the presigned-URL work (#4983) and is
+    read by ``download_media_url`` alone; upstream bounds an *inline* image
+    with ``MAX_BASE64_IMAGE_LEN`` on the pydantic field instead. Making a
+    base64 body answer to the download setting meant an operator reading its
+    name or docstring -- both about URL fetches -- would not have guessed it
+    governed inline audio too.
+    """
+    monkeypatch.setattr(settings, "media_url_max_bytes", 4096, raising=False)
+    monkeypatch.setattr(settings, "media_inline_max_bytes", 32, raising=False)
+
+    payload = b"x" * 64  # inside the download cap, past the inline one
+    resp = client.post(
+        "/v1/diarize", json={"url": base64.b64encode(payload).decode("ascii")}
+    )
+    assert resp.status_code == 413, resp.text
+    assert fake.last is None
+
+
+def test_inline_audio_follows_the_download_cap_until_told_otherwise(
+    client, fake, monkeypatch
+):
+    """Default 0 means "same ceiling as everything else".
+
+    Two independently-tuned numbers would be a trap: a caller refused inline
+    just uses a url, so the larger one is the real limit while both look
+    meaningful. Splitting the setting is about naming, not about handing out a
+    second budget by default.
+    """
+    monkeypatch.setattr(settings, "media_inline_max_bytes", 0, raising=False)
+
+    monkeypatch.setattr(settings, "media_url_max_bytes", 32, raising=False)
+    over = base64.b64encode(b"x" * 64).decode("ascii")
+    assert client.post("/v1/diarize", json={"url": over}).status_code == 413
+
+    monkeypatch.setattr(settings, "media_url_max_bytes", 4096, raising=False)
+    assert client.post("/v1/diarize", json={"url": over}).status_code == 201
