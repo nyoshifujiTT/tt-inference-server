@@ -183,3 +183,28 @@ def test_the_cap_is_checked_before_the_payload_is_decoded(client, fake, monkeypa
             "/v1/diarize", json={"url": base64.b64encode(b"y" * 4096).decode("ascii")}
         )
     assert resp.status_code == 413, resp.text
+
+
+def test_max_audio_size_bytes_does_not_apply_to_diarization(client, fake, monkeypatch):
+    """The 50 MiB audio limit is the transcription service's, not ours.
+
+    ``settings.max_audio_size_bytes`` is enforced by ``AudioManager``, which is
+    reached only through ``model_services/audio_service.py``.
+    ``DiarizationService.pre_process`` decodes with ``decode_to_wav`` directly
+    and never enters AudioManager, so that setting has no effect here.
+
+    Worth pinning because the two names sit next to each other in settings and
+    both look like "how much audio is allowed". Someone tightening
+    max_audio_size_bytes to bound diarization would change nothing and believe
+    otherwise; this test says so out loud. Squeezing it to a single byte must
+    not affect a request that the diarization cap admits.
+    """
+    monkeypatch.setattr(settings, "max_audio_size_bytes", 1, raising=False)
+    monkeypatch.setattr(settings, "media_url_max_bytes", 4096, raising=False)
+
+    payload = b"x" * 1024
+    resp = client.post(
+        "/v1/diarize", json={"url": base64.b64encode(payload).decode("ascii")}
+    )
+    assert resp.status_code == 201, resp.text
+    assert bytes(fake.last.file) == payload

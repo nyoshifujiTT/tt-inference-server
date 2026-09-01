@@ -231,13 +231,20 @@ async def _fetch_audio(url: str) -> bytes:
     # effective limit, since a caller who is refused on one route just uses
     # the other.
     #
-    # This is how the rest of the server already behaves. AudioManager
-    # validates against max_audio_size_bytes after decoding, so a base64 body
-    # and a multipart upload are held to one number
-    # (utils/audio_manager.py:399). The video path is the same idea from the
-    # other direction: media_url_max_bytes defaults to 7,500,000 precisely
-    # because that base64-encodes to MAX_BASE64_IMAGE_LEN, so a downloaded
-    # image and an inline one land on the same ceiling.
+    # This is how the rest of the server already behaves: the video path
+    # defaults media_url_max_bytes to 7,500,000 precisely because that
+    # base64-encodes to MAX_BASE64_IMAGE_LEN, so a downloaded image and an
+    # inline one land on the same ceiling.
+    #
+    # Note this is the ONLY size limit on the diarization path.
+    # settings.max_audio_size_bytes (50 MiB) belongs to AudioManager, which
+    # only the transcription service uses (model_services/audio_service.py ->
+    # to_audio_array -> _validate_file_size). DiarizationService.pre_process
+    # decodes with decode_to_wav directly and never enters AudioManager, so
+    # that setting does not apply here -- confirmed on a p150, where 55 MiB
+    # (above max_audio_size_bytes, below this cap) is accepted on both the
+    # base64 and media:// routes. Anyone tightening the audio limit for
+    # diarization wants this setting, not that one.
     #
     # Read off the downloader's own settings object rather than a fresh
     # import so the two cannot drift apart.
