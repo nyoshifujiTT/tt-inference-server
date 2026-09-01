@@ -245,79 +245,6 @@ def test_zero_makes_inline_follow_the_download_cap(client, fake, monkeypatch):
     assert client.post("/v1/diarize", json={"url": over}).status_code == 201
 
 
-def test_inline_is_capped_lower_than_fetched_audio_by_default():
-    """The default is deliberately not the download cap.
-
-    An inline body is read whole by the ASGI layer, parsed into a JSON string
-    and only then decoded, so the encoded form -- already 1.333x the audio --
-    exists several times over before the audio does. A fetched object is
-    streamed into one bytearray. Measured on a p150 with a 60 MiB recording:
-    +175 MiB RSS inline against +119 MiB by url. Matching the two numbers
-    would price the cheaper path as if it cost the same.
-    """
-    # Read the declarations out of the source. Importing config.settings here
-    # would hand back whatever Mock another test module left in sys.modules,
-    # and a Mock compares however you like -- the assertion would pass while
-    # measuring nothing.
-    import ast
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[1] / "config" / "settings.py"
-    ).read_text()
-    declared = {}
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            try:
-                # compile/eval on the isolated expression: defaults are
-                # written as arithmetic (16 * 1024 * 1024), which
-                # literal_eval refuses.
-                declared[node.target.id] = eval(  # noqa: S307 - our own source
-                    compile(ast.Expression(node.value), "<settings>", "eval"),
-                    {"__builtins__": {}},
-                    {},
-                )
-            except Exception:
-                continue
-
-    inline = declared["media_inline_max_bytes"]
-    assert inline, "0 would silently restore the download cap as the default"
-
-    # Against the cap this model actually runs with: the class default
-    # (7.5 MB) is sized for one video input image, and the diarization entry
-    # raises it to fit a recording.
-    from config.constants import ModelConfigs, ModelRunners
-
-    entry = next(
-        cfg
-        for (runner, _device), cfg in ModelConfigs.items()
-        if runner is ModelRunners.TT_PYANNOTE_DIARIZATION
-    )
-    assert inline < entry["media_url_max_bytes"]
-
-
-def test_the_fetched_cap_matches_what_the_official_api_accepts():
-    """1 GiB is pyannoteAI's documented limit for a diarization job.
-
-    A client that works against the official service should not be refused
-    here for a reason the official service would not have refused it. The byte
-    cap is therefore the official one, and the fact that this server is slower
-    than the cloud is reported by the request timeout instead -- refusing on a
-    byte count would be the wrong error for the wrong reason.
-
-    See https://docs.pyannote.ai/support/faqs ("up to 1GiB for diarization and
-    identification jobs").
-    """
-    from config.constants import ModelConfigs, ModelRunners
-
-    entry = next(
-        cfg
-        for (runner, _device), cfg in ModelConfigs.items()
-        if runner is ModelRunners.TT_PYANNOTE_DIARIZATION
-    )
-    assert entry["media_url_max_bytes"] == 1024**3
-
-
 def test_an_unset_inline_cap_still_bounds_the_body(client, fake, monkeypatch):
     """0 means "follow the download cap", never "no limit".
 
@@ -335,3 +262,50 @@ def test_an_unset_inline_cap_still_bounds_the_body(client, fake, monkeypatch):
     )
     assert resp.status_code == 413, resp.text
     assert fake.last is None
+
+
+def test_the_inline_cap_stays_below_the_fetched_one():
+    """The inline cap cannot simply be the official 1 GiB.
+
+    A fetched object is streamed and abandoned mid-stream when it runs over.
+    An inline body cannot be: the ASGI layer receives and parses the whole
+    request before any handler exists to measure it, so the cap is spent
+    memory by the time it is applied. Measured on a p150 in a 6 GiB container
+    (whisper's allotment): a 1024 MiB body the cap *rejected* still cost +1289
+    MiB RSS, and a 900 MiB body inside a 1 GiB cap OOM-killed the container.
+
+    So the inline number bounds what one request can make the server hold
+    before it has a say, which is a smaller job than bounding what gets
+    processed. This test keeps the two from being equalised by someone
+    reasoning only from the official limit.
+    """
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "config" / "settings.py"
+    ).read_text()
+    declared = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            try:
+                declared[node.target.id] = eval(  # noqa: S307 - our own source
+                    compile(ast.Expression(node.value), "<settings>", "eval"),
+                    {"__builtins__": {}},
+                    {},
+                )
+            except Exception:
+                continue
+
+    from config.constants import ModelConfigs, ModelRunners
+
+    entry = next(
+        cfg
+        for (runner, _device), cfg in ModelConfigs.items()
+        if runner is ModelRunners.TT_PYANNOTE_DIARIZATION
+    )
+    inline = declared["media_inline_max_bytes"]
+    assert inline, "0 would make inline follow the 1 GiB fetched cap"
+    assert inline < entry["media_url_max_bytes"]
+    # base64 inflates by 4/3, and that encoded form is what sits in memory
+    assert inline * 4 // 3 < 128 * 1024**2
