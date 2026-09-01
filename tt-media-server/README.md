@@ -507,6 +507,10 @@ The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a pub
 
 **The size cap is the same either way.** `media_url_max_bytes` (64 MiB for this model, ~35 minutes of 16 kHz mono) applies to the audio itself, not to how it travelled. Inline base64 is refused on the encoded length before it is decoded; a fetched object is refused on the declared `Content-Length` when the store sends one, and otherwise mid-stream once the bytes read pass the cap. Staging a file that is too large therefore does not get it through — the store accepts the upload, and the diarize call is refused a second time, from the downloader instead of the decoder. To go past the cap the operator has to raise `media_url_max_bytes`; there is no request-shaped way around it.
 
+*Why one number rather than a smaller inline budget:* the cap exists to bound what the decode-and-diarize pipeline is asked to hold, and that pipeline cannot tell how the bytes arrived. Two budgets would not give two controls — a caller refused on one route would simply use the other, so the larger number would be the real limit while both looked meaningful. It also matches the rest of the server: `AudioManager` checks `max_audio_size_bytes` *after* decoding, so a base64 body and a multipart upload are held to one number, and the video path picks the `media_url_max_bytes` default (7,500,000) precisely because it base64-encodes to `MAX_BASE64_IMAGE_LEN`, putting downloaded and inline images on the same ceiling. Note the *wire* cost still differs — 64 MiB of audio is ~85 MiB of base64 — so the cap is on the audio while the request body is a third larger.
+
+(The name is inherited: `media_url_max_bytes` was introduced for URL downloads. Diarization reuses it for inline audio deliberately, so raising it moves every route at once.)
+
 What actually differs:
 
 | | Inline base64 | `media://` (or `http(s)://`) |

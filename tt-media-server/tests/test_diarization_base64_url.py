@@ -145,6 +145,33 @@ def test_the_oversize_error_does_not_promise_a_url_would_get_through(
     assert "media_url_max_bytes" in detail
 
 
+def test_raising_the_cap_admits_audio_on_both_routes_at_once(client, fake, monkeypatch):
+    """One number governs both routes, so it moves for both at once.
+
+    The cap protects the pipeline that decodes and diarizes the audio, and that
+    pipeline cannot tell how the bytes arrived. Two budgets would mean the
+    larger one is the effective limit anyway -- a caller refused on one route
+    just uses the other -- while looking like two independent controls.
+
+    Sizes here straddle a cap of 32 so the same payload is refused before and
+    admitted after, without either assertion depending on the default value.
+    """
+    payload = b"x" * 48
+    encoded = base64.b64encode(payload).decode("ascii")
+
+    monkeypatch.setattr(settings, "media_url_max_bytes", 32, raising=False)
+    assert client.post("/v1/diarize", json={"url": encoded}).status_code == 413
+
+    # the downloader reads the very same setting for the url routes
+    from utils import media_downloader
+
+    assert media_downloader.settings is settings
+
+    monkeypatch.setattr(settings, "media_url_max_bytes", 4096, raising=False)
+    assert client.post("/v1/diarize", json={"url": encoded}).status_code == 201
+    assert bytes(fake.last.file) == payload
+
+
 def test_the_cap_is_checked_before_the_payload_is_decoded(client, fake, monkeypatch):
     """The pre-decode length check has to actually fire, otherwise an oversize
     body is materialised in memory first and the cap protects nothing."""

@@ -223,10 +223,24 @@ async def _fetch_audio(url: str) -> bytes:
             ),
         )
 
-    # The same cap the downloader enforces, read off the downloader's own
-    # settings object rather than a fresh import: how the bytes arrived should
-    # not change how many of them this server is willing to hold, and two
-    # imports could not drift apart.
+    # The same cap the downloader enforces, and deliberately so: the limit
+    # protects the pipeline that decodes and diarizes the audio, and that
+    # pipeline cannot tell how the bytes arrived. A separate inline budget
+    # would mean one number is the real one and the other is the number
+    # somebody forgot to change -- and whichever is larger becomes the
+    # effective limit, since a caller who is refused on one route just uses
+    # the other.
+    #
+    # This is how the rest of the server already behaves. AudioManager
+    # validates against max_audio_size_bytes after decoding, so a base64 body
+    # and a multipart upload are held to one number
+    # (utils/audio_manager.py:399). The video path is the same idea from the
+    # other direction: media_url_max_bytes defaults to 7,500,000 precisely
+    # because that base64-encodes to MAX_BASE64_IMAGE_LEN, so a downloaded
+    # image and an inline one land on the same ceiling.
+    #
+    # Read off the downloader's own settings object rather than a fresh
+    # import so the two cannot drift apart.
     max_bytes = media_downloader.settings.media_url_max_bytes
     if len(url) > _base64_len_for(max_bytes):
         raise HTTPException(
