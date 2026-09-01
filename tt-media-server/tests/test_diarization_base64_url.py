@@ -343,3 +343,22 @@ def test_the_caps_stay_inside_what_the_request_timeout_allows():
 
     assert entry["media_url_max_bytes"] < budget_bytes
     assert declared["media_inline_max_bytes"] < budget_bytes
+
+
+def test_an_unset_inline_cap_still_bounds_the_body(client, fake, monkeypatch):
+    """0 means "follow the download cap", never "no limit".
+
+    An unbounded request body is how a single client takes the service down:
+    with both caps raised to 1 TiB on a container limited to 8 GiB, a 3 GiB
+    inline body killed the server (OOMKilled, exit 137, no recovery). So the
+    opt-out has to fall back to the other cap rather than switching the check
+    off, and a payload over that cap must still be refused.
+    """
+    monkeypatch.setattr(settings, "media_inline_max_bytes", 0, raising=False)
+    monkeypatch.setattr(settings, "media_url_max_bytes", 32, raising=False)
+
+    resp = client.post(
+        "/v1/diarize", json={"url": base64.b64encode(b"x" * 128).decode("ascii")}
+    )
+    assert resp.status_code == 413, resp.text
+    assert fake.last is None
