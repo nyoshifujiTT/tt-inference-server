@@ -1215,12 +1215,26 @@ ModelConfigs = {
         "device_ids": DeviceIds.DEVICE_IDS_1.value,
         "max_batch_size": 1,
         # The server-wide default (7,500,000) is sized for one input image: it
-        # is what base64-encodes to the video request's MAX_BASE64_IMAGE_LEN. A
-        # recording does not fit in it -- 16 kHz mono 16-bit PCM is 1.92 MB per
-        # minute, so the default stops at four minutes of audio. 64 MiB carries
-        # a ~35-minute recording, which covers a meeting. Raised per model
-        # rather than globally so the image and video paths keep their own cap.
-        "media_url_max_bytes": 67_108_864,
+        # is what base64-encodes to the video request's MAX_BASE64_IMAGE_LEN,
+        # and a recording does not fit in it. Raised per model rather than
+        # globally so the image and video paths keep their own cap.
+        #
+        # 1 GiB is what the pyannoteAI cloud API accepts for a diarization job
+        # (https://docs.pyannote.ai/support/faqs), so a client that works
+        # against the official service is not refused here for a reason the
+        # official service would not have refused it.
+        #
+        # Note the byte cap is not the binding constraint at that size. The
+        # official service also allows 24 hours of audio, and this server
+        # cannot: at the measured ~18x realtime a p150 needs ~80 minutes for
+        # 24 hours, far past request_processing_timeout_seconds (1000 s, about
+        # 300 minutes of audio). Compressed audio in particular packs far more
+        # duration into the same bytes -- 1 GiB of ~100 kbps mp3 is the full 24
+        # hours -- so a long file inside this cap can still exceed the request
+        # deadline. That is the timeout's job to report, not the size check's:
+        # refusing a file the official API accepts, on a byte count, would be
+        # the wrong error for the wrong reason.
+        "media_url_max_bytes": 1_073_741_824,
     },
     (ModelRunners.TT_WHISPER, DeviceTypes.P300): {
         "device_mesh_shape": (1, 1),

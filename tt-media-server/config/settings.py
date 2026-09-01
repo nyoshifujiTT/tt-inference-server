@@ -165,10 +165,11 @@ class Settings(BaseSettings):
     #
     # Inline also holds that memory for the whole request, one connection at a
     # time, where staging moves the upload off the inference server entirely.
-    # 16 MiB is ~8 minutes of 16 kHz mono, which covers the clip-sized use the
-    # extension exists for; anything longer wants the url path, which is what
-    # the official API takes anyway. Set to 0 to follow media_url_max_bytes.
-    media_inline_max_bytes: int = 16 * 1024 * 1024
+    # 64 MiB keeps the base64 form (85 MiB) inside a whisper-sized 6 GiB
+    # allotment with room for concurrent requests. Anything larger wants the
+    # url path, which is the only form the official API accepts anyway. Set to
+    # 0 to follow media_url_max_bytes.
+    media_inline_max_bytes: int = 64 * 1024 * 1024
 
     # Object storage for the pyannoteAI two-step upload (media:// keys).
     # This server is only an S3 *client* here: it signs a PUT url and reads the
