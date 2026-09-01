@@ -154,14 +154,21 @@ class Settings(BaseSettings):
     media_url_timeout_seconds: float = 30.0
     media_url_max_redirects: int = 5
 
-    # Cap on audio sent inline in the request body, rather than fetched from a
-    # url. Separate from media_url_max_bytes because nothing is downloaded on
-    # that path: reusing the download cap made the limit on a base64 body
-    # respond to a setting whose name, docstring and every other reader are
-    # about URL fetches. Defaults to 0, meaning "follow media_url_max_bytes",
-    # so a deployment that tunes one number still gets one ceiling across
-    # every input route unless it deliberately asks for two.
-    media_inline_max_bytes: int = 0
+    # Cap on audio sent inline in the request body rather than fetched from a
+    # url. Deliberately lower than media_url_max_bytes, because the two paths
+    # do not cost the same. A fetched object is streamed into one bytearray,
+    # so the server holds roughly the audio. An inline body is read whole by
+    # the ASGI layer, parsed into a JSON string, and only then decoded, so the
+    # encoded form exists two or three times over at 1.333x the audio before
+    # the audio itself appears. Measured on a p150 with a 60 MiB recording:
+    # +175 MiB RSS inline against +119 MiB for the same audio by url.
+    #
+    # Inline also holds that memory for the whole request, one connection at a
+    # time, where staging moves the upload off the inference server entirely.
+    # 16 MiB is ~8 minutes of 16 kHz mono, which covers the clip-sized use the
+    # extension exists for; anything longer wants the url path, which is what
+    # the official API takes anyway. Set to 0 to follow media_url_max_bytes.
+    media_inline_max_bytes: int = 16 * 1024 * 1024
 
     # Object storage for the pyannoteAI two-step upload (media:// keys).
     # This server is only an S3 *client* here: it signs a PUT url and reads the

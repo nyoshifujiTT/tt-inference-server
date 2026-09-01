@@ -505,15 +505,15 @@ The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a pub
 
 ### Choosing between inline base64 and `media://`
 
-**The size cap is the same either way.** `media_url_max_bytes` (64 MiB for this model, ~35 minutes of 16 kHz mono) applies to the audio itself, not to how it travelled. Inline base64 is refused on the encoded length before it is decoded; a fetched object is refused on the declared `Content-Length` when the store sends one, and otherwise mid-stream once the bytes read pass the cap. Staging a file that is too large therefore does not get it through — the store accepts the upload, and the diarize call is refused a second time, from the downloader instead of the decoder. To go past the cap the operator has to raise `media_url_max_bytes`; there is no request-shaped way around it.
+**Both forms are capped, and inline is capped lower.** Fetched audio (`media://`, `http(s)://`) is bounded by `MEDIA_URL_MAX_BYTES` — 64 MiB for this model, ~35 minutes of 16 kHz mono. Inline base64 is bounded by `MEDIA_INLINE_MAX_BYTES`, 16 MiB (~8 minutes). Inline is refused on the encoded length before it is decoded; a fetched object is refused on the declared `Content-Length` when the store sends one, and otherwise mid-stream once the bytes read pass the cap. Neither limit can be dodged by switching form: staging an over-large file just moves the refusal from the decoder to the downloader.
 
-*Why one number rather than a smaller inline budget:* the cap exists to bound what the decode-and-diarize pipeline is asked to hold, and that pipeline cannot tell how the bytes arrived. Two budgets would not give two controls — a caller refused on one route would simply use the other, so the larger number would be the real limit while both looked meaningful. Note the *wire* cost still differs — 64 MiB of audio is 85.3 MiB of base64 — so the cap is on the audio while the request body is a third larger.
+*Why inline is held to less:* the two paths do not cost the server the same. A fetched object is streamed into a single buffer, so the server holds roughly the audio. An inline body is read whole by the ASGI layer, parsed into a JSON string, and only then decoded — so the encoded form, already 1.333× the audio, exists several times over before the audio itself appears. Measured on a p150 with a 60 MiB recording: **+175 MiB** RSS for the inline route against **+119 MiB** for the same audio by url. Inline also occupies that memory for the life of the request, whereas staging moves the upload off the inference server entirely.
 
-Inline audio has its own setting, `MEDIA_INLINE_MAX_BYTES`, which defaults to `0` meaning "follow `MEDIA_URL_MAX_BYTES`". Two settings rather than one because nothing is downloaded on the inline path: `media_url_max_bytes` is read by the URL downloader, and its name and documentation are about fetches, so having it silently govern a base64 body was misleading. Set `MEDIA_INLINE_MAX_BYTES` only to deliberately hold inline bodies to something tighter than fetched audio.
+16 MiB covers the clip-sized use the extension exists for. Longer audio wants the url path, which is what the official API takes anyway. Set `MEDIA_INLINE_MAX_BYTES=0` to opt out and follow `MEDIA_URL_MAX_BYTES` instead, if you would rather tune one number.
 
-*These are the only size limits on this path.* `max_audio_size_bytes` (50 MiB) is **not** a second, universal check underneath it: it is enforced by `AudioManager`, which only the transcription service goes through (`audio_service.py` → `to_audio_array` → `_validate_file_size`). `DiarizationService.pre_process` decodes with `decode_to_wav` directly and never enters `AudioManager`. Measured on a p150: a 55 MiB clip — above `max_audio_size_bytes`, below `media_url_max_bytes` — is accepted on both the base64 and `media://` routes. So to bound diarization audio, change `MEDIA_URL_MAX_BYTES`; changing `max_audio_size_bytes` affects transcription only.
+*These are the only size limits on this path.* `max_audio_size_bytes` (50 MiB) is **not** a second, universal check underneath it: it is enforced by `AudioManager`, which only the transcription service goes through (`audio_service.py` → `to_audio_array` → `_validate_file_size`). `DiarizationService.pre_process` decodes with `decode_to_wav` directly and never enters `AudioManager`. Measured on a p150: a 55 MiB clip — above `max_audio_size_bytes`, below `media_url_max_bytes` — is accepted via `media://`. So to bound diarization audio, change `MEDIA_URL_MAX_BYTES` and `MEDIA_INLINE_MAX_BYTES`; changing `max_audio_size_bytes` affects transcription only.
 
-With the default `MEDIA_INLINE_MAX_BYTES=0`, setting `MEDIA_URL_MAX_BYTES` moves every route at once — verified on a p150, where a 1 MiB cap refuses the same 3 MiB clip on both base64 and `media://`.
+Verified on a p150: with `MEDIA_INLINE_MAX_BYTES=1 MiB` a 3 MiB clip is refused as base64 and still accepted via `media://`, and with `MEDIA_URL_MAX_BYTES=1 MiB` the same clip is refused on both.
 
 What actually differs:
 
@@ -531,7 +531,7 @@ Prefer `media://` (or a plain `http(s)://` URL) — it is what the official API 
 
 | Parameter      | Required | Description |
 |----------------|----------|-------------|
-| `url`          | Yes      | Audio location: `http(s)://…` or `media://<object-key>`. Inline base64 audio is also accepted as a non-standard extension (not supported by pyannoteAI); same size cap either way. |
+| `url`          | Yes      | Audio location: `http(s)://…` or `media://<object-key>` (capped at 64 MiB). Inline base64 audio is also accepted as a non-standard extension (not supported by pyannoteAI), capped at 16 MiB. |
 | `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
 | `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
 | `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |

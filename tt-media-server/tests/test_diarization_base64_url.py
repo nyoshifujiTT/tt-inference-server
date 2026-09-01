@@ -119,8 +119,8 @@ def test_empty_base64_is_rejected(client, fake):
     assert fake.last is None
 
 
-def test_base64_obeys_the_same_byte_cap_as_a_download(client, fake, monkeypatch):
-    monkeypatch.setattr(settings, "media_url_max_bytes", 16, raising=False)
+def test_base64_is_capped(client, fake, monkeypatch):
+    monkeypatch.setattr(settings, "media_inline_max_bytes", 16, raising=False)
     oversize = base64.b64encode(b"x" * 64).decode("ascii")
     resp = client.post("/v1/diarize", json={"url": oversize})
     assert resp.status_code == 413, resp.text
@@ -137,7 +137,7 @@ def test_the_oversize_error_does_not_promise_a_url_would_get_through(
     caller stages a file, retries, and gets 413 a second time from a different
     code path. Point at the two things that do change the outcome.
     """
-    monkeypatch.setattr(settings, "media_url_max_bytes", 16, raising=False)
+    monkeypatch.setattr(settings, "media_inline_max_bytes", 16, raising=False)
     detail = client.post(
         "/v1/diarize", json={"url": base64.b64encode(b"x" * 64).decode("ascii")}
     ).json()["detail"]
@@ -145,29 +145,27 @@ def test_the_oversize_error_does_not_promise_a_url_would_get_through(
     assert "inline audio limit" in detail
 
 
-def test_raising_the_cap_admits_audio_on_both_routes_at_once(client, fake, monkeypatch):
-    """One number governs both routes, so it moves for both at once.
+def test_the_inline_cap_is_what_admits_or_refuses_a_base64_body(
+    client, fake, monkeypatch
+):
+    """Moving media_inline_max_bytes moves the inline limit, both ways.
 
-    The cap protects the pipeline that decodes and diarizes the audio, and that
-    pipeline cannot tell how the bytes arrived. Two budgets would mean the
-    larger one is the effective limit anyway -- a caller refused on one route
-    just uses the other -- while looking like two independent controls.
-
-    Sizes here straddle a cap of 32 so the same payload is refused before and
+    Sizes straddle a cap of 32 so the same payload is refused before and
     admitted after, without either assertion depending on the default value.
     """
     payload = b"x" * 48
     encoded = base64.b64encode(payload).decode("ascii")
 
-    monkeypatch.setattr(settings, "media_url_max_bytes", 32, raising=False)
+    monkeypatch.setattr(settings, "media_inline_max_bytes", 32, raising=False)
     assert client.post("/v1/diarize", json={"url": encoded}).status_code == 413
 
-    # the downloader reads the very same setting for the url routes
+    # the endpoint and the downloader share one settings object, so neither
+    # route can quietly acquire a limit the other cannot see
     from utils import media_downloader
 
     assert media_downloader.settings is settings
 
-    monkeypatch.setattr(settings, "media_url_max_bytes", 4096, raising=False)
+    monkeypatch.setattr(settings, "media_inline_max_bytes", 4096, raising=False)
     assert client.post("/v1/diarize", json={"url": encoded}).status_code == 201
     assert bytes(fake.last.file) == payload
 
@@ -175,7 +173,7 @@ def test_raising_the_cap_admits_audio_on_both_routes_at_once(client, fake, monke
 def test_the_cap_is_checked_before_the_payload_is_decoded(client, fake, monkeypatch):
     """The pre-decode length check has to actually fire, otherwise an oversize
     body is materialised in memory first and the cap protects nothing."""
-    monkeypatch.setattr(settings, "media_url_max_bytes", 16, raising=False)
+    monkeypatch.setattr(settings, "media_inline_max_bytes", 16, raising=False)
     with patch.object(
         base64, "b64decode", side_effect=AssertionError("decoded an oversize payload")
     ):
@@ -234,16 +232,9 @@ def test_inline_audio_has_its_own_setting_separate_from_the_download_cap(
     assert fake.last is None
 
 
-def test_inline_audio_follows_the_download_cap_until_told_otherwise(
-    client, fake, monkeypatch
-):
-    """Default 0 means "same ceiling as everything else".
-
-    Two independently-tuned numbers would be a trap: a caller refused inline
-    just uses a url, so the larger one is the real limit while both look
-    meaningful. Splitting the setting is about naming, not about handing out a
-    second budget by default.
-    """
+def test_zero_makes_inline_follow_the_download_cap(client, fake, monkeypatch):
+    """0 is the opt-out: one ceiling for every route, for a deployment that
+    would rather tune a single number."""
     monkeypatch.setattr(settings, "media_inline_max_bytes", 0, raising=False)
 
     monkeypatch.setattr(settings, "media_url_max_bytes", 32, raising=False)
@@ -252,3 +243,54 @@ def test_inline_audio_follows_the_download_cap_until_told_otherwise(
 
     monkeypatch.setattr(settings, "media_url_max_bytes", 4096, raising=False)
     assert client.post("/v1/diarize", json={"url": over}).status_code == 201
+
+
+def test_inline_is_capped_lower_than_fetched_audio_by_default():
+    """The default is deliberately not the download cap.
+
+    An inline body is read whole by the ASGI layer, parsed into a JSON string
+    and only then decoded, so the encoded form -- already 1.333x the audio --
+    exists several times over before the audio does. A fetched object is
+    streamed into one bytearray. Measured on a p150 with a 60 MiB recording:
+    +175 MiB RSS inline against +119 MiB by url. Matching the two numbers
+    would price the cheaper path as if it cost the same.
+    """
+    # Read the declarations out of the source. Importing config.settings here
+    # would hand back whatever Mock another test module left in sys.modules,
+    # and a Mock compares however you like -- the assertion would pass while
+    # measuring nothing.
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "config" / "settings.py"
+    ).read_text()
+    declared = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            try:
+                # compile/eval on the isolated expression: defaults are
+                # written as arithmetic (16 * 1024 * 1024), which
+                # literal_eval refuses.
+                declared[node.target.id] = eval(  # noqa: S307 - our own source
+                    compile(ast.Expression(node.value), "<settings>", "eval"),
+                    {"__builtins__": {}},
+                    {},
+                )
+            except Exception:
+                continue
+
+    inline = declared["media_inline_max_bytes"]
+    assert inline, "0 would silently restore the download cap as the default"
+
+    # Against the cap this model actually runs with: the class default
+    # (7.5 MB) is sized for one video input image, and the diarization entry
+    # raises it to fit a recording.
+    from config.constants import ModelConfigs, ModelRunners
+
+    entry = next(
+        cfg
+        for (runner, _device), cfg in ModelConfigs.items()
+        if runner is ModelRunners.TT_PYANNOTE_DIARIZATION
+    )
+    assert inline < entry["media_url_max_bytes"]

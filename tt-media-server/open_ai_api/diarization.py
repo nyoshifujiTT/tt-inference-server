@@ -224,21 +224,19 @@ async def _fetch_audio(url: str) -> bytes:
         )
 
     # Nothing is downloaded on this path, so the limit is media_inline_max_bytes
-    # rather than the downloader's media_url_max_bytes. It defaults to 0,
-    # meaning "use media_url_max_bytes", which keeps one ceiling across every
-    # input route: the cap bounds what the decode-and-diarize pipeline is asked
-    # to hold, and that pipeline cannot tell how the bytes arrived, so a
-    # caller refused on one route would otherwise just use the other and the
-    # larger number would silently be the real limit.
+    # rather than the downloader's media_url_max_bytes, and it is lower by
+    # default. The two routes do not cost the same: a fetched object is
+    # streamed into one bytearray, while an inline body is read whole by the
+    # ASGI layer, parsed into a JSON string, and only then decoded, so the
+    # encoded form exists several times over at 1.333x the audio before the
+    # audio itself appears. Measured on a p150 with a 60 MiB recording: +175
+    # MiB RSS inline against +119 MiB for the same audio by url.
     #
-    # The indirection exists because reusing media_url_max_bytes outright made
-    # a base64 body answer to a setting that upstream uses only inside
-    # download_media_url (see #4983, which added it for presigned I2V image
-    # URLs); its name and docstring are about URL fetches, and an operator
-    # reading either would not expect it to govern inline audio. Upstream
-    # keeps the two apart -- an inline image is bounded by
-    # MAX_BASE64_IMAGE_LEN on the pydantic field -- and this restores that
-    # separation while keeping the defaults tied.
+    # Reusing media_url_max_bytes also made a base64 body answer to a setting
+    # that upstream reads only inside download_media_url (#4983, added for
+    # presigned I2V image URLs); its name and docstring are about fetches.
+    # Upstream keeps the two apart -- an inline image is bounded by
+    # MAX_BASE64_IMAGE_LEN on the pydantic field -- and this restores that.
     #
     # Note this is the ONLY size limit on the diarization path.
     # settings.max_audio_size_bytes (50 MiB) belongs to AudioManager, which
