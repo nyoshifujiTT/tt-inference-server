@@ -12,10 +12,12 @@ import telemetry.multiprocess_setup  # noqa: F401  (import for side effect)
 import os
 from contextlib import asynccontextmanager
 
+from config.settings import settings
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from open_ai_api import api_router
 
+from open_ai_api.body_size_limit import BodySizeLimitMiddleware
 from open_ai_api.deprecation import DeprecatedPathMiddleware
 from resolver.service_resolver import service_resolver
 from telemetry.prometheus_metrics import PrometheusMetrics
@@ -49,6 +51,14 @@ prometheus_metrics.setup_metrics()
 
 app.include_router(api_router)
 app.add_middleware(DeprecatedPathMiddleware, sunset_date="2026-06-30")
+# Before the deprecation middleware in effect (Starlette runs the last-added
+# first), so an oversized body is refused while it is still on the client
+# rather than after the ASGI layer has buffered it. The limit is read per
+# request so an operator's setting applies without a restart.
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=lambda: settings.media_inline_max_bytes or settings.media_url_max_bytes,
+)
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")

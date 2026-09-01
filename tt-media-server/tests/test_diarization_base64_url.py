@@ -264,20 +264,15 @@ def test_an_unset_inline_cap_still_bounds_the_body(client, fake, monkeypatch):
     assert fake.last is None
 
 
-def test_the_inline_cap_stays_below_the_fetched_one():
-    """The inline cap cannot simply be the official 1 GiB.
+def test_both_caps_match_what_the_official_api_accepts():
+    """Neither input form is refused at a size the official service allows.
 
-    A fetched object is streamed and abandoned mid-stream when it runs over.
-    An inline body cannot be: the ASGI layer receives and parses the whole
-    request before any handler exists to measure it, so the cap is spent
-    memory by the time it is applied. Measured on a p150 in a 6 GiB container
-    (whisper's allotment): a 1024 MiB body the cap *rejected* still cost +1289
-    MiB RSS, and a 900 MiB body inside a 1 GiB cap OOM-killed the container.
-
-    So the inline number bounds what one request can make the server hold
-    before it has a say, which is a smaller job than bounding what gets
-    processed. This test keeps the two from being equalised by someone
-    reasoning only from the official limit.
+    pyannoteAI documents 1 GiB per diarization job
+    (https://docs.pyannote.ai/support/faqs). The inline cap can match it only
+    because BodySizeLimitMiddleware refuses an oversized body on its declared
+    Content-Length, before the ASGI layer buffers it -- without that, the cap
+    is applied after the memory is already spent (measured: a rejected 1 GiB
+    body still cost +1289 MiB RSS).
     """
     import ast
     from pathlib import Path
@@ -304,8 +299,6 @@ def test_the_inline_cap_stays_below_the_fetched_one():
         for (runner, _device), cfg in ModelConfigs.items()
         if runner is ModelRunners.TT_PYANNOTE_DIARIZATION
     )
-    inline = declared["media_inline_max_bytes"]
-    assert inline, "0 would make inline follow the 1 GiB fetched cap"
-    assert inline < entry["media_url_max_bytes"]
-    # base64 inflates by 4/3, and that encoded form is what sits in memory
-    assert inline * 4 // 3 < 128 * 1024**2
+    official = 1024**3
+    assert entry["media_url_max_bytes"] == official
+    assert declared["media_inline_max_bytes"] == official

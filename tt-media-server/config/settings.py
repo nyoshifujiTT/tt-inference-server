@@ -155,33 +155,23 @@ class Settings(BaseSettings):
     media_url_max_redirects: int = 5
 
     # Cap on audio sent inline in the request body rather than fetched from a
-    # url. Deliberately lower than media_url_max_bytes, because the two paths
-    # do not cost the same. A fetched object is streamed into one bytearray,
-    # so the server holds roughly the audio. An inline body is read whole by
-    # the ASGI layer, parsed into a JSON string, and only then decoded, so the
-    # encoded form exists two or three times over at 1.333x the audio before
-    # the audio itself appears. Measured on a p150 with a 60 MiB recording:
-    # +175 MiB RSS inline against +119 MiB for the same audio by url.
+    # url. Same 1 GiB the official pyannoteAI API allows for a diarization job,
+    # so neither input form is refused at a size the official service would
+    # have accepted.
     #
-    # Inline also holds that memory for the whole request, one connection at a
-    # time, where staging moves the upload off the inference server entirely.
+    # This is only safe because BodySizeLimitMiddleware refuses an oversized
+    # body on its declared Content-Length, before the ASGI layer receives it.
+    # Without that, an inline cap is spent memory by the time it is applied:
+    # measured on a p150, a 1 GiB body the endpoint *rejected* still cost +1289
+    # MiB RSS, and a 900 MiB one OOM-killed a 6 GiB container. With the
+    # middleware, a 900 MiB announced body against a 64 MiB limit costs +1 MiB
+    # instead of +894 MiB.
     #
-    # Why not the official 1 GiB here too: measured on a p150 in a 6 GiB
-    # container, the allotment the neighbouring whisper model gets. A 900 MiB
-    # inline body -- inside a 1 GiB cap -- reached the pipeline and the
-    # container was OOM-killed (uvicorn "Killed", exit 137). Worse, a 1024 MiB
-    # body that the cap *rejected* still cost +1289 MiB RSS: the ASGI layer has
-    # to receive and parse the body before any handler can measure it, so the
-    # cap cannot protect memory it has already been forced to allocate. That
-    # makes the inline cap a bound on what one request can make the server hold
-    # before it has any say, which is a different job from the fetched cap and
-    # needs a smaller number.
-    #
-    # 64 MiB is 85 MiB of base64, ~0.25 GiB peak against 4.4 GiB of headroom,
-    # so several concurrent requests still fit. Anything larger wants the url
-    # path, which is the only form the official API accepts anyway. Set to 0 to
-    # follow media_url_max_bytes.
-    media_inline_max_bytes: int = 64 * 1024 * 1024
+    # An accepted 1 GiB body is still ~1.33 GiB of base64 resident while it is
+    # decoded, so a deployment with a tight memory allotment should lower this;
+    # it is the one input that cannot be streamed. Set to 0 to follow
+    # media_url_max_bytes.
+    media_inline_max_bytes: int = 1024 * 1024 * 1024
 
     # Object storage for the pyannoteAI two-step upload (media:// keys).
     # This server is only an S3 *client* here: it signs a PUT url and reads the
