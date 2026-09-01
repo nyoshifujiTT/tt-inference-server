@@ -13,9 +13,6 @@ FROM ${TT_METAL_DOCKERFILE_URL} AS builder
 # Build arguments
 ARG TT_METAL_COMMIT_SHA_OR_TAG
 ARG TT_VLLM_COMMIT_SHA_OR_TAG
-# Where to clone vLLM from. Overridable so a bring-up can build an image from a
-# fork branch whose commits are not (yet) on tenstorrent/vllm.
-ARG TT_VLLM_REPO_URL=https://github.com/tenstorrent/vllm.git
 ARG TT_SMI_COMMIT_SHA_OR_TAG=v3.1.1
 ARG CONTAINER_APP_UID=1000
 ARG DEBIAN_FRONTEND=noninteractive
@@ -32,7 +29,7 @@ ENV TT_METAL_COMMIT_SHA_OR_TAG=${TT_METAL_COMMIT_SHA_OR_TAG} \
     CONFIG=Release \
     TT_METAL_ENV=dev \
     VLLM_TARGET_DEVICE="tt" \
-    vllm_dir=${HOME_DIR}/vllm \
+    vllm_tt_plugin_dir=${HOME_DIR}/vllm-tt-plugin \
     TT_SMI_DIR=${HOME_DIR}/tt-smi \
     LOGURU_LEVEL=INFO \
     # Rust build dependencies, for backward compatibility with tt-metal 
@@ -93,40 +90,32 @@ RUN /bin/bash -c "git clone ${TT_METAL_REPO_URL} ${TT_METAL_HOME} \
     && if [ -f 'models/demos/qwen25_vl/requirements.txt' ]; then uv pip install -r models/demos/qwen25_vl/requirements.txt; fi \
     && rm -rf ${TT_METAL_HOME}/.git"
 
-# Build vllm - clone with minimal history and clean
-# Use uv pip to match tt-metal's package manager (see tt-metal commit 29d59d1)
-# Use --index-strategy unsafe-best-match to allow uv to find packages across all indexes
-# Build with VLLM_TARGET_DEVICE=empty, NOT the image-wide "tt": since
-# tenstorrent/vllm ae0f073 ("Fully separate TT code to vllm_tt_plugin") the
-# fork's setup.py only knows empty/cuda/hip/tpu/cpu/xpu, so "tt" falls through
-# to `raise RuntimeError("Unknown runtime environment")` in get_vllm_version().
-# "tt" remains the correct *runtime* platform value (the TT platform is supplied
-# by the plugin), so the ENV above is intentionally left as-is.
-# The fork-bundled plugins/vllm-tt-plugin must be installed right after vLLM:
-# it owns the "vllm.platform_plugins" entry point that registers the tt
-# platform. Without it the server dies at startup with
-# "RuntimeError: Failed to infer device type". It is installed after (not with)
-# vLLM on purpose - the plugin deliberately does not declare vllm as a
-# dependency, so that resolution can never swap the locally built empty-target
-# vLLM for the CUDA wheel on PyPI.
-# torchaudio is installed explicitly because the empty target resolves
-# requirements/common.txt, which omits it (only cpu/cuda/rocm/xpu list it), yet
-# vllm/transformers_utils/processors/__init__.py imports funasr_processor
-# unconditionally, and that module imports torchaudio at module scope. Without
-# it every model-architecture inspection fails with
-# "ModuleNotFoundError: No module named 'torchaudio'", so even non-FunASR models
-# (here Qwen3-ASR) cannot be resolved. Pin it to the torch already installed by
-# tt-metal so resolution cannot pull a different torch build.
-RUN /bin/bash -c "git clone ${TT_VLLM_REPO_URL} ${vllm_dir} \
-    && cd ${vllm_dir} \
+# Build vllm-tt-plugin - clone with minimal history and clean.
+# The plugin owns the vLLM version pin and its dependency overrides, so the
+# install is delegated to its own docs/install-vllm-tt.sh rather than restated
+# here. TT_VLLM_COMMIT_SHA_OR_TAG therefore names a *plugin* commit, matching
+# what tt-inference-server main does.
+#
+# This replaces an earlier bring-up shape that cloned the tenstorrent/vllm fork
+# and installed its bundled plugins/vllm-tt-plugin. Every Qwen3-ASR change that
+# lived on the fork branch has an equivalent on the standalone plugin (audio +
+# transcription wiring, execute_model error surfacing, TT adapter registration,
+# forced eager execution), and the fork's HF-config fix is already in the
+# vllm==0.24.0 release the plugin pins, so nothing is lost by dropping it.
+#
+# The torchaudio install the fork shape needed is gone on purpose: it existed
+# because vllm/transformers_utils/processors/__init__.py used to import
+# funasr_processor (and thus torchaudio) unconditionally. vLLM 0.24.0 imports
+# processors lazily via __getattr__, and install-vllm-tt.sh actively uninstalls
+# torchaudio because the CUDA wheel cannot load next to the CPU torch that
+# tt-metal installs.
+RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
+    && cd ${vllm_tt_plugin_dir} \
     && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
     && source ${PYTHON_ENV_DIR}/bin/activate \
     && uv pip install --upgrade pip \
-    && VLLM_TARGET_DEVICE=empty uv pip install --index-strategy unsafe-best-match -e . --extra-index-url https://download.pytorch.org/whl/cpu \
-    && uv pip install --index-strategy unsafe-best-match -e plugins/vllm-tt-plugin --extra-index-url https://download.pytorch.org/whl/cpu \
-    && TORCH_VERSION=\$(python -c 'import torch, sys; sys.stdout.write(torch.__version__.split(chr(43))[0])') \
-    && uv pip install --index-strategy unsafe-best-match torchaudio==\${TORCH_VERSION} --extra-index-url https://download.pytorch.org/whl/cpu \
-    && rm -rf ${vllm_dir}/.git"
+    && source docs/install-vllm-tt.sh \
+    && rm -rf ${vllm_tt_plugin_dir}/.git"
 
 # Build tt-smi in separate venv to avoid conflicts with tt-metal venv
 RUN /bin/bash -c "git clone https://github.com/tenstorrent/tt-smi.git ${TT_SMI_DIR} \
@@ -165,7 +154,7 @@ ENV TT_METAL_COMMIT_SHA_OR_TAG=${TT_METAL_COMMIT_SHA_OR_TAG} \
     CONFIG=Release \
     TT_METAL_ENV=dev \
     VLLM_TARGET_DEVICE="tt" \
-    vllm_dir=${HOME_DIR}/vllm \
+    vllm_tt_plugin_dir=${HOME_DIR}/vllm-tt-plugin \
     TT_SMI_DIR=${HOME_DIR}/tt-smi \
     LOGURU_LEVEL=INFO \
     TT_METAL_LOGS_PATH=${HOME_DIR}/logs
@@ -205,9 +194,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder --chown=${CONTAINER_APP_USERNAME}:${CONTAINER_APP_USERNAME} \
     ${TT_METAL_HOME} ${TT_METAL_HOME}
 
-# Copy complete vllm installation  
+# Copy the vllm-tt-plugin source tree. This is the editable-install target, so
+# it must land at the same absolute path as in the builder or the .pth link
+# breaks. vLLM itself needs no COPY of its own: it is a regular (non-editable)
+# install inside ${PYTHON_ENV_DIR}/site-packages, already copied with
+# TT_METAL_HOME above.
 COPY --from=builder --chown=${CONTAINER_APP_USERNAME}:${CONTAINER_APP_USERNAME} \
-    ${vllm_dir} ${vllm_dir}
+    ${vllm_tt_plugin_dir} ${vllm_tt_plugin_dir}
 
 # Copy complete tt-smi installation  
 COPY --from=builder --chown=${CONTAINER_APP_USERNAME}:${CONTAINER_APP_USERNAME} \

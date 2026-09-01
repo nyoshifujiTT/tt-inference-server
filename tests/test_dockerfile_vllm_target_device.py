@@ -2,14 +2,17 @@
 #
 # SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
 
-"""Guards the VLLM_TARGET_DEVICE value used to build vLLM in the dev image.
+"""Guards how the dev image obtains vLLM and the TT platform.
 
-Since tenstorrent/vllm ae0f073 ("Fully separate TT code to vllm_tt_plugin") the
-fork's setup.py only recognises empty/cuda/hip/tpu/cpu/xpu. Building with the
-image-wide VLLM_TARGET_DEVICE="tt" makes get_vllm_version() fall through to
-`raise RuntimeError("Unknown runtime environment")`, which breaks the whole dev
-image build. The build step must therefore override it to "empty", while the
-runtime ENV stays "tt" (the TT platform is provided by the plugin at runtime).
+The image installs the standalone ``tenstorrent/vllm-tt-plugin``, which owns the
+vLLM version pin and its dependency overrides in ``docs/install-vllm-tt.sh``.
+``TT_VLLM_COMMIT_SHA_OR_TAG`` therefore names a *plugin* commit.
+
+An earlier bring-up shape cloned the ``tenstorrent/vllm`` fork instead and
+installed its bundled ``plugins/vllm-tt-plugin``. These tests keep that shape
+from creeping back: the fork carried no Qwen3-ASR change that the standalone
+plugin lacks, and restating the install here would duplicate (and drift from)
+the pin the plugin owns.
 """
 
 import re
@@ -24,11 +27,12 @@ DOCKERFILE = (
 def _vllm_install_step() -> str:
     text = DOCKERFILE.read_text()
     match = re.search(
-        r"RUN /bin/bash -c \"git clone \$\{TT_VLLM_REPO_URL\}.*?\"\n",
+        r"RUN /bin/bash -c \"git clone "
+        r"https://github\.com/tenstorrent/vllm-tt-plugin\.git.*?\"\n",
         text,
         re.DOTALL,
     )
-    assert match, "vLLM install RUN step not found in dev Dockerfile"
+    assert match, "vllm-tt-plugin install RUN step not found in dev Dockerfile"
     return match.group(0)
 
 
@@ -43,11 +47,21 @@ def _tt_metal_build_step() -> str:
     return match.group(0)
 
 
-def test_vllm_editable_install_forces_empty_target_device():
+def test_vllm_install_is_delegated_to_the_plugin_script():
+    """The plugin owns the vLLM pin; the Dockerfile must not restate it.
+
+    ``docs/install-vllm-tt.sh`` installs ``vllm==0.24.0`` with
+    ``VLLM_TARGET_DEVICE=empty`` and removes the unusable torchaudio wheel.
+    Spelling any of that out here would let the two drift apart.
+    """
     step = _vllm_install_step()
-    assert "VLLM_TARGET_DEVICE=empty uv pip install" in step, (
-        "vLLM must be built with VLLM_TARGET_DEVICE=empty; 'tt' is not a valid "
-        "build target in tenstorrent/vllm setup.py"
+    assert "source docs/install-vllm-tt.sh" in step, (
+        "the vLLM install must be delegated to the plugin's install script"
+    )
+    tail = step.split("install-vllm-tt.sh", 1)[1]
+    assert "uv pip install" not in tail, (
+        "nothing may be installed after the plugin script; it owns the "
+        "resolved environment"
     )
 
 
@@ -59,51 +73,66 @@ def test_runtime_target_device_stays_tt():
     )
 
 
-def test_tt_plugin_is_installed_after_vllm():
-    """The tt platform comes from the fork-bundled plugin, not from vLLM core.
+def test_the_tt_platform_comes_from_the_standalone_plugin():
+    """The tt platform is advertised by the plugin's entry point.
 
-    Without this install the container starts and then dies with
-    "RuntimeError: Failed to infer device type", because no
-    "vllm.platform_plugins" entry point advertises the tt platform.
+    Without the plugin installed the container starts and then dies with
+    "RuntimeError: Failed to infer device type".
     """
     step = _vllm_install_step()
-    assert "-e plugins/vllm-tt-plugin" in step, (
-        "the fork-bundled vllm-tt-plugin must be installed in the dev image"
+    assert "vllm-tt-plugin.git ${vllm_tt_plugin_dir}" in step, (
+        "the standalone tenstorrent/vllm-tt-plugin must be cloned"
     )
-    assert step.index("VLLM_TARGET_DEVICE=empty uv pip install") < step.index(
-        "-e plugins/vllm-tt-plugin"
-    ), "the plugin must be installed after vLLM so resolution cannot replace it"
+    assert "git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG}" in step, (
+        "TT_VLLM_COMMIT_SHA_OR_TAG must pin the plugin commit"
+    )
 
 
-def test_vllm_repo_url_is_overridable_and_defaults_to_tenstorrent():
-    """A bring-up must be able to build from a fork branch.
+def test_the_vllm_fork_is_not_cloned():
+    """The fork shape must not come back.
 
-    The commits of an in-flight bring-up are not on tenstorrent/vllm yet, so the
-    clone URL has to be a build arg; the default must stay tenstorrent/vllm so
-    ordinary builds are unchanged.
+    Every Qwen3-ASR change that lived on the fork branch has an equivalent on
+    the standalone plugin, and the fork's HF-config fix ships in the
+    vllm==0.24.0 release the plugin pins.
     """
     text = DOCKERFILE.read_text()
-    assert (
-        "ARG TT_VLLM_REPO_URL=https://github.com/tenstorrent/vllm.git" in text
-    ), "TT_VLLM_REPO_URL must exist and default to tenstorrent/vllm"
-    assert "git clone ${TT_VLLM_REPO_URL}" in _vllm_install_step(), (
-        "the clone must honour TT_VLLM_REPO_URL instead of hardcoding the URL"
+    assert "TT_VLLM_REPO_URL" not in text, (
+        "no build arg may redirect a vLLM clone; the plugin owns the vLLM pin"
+    )
+    assert "tenstorrent/vllm.git" not in text, "the vLLM fork must not be cloned"
+    assert "-e plugins/vllm-tt-plugin" not in text, (
+        "the fork-bundled plugin copy must not be installed"
     )
 
 
-def test_torchaudio_is_installed_and_pinned_to_the_installed_torch():
-    """The empty target does not pull torchaudio, but vLLM imports it anyway.
+def test_torchaudio_is_not_reinstalled_behind_the_plugin_script():
+    """The plugin script uninstalls torchaudio on purpose.
 
-    vllm/transformers_utils/processors/__init__.py imports funasr_processor
-    unconditionally and that module imports torchaudio at module scope, so
-    without it *every* architecture inspection fails with
-    "ModuleNotFoundError: No module named 'torchaudio'".
+    Its CUDA wheel cannot load next to the CPU torch tt-metal installs, and
+    transformers>=5.12 imports it if it is merely present. An earlier shape
+    installed it explicitly because vLLM used to import funasr_processor (and
+    thus torchaudio) unconditionally; vLLM 0.24.0 imports processors lazily via
+    ``__getattr__``, so that reason is gone.
     """
-    step = _vllm_install_step()
-    assert "torchaudio==" in step, "torchaudio must be installed explicitly"
-    assert "TORCH_VERSION" in step, (
-        "torchaudio must be pinned to the torch tt-metal already installed, so "
-        "resolution cannot swap in a different torch build"
+    text = DOCKERFILE.read_text()
+    assert "torchaudio" not in _vllm_install_step(), (
+        "torchaudio must not be reinstalled after install-vllm-tt.sh removed it"
+    )
+    assert "TORCH_VERSION" not in text
+
+
+def test_the_plugin_source_tree_is_copied_into_the_runtime_stage():
+    """The plugin is an editable install, so its tree must survive the copy.
+
+    It has to land at the same absolute path as in the builder or the .pth link
+    dangles and ``import vllm_tt_plugin`` fails at runtime.
+    """
+    text = DOCKERFILE.read_text()
+    assert "${vllm_tt_plugin_dir} ${vllm_tt_plugin_dir}" in text, (
+        "the vllm-tt-plugin tree must be COPYed to the same path"
+    )
+    assert "${vllm_dir} ${vllm_dir}" not in text, (
+        "the fork's vLLM tree must no longer be copied"
     )
 
 
