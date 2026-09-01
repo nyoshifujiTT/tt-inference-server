@@ -77,10 +77,7 @@ RUN /bin/bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
     && rustup update"
 
 # Build tt-metal - clone with minimal history, build, and clean
-# Declared here (not with the other ARGs) so overriding it does not invalidate
-# the build cache of every preceding layer.
-ARG TT_METAL_REPO_URL=https://github.com/tenstorrent-metal/tt-metal.git
-RUN /bin/bash -c "git clone ${TT_METAL_REPO_URL} ${TT_METAL_HOME} \
+RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${TT_METAL_HOME} \
     && cd ${TT_METAL_HOME} \
     && git checkout ${TT_METAL_COMMIT_SHA_OR_TAG} \
     && git submodule update --init --recursive \

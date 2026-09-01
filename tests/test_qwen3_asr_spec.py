@@ -259,7 +259,7 @@ def test_the_readme_documents_the_unpushed_branch_path():
     readme = open(
         os.path.join(os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "README.md")
     ).read()
-    assert "If the branch is not pushed yet" in readme
+    assert "If a branch is not pushed yet" in readme
     assert "git daemon" in readme, "the loopback-serving workaround must be spelled out"
     assert "git://172.17.0.1:9418" in readme, "the URL that was actually used must be shown"
     assert "Push the branch and drop this step" in readme, (
@@ -281,4 +281,57 @@ def test_the_current_pin_is_not_itself_listed_as_superseded():
     pinned = re.search(r'tt_metal_commit="([0-9a-f]{7,})"', window).group(1)
     assert pinned not in SUPERSEDED_TT_METAL_COMMITS, (
         f"the active pin {pinned} is listed as superseded"
+    )
+
+
+def test_the_readme_patch_applies_to_the_committed_dockerfile():
+    """A runbook patch that does not apply is worse than no runbook.
+
+    An earlier bring-up shipped a patch whose line numbers had drifted after an
+    upstream merge, so the documented build failed with "patch does not apply".
+    Extract the block the README tells the reader to pipe into `git apply` and
+    check it against the tree.
+    """
+    import re
+    import subprocess
+
+    readme = _readme()
+    match = re.search(r"git apply <<'PATCH'\n(.*?)\nPATCH\n", readme, re.DOTALL)
+    assert match, "the README must carry the clone-URL patch as a git apply block"
+    patch = match.group(1) + "\n"
+
+    root = os.path.join(os.path.dirname(__file__), "..")
+    result = subprocess.run(
+        ["git", "apply", "--check", "-"],
+        input=patch,
+        text=True,
+        cwd=root,
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        f"the README patch does not apply to the committed tree: {result.stderr}"
+    )
+
+
+def test_the_readme_patch_redirects_both_clones_to_the_forks():
+    """Either half missing produces an image that cannot serve the model."""
+    readme = _readme()
+    assert "nyoshifujiTT/tt-metal.git" in readme, (
+        "without the tt-metal half the image lacks the vLLM adapter"
+    )
+    assert "nyoshifujiTT/vllm-tt-plugin.git" in readme, (
+        "without the plugin half the TT adapter is never registered"
+    )
+
+
+def test_the_readme_says_the_patch_is_the_only_one():
+    """The pins are committed source; nothing under workflows/ is touched."""
+    readme = _readme()
+    assert "The one manual patch" in readme
+    assert "git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile" in readme, (
+        "the patch must be restored after the build, as PR#4837 does"
+    )
+    assert "no build arg" in readme, (
+        "record that clone-URL build args were withdrawn, so they are not "
+        "reintroduced as a shortcut"
     )

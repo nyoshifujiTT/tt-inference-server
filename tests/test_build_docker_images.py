@@ -354,13 +354,14 @@ class TestLogResourceSummary:
         assert "below the minimum per-build requirement" in caplog.text
 
 
-class TestDevImageRepoUrlOverrides:
-    """Only tt-metal's clone URL is overridable.
+class TestDevImageClonesAreNotOverridable:
+    """No build arg may redirect a clone.
 
-    The dev image installs the standalone ``tenstorrent/vllm-tt-plugin``, which
-    owns the vLLM pin, so there is nothing for a ``TT_VLLM_REPO_URL`` to
-    redirect. An earlier bring-up shape cloned the ``tenstorrent/vllm`` fork and
-    needed one; that shape is gone.
+    The recipe for a bring-up whose commits are not upstream yet is the one
+    PR#4837 established: patch the clone URL line with ``git apply``, build,
+    then ``git checkout`` to restore it. Build args that quietly redirect a
+    clone were tried during bring-up and withdrawn -- they make an image that
+    looks like it came from the committed Dockerfile when it did not.
     """
 
     def _build_command(self, env):
@@ -385,26 +386,23 @@ class TestDevImageRepoUrlOverrides:
             )
         return captured["command"]
 
-    def test_tt_metal_repo_url_is_forwarded_when_set(self):
+    def test_no_repo_url_build_arg_is_forwarded(self):
         command = self._build_command(
-            {"TT_METAL_REPO_URL": "https://example.invalid/tt-metal.git"}
+            {
+                "TT_METAL_REPO_URL": "https://example.invalid/tt-metal.git",
+                "TT_VLLM_REPO_URL": "https://example.invalid/vllm.git",
+            }
         )
-        assert (
-            "TT_METAL_REPO_URL=https://example.invalid/tt-metal.git" in command
-        ), "a bring-up must be able to point the clone at its tt-metal fork"
+        for name in ("TT_METAL_REPO_URL", "TT_VLLM_REPO_URL"):
+            assert not any(name in str(arg) for arg in command), (
+                f"{name} must not be forwarded: the Dockerfile declares no such "
+                "ARG, and redirecting a clone belongs in a git apply patch"
+            )
 
-    def test_no_vllm_repo_url_is_forwarded(self):
-        command = self._build_command(
-            {"TT_VLLM_REPO_URL": "https://example.invalid/vllm.git"}
-        )
-        assert not any("TT_VLLM_REPO_URL" in str(arg) for arg in command), (
-            "TT_VLLM_REPO_URL must not be forwarded: the Dockerfile no longer "
-            "clones vLLM, so the build arg would fail as an unknown ARG"
-        )
-
-    def test_the_plugin_commit_is_still_pinned(self):
+    def test_the_pinned_commits_are_still_passed(self):
         command = self._build_command({})
+        assert "TT_METAL_COMMIT_SHA_OR_TAG=deadbee" in command
         assert "TT_VLLM_COMMIT_SHA_OR_TAG=cafe123" in command, (
-            "TT_VLLM_COMMIT_SHA_OR_TAG now names the vllm-tt-plugin commit and "
-            "must still be passed"
+            "TT_VLLM_COMMIT_SHA_OR_TAG names the vllm-tt-plugin commit and must "
+            "still be passed"
         )

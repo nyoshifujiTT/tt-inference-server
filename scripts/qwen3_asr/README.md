@@ -43,9 +43,8 @@ If that prints anything, bump the pin and rebuild.
 
 ### 2. Dev image (from the bring-up forks)
 
-The spec pins the bring-up branch heads, which live on the forks until they land
-upstream, so both clone URLs have to be overridden. Every repository in this
-bring-up uses the same branch name:
+The spec pins the bring-up branch heads, which live on forks until they land
+upstream. Every repository in this bring-up uses the same branch name:
 
 | repository | branch | pinned commit |
 |---|---|---|
@@ -57,17 +56,56 @@ to *contain* it. The pins live in `workflows/model_spec.py`; this old spec
 format keeps every model's commits there directly, so the Qwen3-ASR entry is
 ordinary committed source and needs no build-time patching.
 
+#### The one manual patch
+
+The committed Dockerfile always clones upstream, so the two clone URLs are the
+only thing that has to change while the commits are on forks. Apply the patch,
+build, then restore -- the recipe PR#4837 established:
+
 ```
 cd $TT_INFERENCE_SERVER
-TT_METAL_REPO_URL=https://github.com/nyoshifujiTT/tt-metal.git \
-  python3 scripts/build_docker_images.py --build-metal-commit 3b1b9ad --single-threaded
+git apply <<'PATCH'
+diff --git a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile b/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
+--- a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
++++ b/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
+@@ -77,7 +77,7 @@ RUN /bin/bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+     && rustup update"
+ 
+ # Build tt-metal - clone with minimal history, build, and clean
+-RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${TT_METAL_HOME} \
++RUN /bin/bash -c "git clone https://github.com/nyoshifujiTT/tt-metal.git ${TT_METAL_HOME} \
+     && cd ${TT_METAL_HOME} \
+     && git checkout ${TT_METAL_COMMIT_SHA_OR_TAG} \
+     && git submodule update --init --recursive \
+@@ -106,7 +106,7 @@ RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${
+ # processors lazily via __getattr__, and install-vllm-tt.sh actively uninstalls
+ # torchaudio because the CUDA wheel cannot load next to the CPU torch that
+ # tt-metal installs.
+-RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
++RUN /bin/bash -c "git clone https://github.com/nyoshifujiTT/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
+     && cd ${vllm_tt_plugin_dir} \
+     && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
+     && source ${PYTHON_ENV_DIR}/bin/activate \
+PATCH
+
+python3 scripts/build_docker_images.py --build-metal-commit 3b1b9ad --single-threaded
+
+git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 ```
 
-Without `TT_METAL_REPO_URL` the image lacks the vLLM adapter and the server dies
-with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`.
+This is the *only* manual patch. The pins are committed source and the image is
+supplied to `run.py` with `--override-docker-image`, so nothing in
+`workflows/` is touched.
 
-The plugin clone URL is not a build arg, so pointing it at the fork needs the
-temporary patch below.
+Without the tt-metal half the image lacks the vLLM adapter and the server dies
+with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`.
+Without the plugin half it lacks the TT adapter registration and the engine
+fails to resolve the architecture. Both halves disappear once the commits are
+upstream: then the pins alone are enough.
+
+There is deliberately no build arg for either URL. Build args for exactly this
+were added earlier in the bring-up and withdrawn: they let an image built from
+a fork look as though it came from the committed Dockerfile.
 
 #### What `vllm_commit` names
 
@@ -84,12 +122,12 @@ audio/transcription wiring in `TTModelRunner`, surfacing the real
 ordering `thinker_config` before `super().__init__()` in the HF config -- ships
 in the `vllm==0.24.0` release the plugin pins.
 
-#### If the branch is not pushed yet
+#### If a branch is not pushed yet
 
-The commands above assume the pinned commits are reachable on the forks. While
-the bring-up branch only exists locally, serve it over the loopback instead of
-pushing -- the build still performs an ordinary `git clone`, only the URL
-differs:
+The patch above assumes the pinned commits are reachable on the forks. While a
+branch only exists locally, serve it over the loopback and point that half of
+the patch at it instead -- the build still performs an ordinary `git clone`,
+only the URL differs:
 
 ```
 # once, on the docker host
@@ -97,14 +135,12 @@ git clone --bare <local tt-metal checkout> /tmp/ttmetal-src.git
 cd /tmp/ttmetal-src.git && git update-server-info
 git daemon --reuseaddr --base-path=/tmp --export-all --enable=upload-pack \
   --listen=0.0.0.0 --port=9418 &
-
-# then build against it (172.17.0.1 is the docker0 gateway)
-TT_METAL_REPO_URL=git://172.17.0.1:9418/ttmetal-src.git \
-  python3 scripts/build_docker_images.py --build-metal-commit <pin> --single-threaded
 ```
 
-Push the branch and drop this step before handing the recipe over: an image
-built from a daemon on one host is not reproducible by anyone else.
+Then use `git://172.17.0.1:9418/ttmetal-src.git` (172.17.0.1 is the docker0
+gateway) as the tt-metal URL in the patch. Push the branch and drop this step
+before handing the recipe over: an image built from a daemon on one host is not
+reproducible by anyone else.
 
 Disk: the dev image is ~21 GB and a rebuild keeps the previous generation until
 it is replaced, so keep at least 60 GB free.

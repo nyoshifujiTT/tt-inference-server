@@ -39,7 +39,8 @@ def _vllm_install_step() -> str:
 def _tt_metal_build_step() -> str:
     text = DOCKERFILE.read_text()
     match = re.search(
-        r"RUN /bin/bash -c \"git clone \$\{TT_METAL_REPO_URL\}.*?\"\n",
+        r"RUN /bin/bash -c \"git clone "
+        r"https://github\.com/tenstorrent-metal/tt-metal\.git.*?\"\n",
         text,
         re.DOTALL,
     )
@@ -136,34 +137,27 @@ def test_the_plugin_source_tree_is_copied_into_the_runtime_stage():
     )
 
 
-def test_tt_metal_repo_url_is_overridable_and_defaults_upstream():
-    """Model code for a bring-up can live only on a tt-metal fork.
+def test_no_clone_url_is_a_build_arg():
+    """Redirecting a clone belongs in a temporary patch, not a build arg.
 
-    Qwen3-ASR's vLLM adapter (models/demos/audio/qwen3_asr/tt/generator_vllm.py)
-    is not on the pinned upstream commit, so a hardcoded clone URL makes the
-    server fail with
-    "ModuleNotFoundError: No module named
-    'models.demos.audio.qwen3_asr.tt.generator_vllm'".
+    A bring-up whose commits are not upstream yet follows the recipe PR#4837
+    established: ``git apply`` the clone-URL line, build, then ``git checkout``
+    to restore it. Build args for this were added during bring-up and
+    withdrawn -- they let an image that came from a fork claim to have come
+    from the committed Dockerfile.
     """
     text = DOCKERFILE.read_text()
+    for arg in ("TT_METAL_REPO_URL", "TT_VLLM_REPO_URL"):
+        assert arg not in text, f"{arg} must not exist; patch the clone instead"
+
+
+def test_the_clone_urls_are_the_upstream_ones():
+    """The committed Dockerfile must always describe an upstream build."""
+    step = _tt_metal_build_step()
     assert (
-        "ARG TT_METAL_REPO_URL=https://github.com/tenstorrent-metal/tt-metal.git"
-        in text
-    ), "TT_METAL_REPO_URL must exist and keep the upstream default"
-    assert "git clone ${TT_METAL_REPO_URL}" in _tt_metal_build_step()
-
-
-def test_tt_metal_repo_url_arg_is_declared_late_to_preserve_cache():
-    """Declaring the ARG up top would bust the cache of every preceding layer.
-
-    tt-metal's C++ build takes hours, so the ARG must sit immediately before the
-    step that uses it.
-    """
-    text = DOCKERFILE.read_text()
-    arg_pos = text.index("ARG TT_METAL_REPO_URL=")
-    metal_clone_pos = text.index("git clone ${TT_METAL_REPO_URL}")
-    apt_pos = text.index("# Install only essential build dependencies")
-    assert apt_pos < arg_pos < metal_clone_pos, (
-        "ARG TT_METAL_REPO_URL must be declared just before the tt-metal clone, "
-        "after the long cacheable layers"
-    )
+        "git clone https://github.com/tenstorrent-metal/tt-metal.git" in step
+    ), "tt-metal must be cloned from upstream in the committed file"
+    assert (
+        "git clone https://github.com/tenstorrent/vllm-tt-plugin.git"
+        in _vllm_install_step()
+    ), "the plugin must be cloned from upstream in the committed file"

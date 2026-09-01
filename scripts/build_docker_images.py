@@ -1135,14 +1135,6 @@ def build_dev_image(
         f"CONTAINER_APP_UID={container_app_uid}",
     ]
 
-    # A bring-up's model code (e.g. a new demo's generator_vllm) may only exist
-    # on a tt-metal fork. vLLM needs no such override: the image installs the
-    # standalone vllm-tt-plugin, which owns the vLLM pin.
-    tt_metal_repo_url = os.getenv("TT_METAL_REPO_URL")
-    if tt_metal_repo_url:
-        logger.info(f"Overriding tt-metal repository URL: {tt_metal_repo_url}")
-        build_command += ["--build-arg", f"TT_METAL_REPO_URL={tt_metal_repo_url}"]
-
     build_command += [
         "-f",
         "vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile",
