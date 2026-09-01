@@ -127,6 +127,24 @@ def test_base64_obeys_the_same_byte_cap_as_a_download(client, fake, monkeypatch)
     assert fake.last is None
 
 
+def test_the_oversize_error_does_not_promise_a_url_would_get_through(
+    client, fake, monkeypatch
+):
+    """``media_url_max_bytes`` caps the audio, not the transport.
+
+    This message used to read "upload it and pass a url instead", which is
+    advice that cannot work: the downloader enforces the same cap, so the
+    caller stages a file, retries, and gets 413 a second time from a different
+    code path. Point at the two things that do change the outcome.
+    """
+    monkeypatch.setattr(settings, "media_url_max_bytes", 16, raising=False)
+    detail = client.post(
+        "/v1/diarize", json={"url": base64.b64encode(b"x" * 64).decode("ascii")}
+    ).json()["detail"]
+    assert "does not raise it" in detail
+    assert "media_url_max_bytes" in detail
+
+
 def test_the_cap_is_checked_before_the_payload_is_decoded(client, fake, monkeypatch):
     """The pre-decode length check has to actually fire, otherwise an oversize
     body is materialised in memory first and the cap protects nothing."""

@@ -501,13 +501,29 @@ Diarization is a job: `POST /v1/diarize` creates one and `GET /v1/jobs/{jobId}` 
 
 The body is the pyannoteAI `DiarizeRequest`. Audio is referenced by `url`: a public `http(s)://` URL, or a `media://<object-key>` staged via the media API (see below). There is no multipart file field, matching pyannoteAI. Whichever form is used, the payload is capped at `media_url_max_bytes` (64 MiB for this model, about 35 minutes of 16 kHz mono audio); over that the server answers 413.
 
-> **Non-standard extension:** this server *also* accepts the audio itself as inline base64 in the same `url` field. **The pyannoteAI cloud API does not** — it documents `url` as "URL of the audio file to be processed" and takes a fetchable location only, so a client written against this extension will fail the moment it is pointed at the official service. It exists because the official request carries audio in exactly one field and that field is a location, which leaves a deployment with no object storage the server can reach no way to send audio at all. It is expressible without emitting a request the spec would reject only because the official schema types `url` as a bare string with no pattern, and it follows the same "URL or base64 in one field" shape the video endpoint uses for images. Base64 costs a third in wire size, so use a URL whenever you have one, and stay on `http(s)://` / `media://` if portability to pyannoteAI matters.
+> **Non-standard extension:** this server *also* accepts the audio itself as inline base64 in the same `url` field. **The pyannoteAI cloud API does not** — it documents `url` as "URL of the audio file to be processed" and takes a fetchable location only, so a client written against this extension will fail the moment it is pointed at the official service. It exists because the official request carries audio in exactly one field and that field is a location, which leaves a deployment with no object storage the server can reach no way to send audio at all. It is expressible without emitting a request the spec would reject only because the official schema types `url` as a bare string with no pattern, and it follows the same "URL or base64 in one field" shape the video endpoint uses for images.
+
+### Choosing between inline base64 and `media://`
+
+**The size cap is the same either way.** `media_url_max_bytes` (64 MiB for this model, ~35 minutes of 16 kHz mono) applies to the audio itself, not to how it travelled. Inline base64 is refused on the encoded length before it is decoded; a fetched object is refused on the declared `Content-Length` when the store sends one, and otherwise mid-stream once the bytes read pass the cap. Staging a file that is too large therefore does not get it through — the store accepts the upload, and the diarize call is refused a second time, from the downloader instead of the decoder. To go past the cap the operator has to raise `media_url_max_bytes`; there is no request-shaped way around it.
+
+What actually differs:
+
+| | Inline base64 | `media://` (or `http(s)://`) |
+|---|---|---|
+| Portable to pyannoteAI | **No** — non-standard extension | Yes |
+| Needs object storage | No | Yes (`media://`); or any reachable URL |
+| Bytes on the wire | **1.333×** the audio | 1.0× |
+| Upload path | Through this server, inside the request | Straight to the store, separate from the request |
+| Re-diarizing the same audio | Re-uploads every time | Stage once, reference by key |
+
+Prefer `media://` (or a plain `http(s)://` URL) — it is what the official API takes, it does not inflate the payload, and the upload does not sit inside the request to the inference server. Reach for base64 when there is no object store the server can reach, or for a one-off small clip where standing up storage is not worth it.
 
 ## Request parameters
 
 | Parameter      | Required | Description |
 |----------------|----------|-------------|
-| `url`          | Yes      | Audio location: `http(s)://…` or `media://<object-key>`. Inline base64 audio is also accepted as a non-standard extension (not supported by pyannoteAI). |
+| `url`          | Yes      | Audio location: `http(s)://…` or `media://<object-key>`. Inline base64 audio is also accepted as a non-standard extension (not supported by pyannoteAI); same size cap either way. |
 | `numSpeakers`  | No       | Exact number of speakers, if known (pyannoteAI `numSpeakers`). |
 | `minSpeakers`  | No       | Lower bound on the number of speakers (pyannoteAI `minSpeakers`). |
 | `maxSpeakers`  | No       | Upper bound on the number of speakers (pyannoteAI `maxSpeakers`). |

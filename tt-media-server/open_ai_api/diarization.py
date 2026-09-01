@@ -232,9 +232,11 @@ async def _fetch_audio(url: str) -> bytes:
         raise HTTPException(
             status_code=413,
             detail=(
-                f"inline base64 audio (a non-standard extension) is over the "
-                f"{max_bytes}-byte cap for this server; upload it and pass a "
-                "url instead"
+                f"inline base64 audio (a non-standard extension) decodes to "
+                f"more than the {max_bytes}-byte cap for this server. The cap "
+                "is on the audio itself, so staging it and passing a url does "
+                "not raise it; shorten the recording, or ask the operator to "
+                "raise media_url_max_bytes"
             ),
         )
     try:
@@ -255,7 +257,10 @@ async def _fetch_audio(url: str) -> bytes:
             status_code=413,
             detail=(
                 f"inline base64 audio decodes to {len(audio_bytes)} bytes, over "
-                f"the {max_bytes}-byte cap for this server"
+                f"the {max_bytes}-byte cap for this server. The cap is on the "
+                "audio itself, so staging it and passing a url does not raise "
+                "it; shorten the recording, or ask the operator to raise "
+                "media_url_max_bytes"
             ),
         )
     return audio_bytes
