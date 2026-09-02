@@ -147,45 +147,39 @@ via its own `docs/install-vllm-tt.sh` -- the same layout `tt-inference-server`
 main uses. The field keeps its old name from when the image cloned the
 `tenstorrent/vllm` fork.
 
-**The image no longer needs that fork.** Every Qwen3-ASR change it carried has
-an equivalent on the standalone plugin (TT adapter registration, the
+**That fork is deprecated.** `tenstorrent/vllm`'s README says "This repository
+is deprecated. Do not use it"; TT-specific issues are redirected to
+`vllm-tt-plugin` (tenstorrent/vllm#477), and `tt-inference-server` itself
+switched off it in PR #4907, which this branch has now merged. `run.py` still
+accepts `--vllm-dir` but reports it as "deprecated and ignored".
+
+Nothing was lost in the switch. Every Qwen3-ASR change the fork carried has an
+equivalent on the standalone plugin (TT adapter registration, the
 audio/transcription wiring in `TTModelRunner`, surfacing the real
 `execute_model` error, forced eager execution), and its remaining change --
 ordering `thinker_config` before `super().__init__()` in the HF config -- ships
-in the `vllm==0.24.0` release the plugin pins. Measured after the switch: TED
-CER 0.1002 and MagicHub CER 0.1668, identical to the last fork-built image, at
-higher throughput (11.97 vs 9.84 audio-s/s).
+in the `vllm==0.24.0` release the plugin pins.
 
-This is a statement about **this image only**. The fork route itself is still
-supported and still tested -- see below.
+#### Evidence that the move changed no output
 
-#### Both vLLM routes are still supported
+The fork route was run one last time before it was retired, on the same board,
+same clips, same shipped defaults (decode trace on, eager, conc=4, seq=4), to
+show the migration is output-preserving:
 
-Two routes serve this model, and both are kept working on purpose:
-
-| route | vLLM | where the TT adapter is registered | how it is launched |
-|---|---|---|---|
-| **plugin** (this image) | upstream `vllm==0.24.0` | standalone `vllm-tt-plugin` built-in model map | `run.py --docker-server` |
-| **fork** | `tenstorrent/vllm` fork | the fork's bundled `plugins/vllm-tt-plugin` | `run.py --local-server` against a fork checkout |
-
-Each route registers the adapter separately, so both registrations have to be
-maintained; neither is redundant. Measured on the same board under identical
-shipped defaults (decode trace on, eager, conc=4, seq=4), they agree:
-
-| | plugin route | fork route |
+| | plugin route | fork route (retired) |
 |---|---|---|
 | golden transcript | identical | identical |
 | TED 509 CER | 0.1002 (494 ok) | 0.1002 (494 ok) |
 | MagicHub 600 CER | 0.1668 (600 ok) | 0.1668 (600 ok) |
 | bench 128 req | 11.97 audio-s/s, p50 2.24 s | 12.73 audio-s/s, p50 2.02 s |
 
-Accuracy matches to four decimal places on both corpora; the throughput gap is
-within the drift seen between sessions on this board (an earlier run had the
-plugin route ahead). An older run also had LibriSpeech WER 6.7288 on both.
+Accuracy matches to four decimal places on both corpora. The throughput gap is
+session drift on this board, not a route difference: a later plugin-route run
+measured 12.86 audio-s/s at p50 2.03 s. An older run also had LibriSpeech WER
+6.7288 on both.
 
-What changed here is only **what the docker image clones**. `--local-server`
-still takes a vLLM source tree via `--vllm-dir`, so the fork route is
-unaffected by the switch.
+This table is a record of the migration, not an invitation to run the fork.
+There is one supported route: upstream vLLM plus `vllm-tt-plugin`.
 
 #### What this tree does *not* follow upstream on
 

@@ -353,24 +353,22 @@ def test_the_readme_records_why_the_tree_is_not_on_upstream_main():
     )
 
 
-def test_the_readme_keeps_both_vllm_routes_documented():
-    """Dropping the fork from the image is not dropping the fork route.
+def test_the_readme_says_the_fork_is_deprecated():
+    """The fork is not an alternative route; it is retired upstream.
 
-    The agreed position is that both routes stay supported: the plugin route
-    (upstream vLLM + standalone vllm-tt-plugin, used by --docker-server) and
-    the fork route (tenstorrent/vllm with its bundled plugin, used by
-    --local-server). Each registers the TT adapter separately, so a reader who
-    concludes from "the image no longer needs the fork" that the fork route is
-    gone would drop a registration that is still required.
+    tenstorrent/vllm's README says "This repository is deprecated. Do not use
+    it", TT issues are redirected to vllm-tt-plugin, and tt-inference-server
+    switched off it in PR #4907 (merged into this branch). An earlier revision
+    of this file presented fork and plugin as two supported routes, which would
+    send a reader to a repository that is scheduled for archival.
     """
     readme = _readme()
-    assert "Both vLLM routes are still supported" in readme
-    assert "--local-server" in readme, "the fork route's launch path must be named"
-    assert "--docker-server" in readme, "the plugin route's launch path must be named"
-    # the equivalence measurement is what justifies calling them interchangeable
-    assert "6.7288" in readme, "the two-route WER agreement must be recorded"
-    # and the scope of the change must be limited to the image
-    assert "what the docker image clones" in readme
+    assert "deprecated" in readme, "the fork's status must be stated"
+    assert "#4907" in readme, "cite the upstream switch this branch merged"
+    assert "one supported route" in readme, (
+        "the README must not present the fork as a live alternative"
+    )
+    assert "Both vLLM routes are still supported" not in readme
 
 
 def test_the_readme_backs_the_switch_with_measurements():
@@ -384,17 +382,20 @@ def test_the_readme_backs_the_switch_with_measurements():
     assert "0.1668" in readme, "the MagicHub CER measured after the switch must be quoted"
 
 
-def test_the_readme_shows_the_two_route_comparison_side_by_side():
-    """Equivalence is the claim, so both columns have to be visible.
+def test_the_readme_keeps_the_migration_evidence():
+    """"Nothing was lost" is a claim about accuracy, so it needs both columns.
 
-    Quoting one route's numbers and asserting the other matches is not
-    checkable by a reader; the table must carry both.
+    The fork run is kept as the record that the move preserved output. Quoting
+    only the plugin numbers would leave the claim uncheckable.
     """
     readme = _readme()
-    start = readme.index("Both vLLM routes are still supported")
-    section = readme[start : start + 2500]
-    # the fork column's own measurements, distinct from the plugin ones
-    assert "12.73" in section, "the fork route's measured throughput must be shown"
-    assert "11.97" in section, "the plugin route's measured throughput must be shown"
-    # and both corpora, since one corpus alone would not show accuracy parity
-    assert "0.1002" in section and "0.1668" in section
+    section = readme[readme.index("Evidence that the move changed no output") :][:2500]
+    assert "0.1002" in section and "0.1668" in section, (
+        "both corpora must be shown, since one alone would not show parity"
+    )
+    assert "12.73" in section and "11.97" in section, (
+        "both routes' measured throughput must be shown"
+    )
+    assert "not an invitation to run the fork" in section, (
+        "the table must not read as a supported configuration"
+    )
