@@ -8,9 +8,24 @@ import os
 
 import pytest
 
-from workflows.model_spec import MODEL_SPECS
+from workflows.model_spec import load_templates_from_yaml, get_model_spec_map
 from workflows.utils import get_repo_root_path
 from workflows.workflow_types import InferenceEngine, ModelType
+
+
+def _dev_specs():
+    """Resolve the dev catalog regardless of MODEL_SPECS_ENV.
+
+    Qwen3-ASR is a bring-up and lives only in workflows/model_specs/dev. The
+    module-level MODEL_SPECS honours MODEL_SPECS_ENV, which defaults to prod, so
+    importing it would make these tests depend on how the runner is invoked.
+    Promotion to prod is the release process's job, not this bring-up's.
+    """
+    path = get_repo_root_path() / "workflows" / "model_specs" / "dev" / "audio_tts.yaml"
+    return get_model_spec_map(load_templates_from_yaml(path, env="dev"))
+
+
+MODEL_SPECS = _dev_specs()
 
 ASR_SPEC_IDS = [
     "id_tt-vllm-plugin_Qwen3-ASR-1.7B_p150",

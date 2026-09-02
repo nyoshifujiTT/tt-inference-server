@@ -1144,9 +1144,25 @@ class TestModelSpecsStructure:
             "id_tt-vllm-plugin_Qwen3-ASR-1.7B_p150",
             "id_tt-vllm-plugin_Qwen3-ASR-1.7B-JA_p150",
         ]
+        # Qwen3-ASR is a bring-up and lives only in the dev catalog; MODEL_SPECS
+        # follows MODEL_SPECS_ENV, which defaults to prod. Resolve dev directly
+        # so the assertion does not depend on how the runner is invoked.
+        from workflows.model_spec import get_model_spec_map, load_templates_from_yaml
+        from workflows.utils import get_repo_root_path
+
+        dev_specs = get_model_spec_map(
+            load_templates_from_yaml(
+                get_repo_root_path()
+                / "workflows"
+                / "model_specs"
+                / "dev"
+                / "audio_tts.yaml",
+                env="dev",
+            )
+        )
         for model_id in asr_ids:
-            assert model_id in MODEL_SPECS, f"missing spec {model_id}"
-            dms = MODEL_SPECS[model_id].device_model_spec
+            assert model_id in dev_specs, f"missing spec {model_id}"
+            dms = dev_specs[model_id].device_model_spec
             env = dms.env_vars or {}
             # Adapter arch now comes from the plugin built-in map, not a bundle.
             assert "EXTRA_MODELS_DIR" not in env
