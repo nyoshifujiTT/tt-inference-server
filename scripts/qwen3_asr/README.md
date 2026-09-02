@@ -186,7 +186,7 @@ equivalent on the standalone plugin (TT adapter registration, the
 audio/transcription wiring in `TTModelRunner`, surfacing the real
 `execute_model` error, forced eager execution), and its remaining change --
 ordering `thinker_config` before `super().__init__()` in the HF config -- ships
-in the `vllm==0.24.0` release the plugin pins.
+in the vLLM release the plugin pins (0.24.0 at the time; 0.26.0 today).
 
 #### Evidence that the move changed no output
 
@@ -217,19 +217,25 @@ eval and benchmark harnesses live under `reference_config/` and `llm_module/`,
 reporting is in `report_module/`, and the dev Dockerfile clones only
 `vllm-tt-plugin`.
 
-Two things are deliberately *not* followed:
+`vllm-tt-plugin` has upstream merged in too, which raises the vLLM it installs
+from 0.24.0 to 0.26.0. Three of the plugin commits this bring-up carried were
+dropped in that merge because upstream had already fixed the same things: the
+launcher optional-import shim, the `sample_tokens` empty-deque guard, and a
+Gemma-4 tool-parser test upstream deleted outright.
+
+`TTUniProcExecutor` stays. Upstream pins `distributed_executor_backend` to
+`"uni"` for lane-DP and adds no executor of its own, and vLLM still finalizes
+the decode read-back inline -- `UniProcExecutor`'s async output thread was
+removed in 0.24.0 and has not returned in 0.26.0. Measured across the upgrade:
+TED CER 0.1002 and MagicHub CER 0.1668 unchanged, `rtfx` 12.24 -> 12.61, p99
+7.73 s -> 5.89 s.
+
+One thing is deliberately *not* followed:
 
 - **`tt-metal` stays on the model's PR branch** (`upstream/yito/qwen3_asr_pr`),
   not on tt-metal main. The ttnn implementation is still in review there;
   rebasing onto main ahead of that PR would put this bring-up in conflict with
   it. Once the PR lands, the pin becomes an ordinary main commit.
-- **`vllm-tt-plugin` stays on its current base.** Upstream has moved on and
-  raised its vLLM pin from 0.24.0 to 0.26.0. That is not a layout change: this
-  tree carries a `TTUniProcExecutor` that exists specifically because vLLM
-  0.24.0 dropped `UniProcExecutor`'s async output thread and serialised decode
-  read-back. Whether 0.26.0 still needs it, and what it does to throughput, has
-  to be measured -- so that upgrade is its own piece of work, not a side effect
-  of this one.
 
 #### If a branch is not pushed yet
 

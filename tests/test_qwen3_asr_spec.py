@@ -199,8 +199,9 @@ def test_the_readme_says_what_vllm_commit_names():
     readme = _readme()
     assert "What `vllm_commit` names" in readme
     assert "vllm-tt-plugin" in readme, "the repo actually cloned must be named"
-    assert "vllm==0.24.0" in readme, (
-        "record that the fork's HF-config fix already ships in the pinned vLLM"
+    assert "the plugin pins" in readme, (
+        "record that the fork's HF-config fix already ships in the vLLM the "
+        "plugin pins; do not hardcode the version, which moves with upstream"
     )
 
 def test_the_readme_says_which_clip_to_sanity_check_with():
@@ -337,29 +338,42 @@ def test_the_readme_says_the_patch_is_the_only_one():
 
 
 def test_the_readme_describes_the_merged_upstream_relationship():
-    """The tree now HAS upstream merged; saying otherwise misleads.
+    """Both server and plugin have upstream merged; saying otherwise misleads.
 
-    An earlier revision described this branch as sitting ~725 commits behind
-    main with evals/ and benchmarking/ still present, and said the pins live
-    inline in workflows/model_spec.py. All of that stopped being true when
-    upstream/main was merged, and a reader following it would look for files
-    that no longer exist.
+    Earlier revisions of this section described the branch as trailing main,
+    then as deliberately holding the plugin back from vLLM 0.26.0. Both stopped
+    being true when the merges landed, and a reader would either look for
+    deleted directories or re-do an upgrade that is already done.
 
-    What remains genuinely unfollowed is narrower and must stay recorded: the
-    tt-metal PR branch and the plugin's vLLM pin.
+    What remains genuinely unfollowed is tt-metal, and the reason has to stay.
     """
     readme = _readme()
     assert "Relationship to upstream" in readme
-    # the stale claims must not come back
+    # stale claims must not come back
     assert "725 commits" not in readme
     assert "no `workflows/model_specs/` at all" not in readme
-    # the two real exceptions, each with the reason that makes them exceptions
-    assert "upstream/yito/qwen3_asr_pr" in readme, (
-        "say why tt-metal is not on main"
+    assert "stays on its current base" not in readme, (
+        "the plugin no longer holds back from upstream"
     )
-    assert "0.26.0" in readme and "TTUniProcExecutor" in readme, (
-        "say why the plugin's vLLM pin is not simply bumped"
+    # the one real exception, with its reason
+    assert "upstream/yito/qwen3_asr_pr" in readme
+    # and the executor still has to be justified, since upstream ships none
+    assert "TTUniProcExecutor" in readme and "0.26.0" in readme
+
+
+def test_the_readme_backs_the_vllm_upgrade_with_measurements():
+    """Moving two vLLM releases is only safe if it was measured.
+
+    The plugin merge took the installed vLLM from 0.24.0 to 0.26.0 and dropped
+    three of our commits. Without the numbers a reader cannot tell whether that
+    preserved behaviour.
+    """
+    readme = _readme()
+    section = readme[readme.index("Relationship to upstream") :][:2500]
+    assert "0.1002" in section and "0.1668" in section, (
+        "both corpus CERs must be quoted across the upgrade"
     )
+    assert "12.61" in section, "the post-upgrade throughput must be recorded"
 
 
 def test_the_readme_does_not_claim_the_old_layout():
