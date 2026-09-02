@@ -465,3 +465,30 @@ def test_the_runbook_image_tag_carries_the_repo_version():
         f"({expected}); a stale VERSION prefix points at an image that was "
         "never built"
     )
+
+
+def test_the_spec_emits_additional_config_not_override_tt_config():
+    """TT plugin config must reach vLLM as --additional-config.
+
+    ``override_tt_config`` is not a vLLM CLI flag; emitting it into vllm_args
+    makes the arg parser reject an unrecognized ``--override_tt_config``. The
+    older spec format did emit it, and this bring-up carried a fold-in step in
+    run_vllm_api_server.py to compensate. Upstream now serializes
+    ``additional_config`` directly, so that step was deleted -- this test fails
+    if the old shape returns and the deletion silently breaks serving.
+    """
+    spec_src = (
+        get_repo_root_path() / "workflows" / "model_spec.py"
+    ).read_text()
+    assert '"additional_config": json.dumps({"tt": self.override_tt_config})' in spec_src
+    assert '"override_tt_config": json.dumps(' not in spec_src, (
+        "override_tt_config must not be serialized into vllm_args; it is not a "
+        "vLLM CLI flag"
+    )
+
+    server_src = (
+        get_repo_root_path() / "vllm-tt-metal" / "src" / "run_vllm_api_server.py"
+    ).read_text()
+    assert "override_tt_config" not in server_src, (
+        "the fold-in step is dead code once the spec emits additional_config"
+    )
