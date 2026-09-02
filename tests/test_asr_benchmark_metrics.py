@@ -18,7 +18,11 @@ while avg_rtf does not move. Both are kept; they must not be conflated.
 import os
 
 HERE = os.path.dirname(__file__)
-BENCH = os.path.join(HERE, "..", "benchmarking", "asr_openai_benchmark.py")
+# upstream moved benchmarking/ under reference_config/ (the directory rename
+# merged in from upstream/main); this harness moved with it.
+BENCH = os.path.join(
+    HERE, "..", "reference_config", "benchmarking", "asr_openai_benchmark.py"
+)
 
 
 def _read(path):
