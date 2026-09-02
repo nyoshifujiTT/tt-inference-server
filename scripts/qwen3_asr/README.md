@@ -27,14 +27,20 @@ The script then sees the base locally and only builds the dev image.
 ### Where the pins live
 
 `workflows/model_specs/dev/audio_tts.yaml` carries no `version`,
-`tt_metal_commit` or `vllm_commit`: the dev catalog contract rejects them. Those
-are release pins, added when `scripts/release/promote_dev_spec_to_prod.py`
-promotes a dev entry into `workflows/model_specs/prod/`. Hand-writing them into
-prod would forge a release artifact, and prod is not this bring-up's to edit.
+`tt_metal_commit` or `vllm_commit`, and cannot: `_build_template` constructs dev
+entries as `ModelSpecTemplate`, which has no pin fields, so a dev entry that
+sets one fails to load. Pins belong to `ProdModelSpecTemplate`, where they are
+required.
+
+Prod entries are release artifacts, written by
+`scripts/release/promote_dev_spec_to_prod.py` for the leaves listed in
+`.github/workflows/models-ci-config.json`. A bring-up is not in that file, so
+there is no promotion path for this model yet and no committed place for its
+pins.
 
 `scripts/build_docker_images.py` reads both pins from the catalog, so building
-before promotion needs them supplied temporarily. That is the second half of the
-manual patch below, applied and reverted the same way as the clone URLs.
+before release needs a prod entry to exist temporarily. That is the second half
+of the manual patch below: applied, built from, and reverted -- never committed.
 
 ### Why the pin may lag the branch head
 
@@ -71,8 +77,16 @@ to *contain* it.
 Two things have to change to build before release, and both are temporary:
 
 1. the two clone URLs, which the committed Dockerfile always points upstream;
-2. the release pins, which the dev catalog contract does not allow (see
-   *Where the pins live*).
+2. a prod catalog entry, because `scripts/build_docker_images.py` reads the
+   release pins from the catalog and the dev contract forbids them there.
+
+The second point is worth stating precisely, since editing prod is normally out
+of bounds. Prod entries are release artifacts written by
+`scripts/release/promote_dev_spec_to_prod.py`, which promotes leaves selected by
+`.github/workflows/models-ci-config.json` -- a bring-up is not in that file, so
+promotion cannot produce this entry. The entry below is therefore added by the
+patch and reverted straight after, never committed. The same shape was used for
+the pyannote bring-up on this repo.
 
 Apply, build, then restore -- the recipe PR#4837 established:
 
@@ -100,40 +114,54 @@ diff --git a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile b/vllm-tt-metal/vllm
      && cd ${vllm_tt_plugin_dir} \
      && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
      && source ${PYTHON_ENV_DIR}/bin/activate \
-diff --git a/workflows/model_specs/dev/audio_tts.yaml b/workflows/model_specs/dev/audio_tts.yaml
---- a/workflows/model_specs/dev/audio_tts.yaml
-+++ b/workflows/model_specs/dev/audio_tts.yaml
-@@ -144,6 +144,9 @@ templates:
-     - Qwen/Qwen3-ASR-1.7B
-     - neosophie/Qwen3-ASR-1.7B-JA
-   impl: tt_vllm_plugin
+diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/prod/audio_tts.yaml
+--- a/workflows/model_specs/prod/audio_tts.yaml
++++ b/workflows/model_specs/prod/audio_tts.yaml
+@@ -272,3 +272,27 @@ templates:
+       env_vars:
+         TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_x2_mesh_graph_descriptor.textproto"
+   status: EXPERIMENTAL
++- weights:
++    - neosophie/Qwen3-ASR-1.7B-JA
 +  version: "0.1.0"
 +  tt_metal_commit: "1395635"
 +  vllm_commit: "2bcb717"
-   min_disk_gb: 15
-   min_ram_gb: 6
-   model_type: AUDIO
++  impl: tt_vllm_plugin
++  min_disk_gb: 15
++  min_ram_gb: 6
++  model_type: AUDIO
++  inference_engine: VLLM
++  model_display_name: Qwen3-ASR-1.7B
++  has_builtin_warmup: true
++  device_model_specs:
++    - device: P150
++      max_concurrency: 4
++      max_context: 2048
++      default_impl: true
++      env_vars:
++        MESH_DEVICE: "P150"
++        HF_HUB_OFFLINE: "1"
++        TRANSFORMERS_OFFLINE: "1"
++      vllm_args:
++        additional-config: '{"tt": {"trace_mode": "decode_only"}}'
++  status: EXPERIMENTAL
 PATCH
 
-MODEL_SPECS_ENV=dev python3 scripts/build_docker_images.py \
-  --build-metal-commit 1395635 --single-threaded
+python3 scripts/build_docker_images.py --build-metal-commit 1395635 --single-threaded
 
 git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile \
-             workflows/model_specs/dev/audio_tts.yaml
+             workflows/model_specs/prod/audio_tts.yaml
 ```
 
-`MODEL_SPECS_ENV=dev` is required: the catalog defaults to prod, which has no
-Qwen3-ASR entry, and the build would silently skip the model.
-
-This is the *only* manual patch, and it touches nothing under
-`workflows/model_specs/prod/`. The image is handed to `run.py` with
-`--override-docker-image`.
+`--build-metal-commit` only filters which combinations get built; the commit
+values themselves come from the catalog, which is why the pins have to be in
+the patch rather than on the command line.
 
 Without the tt-metal half the image lacks the vLLM adapter and the server dies
 with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`.
 Without the plugin half it lacks the TT adapter registration and the engine
 fails to resolve the architecture. The URL halves disappear once the commits
-are upstream, and the pin half disappears once the spec is promoted to prod.
+are upstream; the prod entry disappears once the model is part of a release.
 
 There is deliberately no build arg for either URL. Build args for exactly this
 were added earlier in the bring-up and withdrawn: they let an image built from

@@ -399,3 +399,34 @@ def test_the_readme_keeps_the_migration_evidence():
     assert "not an invitation to run the fork" in section, (
         "the table must not read as a supported configuration"
     )
+
+
+def test_the_prod_catalog_has_no_committed_qwen3_asr_entry():
+    """The prod entry exists only inside the runbook patch.
+
+    Prod is written by promote_dev_spec_to_prod.py for leaves listed in the CI
+    config; a bring-up is not one, so committing an entry there would forge a
+    release artifact. The patch adds it for the build and reverts it.
+    """
+    prod = (
+        get_repo_root_path() / "workflows" / "model_specs" / "prod" / "audio_tts.yaml"
+    ).read_text()
+    assert "Qwen3-ASR" not in prod, (
+        "the prod catalog must stay free of the bring-up entry; it belongs in "
+        "the temporary build patch only"
+    )
+
+
+def test_the_readme_explains_why_prod_is_patched():
+    """Editing prod needs a stated reason, or it reads as a violation."""
+    readme = _readme()
+    assert "promote_dev_spec_to_prod.py" in readme, (
+        "name the tool that normally owns prod entries"
+    )
+    assert "models-ci-config.json" in readme, (
+        "say why promotion cannot produce this entry"
+    )
+    assert "never committed" in readme
+    assert "git checkout" in readme and "prod/audio_tts.yaml" in readme, (
+        "the revert step must cover the prod file too"
+    )
