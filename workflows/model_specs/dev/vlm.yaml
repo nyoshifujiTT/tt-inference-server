@@ -316,7 +316,9 @@ templates:
         enable_auto_tool_choice: true
         reasoning_parser: qwen3
         tool_call_parser: qwen3_coder
-        limit-mm-per-prompt: '{"image": 1, "video": 1}'
+        # Video is not served: a video request kills the engine before prefill (see
+        # supported_modalities below), so admit image only.
+        limit-mm-per-prompt: '{"image": 1}'
         mm-processor-cache-gb: 0
       override_tt_config:
         fabric_config: FABRIC_1D
@@ -327,7 +329,8 @@ templates:
   supported_modalities:
     - text
     - image
-    - video
+    # Video is omitted: the qwen36 vision tower runs, then the engine exits before prefill, on any
+    # batch size. Advertising it queues an omni_modal_video benchmark that takes the server down.
   metadata:
     Qwen/Qwen3.6-27B:
       reasoning_parser_name: qwen3
@@ -360,7 +363,9 @@ templates:
         enable_auto_tool_choice: true
         reasoning_parser: qwen3
         tool_call_parser: qwen3_coder
-        limit-mm-per-prompt: '{"image": 1, "video": 1}'
+        # Video is not served: a video request kills the engine before prefill (see
+        # supported_modalities below), so admit image only.
+        limit-mm-per-prompt: '{"image": 1}'
         mm-processor-cache-gb: 0
       override_tt_config:
         fabric_config: FABRIC_1D
@@ -371,7 +376,8 @@ templates:
   supported_modalities:
     - text
     - image
-    - video
+    # Video is omitted: the qwen36 vision tower runs, then the engine exits before prefill, on any
+    # batch size. Advertising it queues an omni_modal_video benchmark that takes the server down.
   metadata:
     Qwen/Qwen3.5-27B:
       reasoning_parser_name: qwen3
