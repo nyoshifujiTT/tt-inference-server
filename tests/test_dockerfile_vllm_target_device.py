@@ -39,7 +39,7 @@ def _vllm_install_step() -> str:
 def _tt_metal_build_step() -> str:
     text = DOCKERFILE.read_text()
     match = re.search(
-        r"RUN /bin/bash -c \"git clone "
+        r"RUN /bin/bash -c \"git clone (?:--depth 1 )?"
         r"https://github\.com/tenstorrent-metal/tt-metal\.git.*?\"\n",
         text,
         re.DOTALL,
@@ -154,9 +154,13 @@ def test_no_clone_url_is_a_build_arg():
 def test_the_clone_urls_are_the_upstream_ones():
     """The committed Dockerfile must always describe an upstream build."""
     step = _tt_metal_build_step()
-    assert (
-        "git clone https://github.com/tenstorrent-metal/tt-metal.git" in step
-    ), "tt-metal must be cloned from upstream in the committed file"
+    assert "https://github.com/tenstorrent-metal/tt-metal.git" in step, (
+        "tt-metal must be cloned from upstream in the committed file"
+    )
+    # upstream clones shallow and then fetches just the pinned commit: a
+    # full-history clone has taken over an hour on CI and dropped with
+    # "fatal: early EOF"
+    assert "--depth 1" in step, "the shallow clone must not be undone"
     assert (
         "git clone https://github.com/tenstorrent/vllm-tt-plugin.git"
         in _vllm_install_step()
