@@ -209,27 +209,27 @@ measured 12.86 audio-s/s at p50 2.03 s. An older run also had LibriSpeech WER
 This table is a record of the migration, not an invitation to run the fork.
 There is one supported route: upstream vLLM plus `vllm-tt-plugin`.
 
-#### What this tree does *not* follow upstream on
+#### Relationship to upstream
 
-The Dockerfile above matches `tt-inference-server` main: plugin-only clone, vLLM
-pin owned by the plugin. The rest of the tree does not, and deliberately so.
+This branch has `tt-inference-server` main merged in, so the layout here is the
+upstream one: catalogs are YAML under `workflows/model_specs/{dev,prod}/`, the
+eval and benchmark harnesses live under `reference_config/` and `llm_module/`,
+reporting is in `report_module/`, and the dev Dockerfile clones only
+`vllm-tt-plugin`.
 
-This branch is cut from `8ab207f9f` (2026-04-30); main is ~725 commits ahead and
-has reorganised the repository - `evals/` and `benchmarking/` are gone (their
-contents now live under `llm_module/` and `reference_config/`), `run_reports.py`
-moved into `report_module/`, and `workflows/model_spec.py` was split into
-`workflows/model_specs/{dev,prod}/*.yaml`.
+Two things are deliberately *not* followed:
 
-Following that is a port of the eval, benchmark and report harnesses onto a new
-layout - a repository-wide migration rather than anything this model needs.
-Nothing here depends on it: the fork-vs-plugin question that used to motivate it
-is already settled above, without moving base.
-
-One consequence is worth stating so it is not mistaken for a shortcut: the pins
-live directly in `workflows/model_spec.py` because this base has no
-`workflows/model_specs/` at all - every model pins its commits inline there.
-On main, where prod specs are yaml, a bring-up must *not* edit them; it patches
-them temporarily the way the clone URLs are patched above.
+- **`tt-metal` stays on the model's PR branch** (`upstream/yito/qwen3_asr_pr`),
+  not on tt-metal main. The ttnn implementation is still in review there;
+  rebasing onto main ahead of that PR would put this bring-up in conflict with
+  it. Once the PR lands, the pin becomes an ordinary main commit.
+- **`vllm-tt-plugin` stays on its current base.** Upstream has moved on and
+  raised its vLLM pin from 0.24.0 to 0.26.0. That is not a layout change: this
+  tree carries a `TTUniProcExecutor` that exists specifically because vLLM
+  0.24.0 dropped `UniProcExecutor`'s async output thread and serialised decode
+  read-back. Whether 0.26.0 still needs it, and what it does to throughput, has
+  to be measured -- so that upgrade is its own piece of work, not a side effect
+  of this one.
 
 #### If a branch is not pushed yet
 

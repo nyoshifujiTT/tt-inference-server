@@ -335,22 +335,39 @@ def test_the_readme_says_the_patch_is_the_only_one():
     )
 
 
-def test_the_readme_records_why_the_tree_is_not_on_upstream_main():
-    """The Dockerfile matches main; the rest of the tree does not.
+def test_the_readme_describes_the_merged_upstream_relationship():
+    """The tree now HAS upstream merged; saying otherwise misleads.
 
-    Without this written down, the next reader either assumes the whole tree is
-    current, or re-opens "should we rebase onto main" without the numbers. It
-    also has to say why the pins sit in model_spec.py, which would be wrong on
-    main where prod specs are yaml and must not be edited.
+    An earlier revision described this branch as sitting ~725 commits behind
+    main with evals/ and benchmarking/ still present, and said the pins live
+    inline in workflows/model_spec.py. All of that stopped being true when
+    upstream/main was merged, and a reader following it would look for files
+    that no longer exist.
+
+    What remains genuinely unfollowed is narrower and must stay recorded: the
+    tt-metal PR branch and the plugin's vLLM pin.
     """
     readme = _readme()
-    assert "What this tree does *not* follow upstream on" in readme
-    # the reorganisation is the actual cost, so name what moved
-    assert "llm_module" in readme and "report_module" in readme
-    assert "workflows/model_specs" in readme, (
-        "say that main splits the specs into yaml, which is why the inline pin "
-        "here is not a licence to edit prod specs there"
+    assert "Relationship to upstream" in readme
+    # the stale claims must not come back
+    assert "725 commits" not in readme
+    assert "no `workflows/model_specs/` at all" not in readme
+    # the two real exceptions, each with the reason that makes them exceptions
+    assert "upstream/yito/qwen3_asr_pr" in readme, (
+        "say why tt-metal is not on main"
     )
+    assert "0.26.0" in readme and "TTUniProcExecutor" in readme, (
+        "say why the plugin's vLLM pin is not simply bumped"
+    )
+
+
+def test_the_readme_does_not_claim_the_old_layout():
+    """Directories the merge removed must not be presented as current."""
+    readme = _readme()
+    for gone in ("`evals/`", "`benchmarking/`", "workflows/model_spec.py`"):
+        assert gone not in readme, (
+            f"{gone} no longer exists after the upstream merge"
+        )
 
 
 def test_the_readme_says_the_fork_is_deprecated():
