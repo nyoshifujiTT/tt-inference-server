@@ -12,7 +12,7 @@ from PIL import Image
 
 
 class ImageManager:
-    def __init__(self, storage_dir: str):
+    def __init__(self, storage_dir: str = ""):
         self.storage_dir = storage_dir
         # self.storage_dir.mkdir(parents=True, exist_ok=True)
 
@@ -105,8 +105,19 @@ class ImageManager:
         Returns:
             PIL Image object
         """
+        if base64_string[:8].lower().startswith(("http://", "https://")):
+            # Runners must only ever see base64: URL-valued media is downloaded
+            # and replaced at the API layer (#4974). Reaching this decoder with
+            # a URL means a submit path skipped that resolution — fail loudly
+            # instead of decoding garbage.
+            raise ValueError(
+                "unresolved media URL reached the image decoder; URLs must be "
+                "downloaded at the API layer before enqueue"
+            )
         if base64_string.startswith("data:"):
             base64_string = base64_string.split(",")[1]
+        # Restore stripped padding so HTTP/JSON-trimmed strings decode cleanly.
+        base64_string += "=" * (-len(base64_string) % 4)
         image_bytes = base64.b64decode(base64_string)
         image = Image.open(BytesIO(image_bytes))
 

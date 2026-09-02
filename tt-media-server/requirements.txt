@@ -1,5 +1,14 @@
+# Main venv requirements for tt-media-server
+# NOTE: whisperx, torch 2.7.x, torchaudio, and silero_vad are installed in a
+# separate audio_venv to avoid conflicts with vLLM 0.18.1 (requires torch>=2.10).
+# See audio-requirements.txt for audio processing dependencies.
+
 aiohttp
 asyncio
+# MP4 (h264+aac) muxing for the LTX audio-video pipelines. Version-matched to
+# tt-metal models/tt_dit/pipelines/ltx/requirements.txt; av has no deps of its
+# own, so unlike diffusers it needs no --no-deps handling here.
+av==17.0.1
 colorama
 fastapi
 faster_fifo
@@ -14,12 +23,7 @@ pydantic-settings
 pytest
 pytest-asyncio
 python-multipart
-silero_vad
 tqdm
 uvicorn
-whisperx==3.4.3
 requests
 num2words
-
-
---extra-index-url https://download.pytorch.org/whl/cpu

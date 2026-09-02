@@ -5,8 +5,8 @@
 import asyncio
 from multiprocessing import Queue
 
-from config.constants import SHUTDOWN_SIGNAL
-from device_workers.worker_utils import initialize_device_worker
+from config.constants import SHUTDOWN_SIGNAL, CanaryProbeRequest
+from device_workers.worker_utils import initialize_device_worker, signalJobStart
 from model_services.queues.memory_queue import SharedMemoryChunkQueue
 from model_services.queues.tt_queue import TTQueue
 from tt_model_runners.base_device_runner import BaseDeviceRunner
@@ -20,8 +20,13 @@ def device_worker(
     warmup_signals_queue: Queue,
     error_queue: Queue,
     result_queue_name: str = None,
+    cancel_queue: Queue = None,
 ):
     logger = TTLogger()
+    # Map of in-flight asyncio tasks keyed by request._task_id. Populated when
+    # request_feeder schedules a handler; cleared by a done-callback. Used by
+    # cancel_listener to abort orphaned tasks (#3533 Problem 1).
+    in_flight: dict[str, asyncio.Task] = {}
 
     # attach to queue if it's provided
     if result_queue_name is not None:
@@ -72,9 +77,28 @@ def device_worker(
             logger.info(
                 f"Worker {worker_id} finished streaming chunks for task {request._task_id}"
             )
+        except asyncio.CancelledError:
+            # Orphaned by client cancel / timeout; vLLM will release the slot
+            # once the iterator closes. Don't push to error_queue — the caller
+            # already abandoned the result_queue.
+            logger.info(f"Streaming task {request._task_id} cancelled")
+            raise
         except Exception as e:
             logger.error(f"Streaming failed for task {request._task_id}: {e}")
             error_queue.put((worker_id, request._task_id, str(e)))
+
+    # Handle canary-monitor probe
+    async def handle_canary(request):
+        try:
+            is_alive = bool(
+                await loop.run_in_executor(
+                    None, lambda: device_runner.health_check(deep=request.deep)
+                )
+            )
+        except Exception as e:
+            logger.warning(f"Worker {worker_id} canary health_check raised: {e}")
+            is_alive = False
+        result_queue.put((worker_id, request._task_id, is_alive))
 
     # Handle non-streaming request
     async def handle_non_streaming(request):
@@ -84,9 +108,48 @@ def device_worker(
                 result_queue.put((worker_id, request._task_id, response[0]))
             else:
                 error_queue.put((worker_id, request._task_id, "No response generated"))
+        except asyncio.CancelledError:
+            # See handle_streaming — caller has gone away, don't report error.
+            logger.info(f"Non-streaming task {request._task_id} cancelled")
+            raise
         except Exception as e:
             logger.error(f"Execution failed for task {request._task_id}: {e}")
             error_queue.put((worker_id, request._task_id, str(e)))
+
+    async def cancel_listener():
+        """Watch cancel_queue and cancel any matching in-flight asyncio task.
+
+        Cancellation propagates into `device_runner._run_async`, which is an
+        async iterator over `llm_engine.generate(...)` — vLLM observes the
+        consumer closing and aborts its internal request, freeing the slot.
+        """
+        if cancel_queue is None:
+            return
+        while True:
+            try:
+                task_id = await loop.run_in_executor(None, cancel_queue.get)
+            except Exception as e:
+                logger.warning(f"cancel_listener queue read failed: {e}")
+                return
+            if task_id is None:
+                logger.info(f"Worker {worker_id} cancel_listener exiting")
+                return
+            target = in_flight.get(task_id)
+            if target is None or target.done():
+                # Already finished — common when client polite-disconnects right
+                # at the end. Nothing to do.
+                continue
+            logger.info(f"Worker {worker_id} aborting in-flight task {task_id}")
+            target.cancel()
+
+    def _track(request, task):
+        """Register a fire-and-forget handler so cancel_listener can find it.
+
+        Calling .cancel() on a not-yet-started asyncio task is safe — the
+        cancellation surfaces as CancelledError on its first run-step.
+        """
+        in_flight[request._task_id] = task
+        task.add_done_callback(lambda _t: in_flight.pop(request._task_id, None))
 
     # Async task that pulls from queue and feeds requests to handlers
     async def request_feeder():
@@ -95,6 +158,7 @@ def device_worker(
         settings = get_settings()
         """Continuously pull requests from queue and submit to async handlers"""
         batch_size = settings.vllm.max_num_seqs
+        cancel_task = asyncio.create_task(cancel_listener())
         while True:
             # Run blocking queue.get() in thread pool to not block event loop
             requests = await loop.run_in_executor(
@@ -105,15 +169,23 @@ def device_worker(
             for request in requests:
                 if request == SHUTDOWN_SIGNAL:
                     logger.info(f"Worker {worker_id} received shutdown signal")
+                    if not cancel_task.done():
+                        cancel_task.cancel()
                     return
                 if request is None:
                     continue
-                if hasattr(request, "stream") and request.stream:
+                if isinstance(request, CanaryProbeRequest):
+                    # Singleton by construction (monitor only probes when idle);
+                    # never merged into a batch.
+                    _track(request, asyncio.create_task(handle_canary(request)))
+                elif hasattr(request, "stream") and request.stream:
                     # Fire and forget streaming task - runs concurrently
-                    asyncio.create_task(handle_streaming(request))
+                    signalJobStart(request)
+                    _track(request, asyncio.create_task(handle_streaming(request)))
                 else:
                     # Fire and forget non-streaming task - runs concurrently in event loop
-                    asyncio.create_task(handle_non_streaming(request))
+                    signalJobStart(request)
+                    _track(request, asyncio.create_task(handle_non_streaming(request)))
 
     try:
         loop.run_until_complete(request_feeder())

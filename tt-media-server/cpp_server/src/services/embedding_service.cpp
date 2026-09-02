@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -20,7 +21,7 @@
 #include "config/defaults.hpp"
 #include "config/settings.hpp"
 #include "profiling/tracy.hpp"
-#include "runners/embedding_runner.hpp"
+#include "runtime/runners/i_embedding_runner.hpp"
 #include "services/embedding_codec.hpp"
 #include "services/embedding_service.hpp"
 #include "utils/logger.hpp"
@@ -73,22 +74,21 @@ std::string pipeReadString(int fd) {
 }  // namespace
 
 struct WorkerProcess {
-  int worker_id = -1;
+  int workerId = -1;
   pid_t pid = -1;
-  tt::utils::ScopedFd write_fd;  // parent → child (request pipe write end)
-  tt::utils::ScopedFd read_fd;   // child → parent (response pipe read end)
-  std::atomic<bool> is_ready{false};
+  tt::utils::ScopedFd writeFd;  // parent → child (request pipe write end)
+  tt::utils::ScopedFd readFd;   // child → parent (response pipe read end)
+  std::atomic<bool> isReady{false};
   std::atomic<bool> running{false};
-  std::unique_ptr<std::thread> dispatch_thread;
+  std::unique_ptr<std::thread> dispatchThread;
 
-  bool spawn(int workerId,
-             std::function<void(int readFd, int writeFd)> childMain) {
-    worker_id = workerId;
+  bool spawn(int wid, std::function<void(int readFd, int writeFd)> childMain) {
+    workerId = wid;
 
     int reqRaw[2] = {-1, -1};
     if (pipe(reqRaw) < 0) {
       TT_LOG_ERROR("[EmbeddingService] Failed to create pipes for worker {}",
-                   workerId);
+                   wid);
       return false;
     }
     tt::utils::ScopedFd reqRead(reqRaw[0]), reqWrite(reqRaw[1]);
@@ -96,14 +96,14 @@ struct WorkerProcess {
     int respRaw[2] = {-1, -1};
     if (pipe(respRaw) < 0) {
       TT_LOG_ERROR("[EmbeddingService] Failed to create pipes for worker {}",
-                   workerId);
+                   wid);
       return false;  // reqRead + reqWrite auto-close
     }
     tt::utils::ScopedFd respRead(respRaw[0]), respWrite(respRaw[1]);
 
     pid_t child = fork();
     if (child < 0) {
-      TT_LOG_ERROR("[EmbeddingService] Failed to fork worker {}", workerId);
+      TT_LOG_ERROR("[EmbeddingService] Failed to fork worker {}", wid);
       return false;  // all 4 FDs auto-close
     }
 
@@ -119,16 +119,16 @@ struct WorkerProcess {
     reqRead.reset();
     respWrite.reset();
     pid = child;
-    write_fd = std::move(reqWrite);
-    read_fd = std::move(respRead);
-    is_ready.store(true);
+    writeFd = std::move(reqWrite);
+    readFd = std::move(respRead);
+    isReady.store(true);
     running.store(true);
 
     TT_LOG_INFO(
         "[EmbeddingService] Spawned worker {} with PID {} "
-        "(TT_VISIBLE_DEVICES={}) write_fd={} read_fd={}",
-        workerId, pid, tt::config::visibleDevicesForWorker(workerId),
-        write_fd.get(), read_fd.get());
+        "(TT_VISIBLE_DEVICES={}) writeFd={} readFd={}",
+        wid, pid, tt::config::visibleDevicesForWorker(wid), writeFd.get(),
+        readFd.get());
     return true;
   }
 
@@ -139,32 +139,32 @@ struct WorkerProcess {
     if (result != pid) return true;
 
     if (WIFEXITED(status)) {
-      TT_LOG_ERROR("[EmbeddingService] Worker {} exited with code {}",
-                   worker_id, WEXITSTATUS(status));
+      TT_LOG_ERROR("[EmbeddingService] Worker {} exited with code {}", workerId,
+                   WEXITSTATUS(status));
     } else if (WIFSIGNALED(status)) {
-      TT_LOG_ERROR("[EmbeddingService] Worker {} killed by signal {}",
-                   worker_id, WTERMSIG(status));
+      TT_LOG_ERROR("[EmbeddingService] Worker {} killed by signal {}", workerId,
+                   WTERMSIG(status));
     }
-    is_ready.store(false);
+    isReady.store(false);
     return false;
   }
 
   bool sendRequest(const std::string& json) {
-    if (!pipeWrite(write_fd.get(), json.data(), json.size())) {
+    if (!pipeWrite(writeFd.get(), json.data(), json.size())) {
       TT_LOG_ERROR("[EmbeddingService] Worker {} pipe write failed: {}",
-                   worker_id, strerror(errno));
-      is_ready.store(false);
+                   workerId, strerror(errno));
+      isReady.store(false);
       return false;
     }
     return true;
   }
 
   std::vector<uint8_t> receiveResponse() {
-    auto buf = pipeReadBinary(read_fd.get());
+    auto buf = pipeReadBinary(readFd.get());
     if (buf.empty()) {
       TT_LOG_ERROR("[EmbeddingService] Worker {} response read failed",
-                   worker_id);
-      is_ready.store(false);
+                   workerId);
+      isReady.store(false);
     }
     return buf;
   }
@@ -173,10 +173,10 @@ struct WorkerProcess {
     if (pid > 0) {
       kill(pid, SIGTERM);
       waitpid(pid, nullptr, 0);
-      TT_LOG_INFO("[EmbeddingService] Worker {} terminated", worker_id);
+      TT_LOG_INFO("[EmbeddingService] Worker {} terminated", workerId);
     }
-    write_fd.reset();
-    read_fd.reset();
+    writeFd.reset();
+    readFd.reset();
   }
 };
 
@@ -188,44 +188,79 @@ struct EmbeddingService::Impl {
         : request(std::move(req)) {}
   };
 
-  std::vector<std::unique_ptr<WorkerProcess>> workers_;
-  size_t num_workers_ = 3;
+  std::vector<std::unique_ptr<WorkerProcess>> workers;
+  size_t numWorkers = 3;
 
-  TRACY_LOCKABLE(std::mutex, queue_mutex_);
-  std::queue<std::shared_ptr<PendingRequest>> request_queue_;
-  std::condition_variable_any queue_cv_;
+  TRACY_LOCKABLE(std::mutex, queueMutex);
+  std::queue<std::shared_ptr<PendingRequest>> requestQueue;
+  std::condition_variable_any queueCv;
 
-  std::atomic<bool> running_{false};
-  std::atomic<bool> is_ready_{false};
+  std::atomic<bool> running{false};
+  std::atomic<bool> isReady{false};
 
-  size_t max_batch_size_ = 1;
-  std::chrono::milliseconds batch_timeout_{5};
+  size_t maxBatchSize = 1;
+  std::chrono::milliseconds batchTimeout{5};
   size_t maxQueueSize = tt::config::defaults::MAX_QUEUE_SIZE;
 
   Impl() {
-    num_workers_ = tt::config::numWorkers();
-    max_batch_size_ = tt::config::maxInFlightCount();
-    batch_timeout_ = std::chrono::milliseconds(tt::config::batchTimeoutMs());
+    numWorkers = tt::config::numWorkers();
+    // The cap must be the model's own limit: batches larger than
+    // max_batch_size make the model assert and every request in the batch
+    // fails with HTTP 500. It used to come from MAX_IN_FLIGHT_COUNT (default
+    // 32), which is unrelated to what the model can take.
+    maxBatchSize = tt::config::embeddingEngineConfig().max_batch_size;
+    batchTimeout = std::chrono::milliseconds(tt::config::batchTimeoutMs());
     maxQueueSize = tt::config::maxQueueSize();
     TT_LOG_INFO(
         "[EmbeddingService] Initialized with {} workers, batch_size={}, "
         "batch_timeout={}ms",
-        num_workers_, max_batch_size_, batch_timeout_.count());
+        numWorkers, maxBatchSize, batchTimeout.count());
   }
 
   ~Impl() { stop(); }
 
   [[noreturn]] static void workerProcessMain(int workerId, int readFd,
                                              int writeFd) {
-    size_t wid = static_cast<size_t>(workerId);
-    std::string visibleDevices = tt::config::visibleDevicesForWorker(wid);
+    const size_t wid = static_cast<size_t>(workerId);
+    const auto cfg = tt::config::embeddingEngineConfig();
+    const std::string visibleDevices = tt::config::visibleDevicesForWorker(wid);
+
+    // Everything Python reads is exported here, in the child, before any
+    // Python import happens. Two reasons this must be the child and not the
+    // parent: the Python Settings singleton is built at import time and never
+    // re-reads the environment, and MODEL means something different to C++
+    // (config::model() throws on any non-LLM value), so the parent must never
+    // see an embedding model name.
     setenv("TT_VISIBLE_DEVICES", visibleDevices.c_str(), 1);
+    if (!cfg.python_model_name.empty()) {
+      setenv("MODEL", cfg.python_model_name.c_str(), 1);
+    }
+    setenv("DEVICE", cfg.device.c_str(), 1);
+    const std::string clientRunner =
+        tt::config::toClientRunnerName(cfg.runner_type);
+    if (!clientRunner.empty()) {
+      setenv("MODEL_RUNNER", clientRunner.c_str(), 1);
+    }
 
-    TT_LOG_INFO("[Worker {}] Started (PID {}, TT_VISIBLE_DEVICES={})", workerId,
-                getpid(), visibleDevices);
+    TT_LOG_INFO(
+        "[Worker {}] Started (PID {}, runner_type={}, TT_VISIBLE_DEVICES={}, "
+        "MODEL={}, DEVICE={}, max_batch_size={})",
+        workerId, getpid(), tt::config::toString(cfg.runner_type),
+        visibleDevices, cfg.python_model_name, cfg.device, cfg.max_batch_size);
 
-    runners::EmbeddingRunner runner(visibleDevices, workerId);
-    if (!runner.warmup()) {
+    std::unique_ptr<runners::IEmbeddingRunner> runner;
+    try {
+      auto workerCfg = cfg;
+      workerCfg.worker_id = wid;
+      workerCfg.visible_devices = visibleDevices;
+      runner = runners::makeEmbeddingRunner(workerCfg);
+    } catch (const std::exception& e) {
+      TT_LOG_ERROR("[Worker {}] Could not build runner: {}", workerId,
+                   e.what());
+      _exit(1);
+    }
+
+    if (!runner->warmup()) {
       TT_LOG_ERROR("[Worker {}] Warmup failed!", workerId);
       _exit(1);
     }
@@ -264,7 +299,7 @@ struct EmbeddingService::Impl {
       TT_LOG_INFO("[Worker {}] Processing batch of {} requests", workerId,
                   batch.size());
 
-      auto responses = runner.run(batch);
+      auto responses = runner->run(batch);
       auto buf = embedding_codec::encodeResponses(batch, responses);
 
       if (!pipeWrite(writeFd, buf.data(), buf.size())) {
@@ -272,61 +307,57 @@ struct EmbeddingService::Impl {
       }
     }
 
-    runner.close();
+    runner->close();
     _exit(0);
   }
 
   void start() {
-    if (running_.exchange(true)) return;
+    if (running.exchange(true)) return;
 
     TT_LOG_INFO("[EmbeddingService] Starting with {} worker processes",
-                num_workers_);
-    workers_.reserve(num_workers_);
+                numWorkers);
+    workers.reserve(numWorkers);
 
-    for (size_t i = 0; i < num_workers_; ++i) {
+    for (size_t i = 0; i < numWorkers; ++i) {
       auto w = std::make_unique<WorkerProcess>();
       int wid = static_cast<int>(i);
       if (!w->spawn(
               wid, [wid](int rd, int wr) { workerProcessMain(wid, rd, wr); })) {
         continue;
       }
-      workers_.push_back(std::move(w));
+      workers.push_back(std::move(w));
     }
 
-    for (size_t i = 0; i < workers_.size(); ++i) {
-      workers_[i]->dispatch_thread =
+    for (size_t i = 0; i < workers.size(); ++i) {
+      workers[i]->dispatchThread =
           std::make_unique<std::thread>(&Impl::workerDispatchLoop, this, i);
     }
 
-    is_ready_ = true;
-    TT_LOG_INFO("[EmbeddingService] All {} workers started", workers_.size());
+    isReady = true;
+    TT_LOG_INFO("[EmbeddingService] All {} workers started", workers.size());
   }
 
   void stop() {
-    if (!running_.exchange(false)) return;
+    if (!running.exchange(false)) return;
 
     TT_LOG_INFO("[EmbeddingService] Stopping...");
-    queue_cv_.notify_all();
+    queueCv.notify_all();
 
-    for (auto& w : workers_) w->running = false;
-    queue_cv_.notify_all();
+    for (auto& w : workers) w->running = false;
+    queueCv.notify_all();
 
-    size_t batchSize = tt::config::maxInFlightCount();
-    std::string batchStr = std::to_string(batchSize);
-    setenv("MAX_BATCH_SIZE", batchStr.c_str(), 1);
-
-    for (auto& w : workers_) {
-      if (w->dispatch_thread && w->dispatch_thread->joinable())
-        w->dispatch_thread->join();
+    for (auto& w : workers) {
+      if (w->dispatchThread && w->dispatchThread->joinable())
+        w->dispatchThread->join();
       w->terminate();
     }
-    workers_.clear();
-    is_ready_ = false;
+    workers.clear();
+    isReady = false;
     TT_LOG_INFO("[EmbeddingService] Stopped");
   }
 
   void workerDispatchLoop(size_t workerIdx) {
-    auto& worker = workers_[workerIdx];
+    auto& worker = workers[workerIdx];
     TT_LOG_INFO("[EmbeddingService] Worker {} dispatch thread started",
                 workerIdx);
 
@@ -335,24 +366,23 @@ struct EmbeddingService::Impl {
     double totalQueueWaitMs = 0;
     double totalDispatchMs = 0;
 
-    while (worker->running.load() && worker->is_ready) {
+    while (worker->running.load() && worker->isReady) {
       std::vector<std::shared_ptr<PendingRequest>> batch;
 
       auto queueStart = std::chrono::steady_clock::now();
       {
-        std::unique_lock lock(queue_mutex_);
-        queue_cv_.wait_for(
-            lock, std::chrono::milliseconds(100), [this, &worker] {
-              return !request_queue_.empty() || !worker->running.load() ||
-                     !worker->is_ready;
-            });
+        std::unique_lock lock(queueMutex);
+        queueCv.wait_for(lock, std::chrono::milliseconds(100), [this, &worker] {
+          return !requestQueue.empty() || !worker->running.load() ||
+                 !worker->isReady;
+        });
 
-        if (!worker->running.load() || !worker->is_ready) break;
-        if (request_queue_.empty()) continue;
+        if (!worker->running.load() || !worker->isReady) break;
+        if (requestQueue.empty()) continue;
 
-        while (batch.size() < max_batch_size_ && !request_queue_.empty()) {
-          batch.push_back(request_queue_.front());
-          request_queue_.pop();
+        while (batch.size() < maxBatchSize && !requestQueue.empty()) {
+          batch.push_back(requestQueue.front());
+          requestQueue.pop();
         }
       }
       auto queueEnd = std::chrono::steady_clock::now();
@@ -362,7 +392,7 @@ struct EmbeddingService::Impl {
 
       if (batch.empty()) continue;
 
-      if (!worker->is_ready) {
+      if (!worker->isReady) {
         failBatch(batch, "Worker died");
         continue;
       }
@@ -392,14 +422,14 @@ struct EmbeddingService::Impl {
     }
 
     TT_LOG_INFO(
-        "[EmbeddingService] Worker {} dispatch thread exiting (is_ready={})",
-        workerIdx, worker->is_ready.load());
+        "[EmbeddingService] Worker {} dispatch thread exiting (isReady={})",
+        workerIdx, worker->isReady.load());
   }
 
   void dispatchBatchToWorker(
       WorkerProcess& worker,
       std::vector<std::shared_ptr<PendingRequest>>& batch) {
-    if (!worker.is_ready.load() || !worker.checkAlive()) {
+    if (!worker.isReady.load() || !worker.checkAlive()) {
       failBatch(batch, "Worker not available");
       return;
     }
@@ -450,10 +480,10 @@ struct EmbeddingService::Impl {
     auto future = pending->promise.get_future();
 
     {
-      std::lock_guard lock(queue_mutex_);
-      request_queue_.push(pending);
+      std::lock_guard lock(queueMutex);
+      requestQueue.push(pending);
     }
-    queue_cv_.notify_all();
+    queueCv.notify_all();
 
     return future;
   }
@@ -469,16 +499,14 @@ void EmbeddingService::start() { impl_->start(); }
 
 void EmbeddingService::stop() { impl_->stop(); }
 
-bool EmbeddingService::isModelReady() const { return impl_->is_ready_.load(); }
+bool EmbeddingService::isModelReady() const { return impl_->isReady.load(); }
 
 size_t EmbeddingService::currentQueueSize() const {
-  std::lock_guard lock(impl_->queue_mutex_);
-  return impl_->request_queue_.size();
+  std::lock_guard lock(impl_->queueMutex);
+  return impl_->requestQueue.size();
 }
 
-void EmbeddingService::postProcess(domain::EmbeddingResponse&) const {}
-
-domain::EmbeddingResponse EmbeddingService::processRequest(
+domain::EmbeddingResponse EmbeddingService::produceResponse(
     domain::EmbeddingRequest request) {
   auto future = impl_->submitRequest(std::move(request));
   return future.get();

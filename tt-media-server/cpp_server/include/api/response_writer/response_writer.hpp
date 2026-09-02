@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+
+#include "domain/llm/llm_response.hpp"
+
+namespace tt::api {
+
+using namespace tt::domain::llm;
+
+/**
+ * Parameters shared by every chat-completion response writer (streaming or
+ * non-streaming). Wire-format-specific options live on the concrete writer.
+ */
+struct ResponseWriterParams {
+  std::string completionId;
+  std::string model;
+  int64_t created;
+  int promptTokenCount;
+  int cachedTokenCount = 0;
+  std::optional<std::string> sessionId;
+  uint32_t taskId;
+  std::function<void(uint32_t)> onAbortRequest;
+  std::function<void()> onSessionRelease;
+  bool enableDisconnectHeartbeat = false;
+};
+
+/**
+ * Abstract base for chat-completion response writers. Owns the bits that are
+ * truly shared between the two delivery formats:
+ *  - the immutable request/session params,
+ *  - the token timing state used to compute TTFT/TPS,
+ *  - the idempotent done flag,
+ *  - session in-flight release.
+ *
+ * Concrete subclasses (StreamingResponseWriter, NonStreamResponseWriter)
+ * implement the wire format by overriding handleTokenChunk and finalize. The
+ * controller can therefore drive both with the same streaming callback shape.
+ *
+ * Thread safety: Callbacks are serialized by the LLMService consumer thread,
+ * so noteToken() relies on this serialization for timing accuracy. The atomic
+ * done flag protects finalize() and abort() from concurrent invocation.
+ */
+class ResponseWriter : public std::enable_shared_from_this<ResponseWriter> {
+ public:
+  virtual ~ResponseWriter() = default;
+
+  ResponseWriter(const ResponseWriter&) = delete;
+  ResponseWriter& operator=(const ResponseWriter&) = delete;
+
+  /** Consume a single LLMStreamChunk produced by the streaming generator. */
+  virtual void handleTokenChunk(const LLMStreamChunk& chunk) = 0;
+
+  /** Signal end-of-stream. Idempotent; releases in-flight slot. */
+  virtual void finalize() = 0;
+
+  /**
+   * Disaggregation: the decode server stamps the prefill server's prefix-cache
+   * reuse onto the first stream chunk (LLMStreamChunk::cached_prompt_tokens).
+   * When present it overrides the request-derived cachedTokenCount in usage.
+   * Safe to call on every chunk; no-op for the aggregated path. The controller
+   * calls this before its content filter so a cached-only chunk still counts.
+   */
+  void observeCachedTokens(const LLMStreamChunk& chunk);
+
+  bool isDone() const { return done.load(); }
+
+ protected:
+  explicit ResponseWriter(ResponseWriterParams params);
+
+  /**
+   * Increment the completion-token counter and stamp first/second-token
+   * times. Subclasses must call this from handleTokenChunk on every token
+   * that contributes to the final response. Returns the new token count.
+   */
+  int noteToken(const LLMChoice& choice);
+
+  /** Compute usage from the current accumulator state. */
+  CompletionUsage buildUsage() const;
+
+  ResponseWriterParams params;
+  // -1 = unset (use params.cachedTokenCount); >=0 = override from prefill.
+  std::atomic<int> cachedTokensOverride{-1};
+  std::chrono::high_resolution_clock::time_point startTime =
+      std::chrono::high_resolution_clock::now();
+  std::optional<std::chrono::high_resolution_clock::time_point> firstTokenTime;
+  std::optional<std::chrono::high_resolution_clock::time_point> secondTokenTime;
+  std::atomic<int> completionTokens{0};
+  std::atomic<uint32_t> specAccepts{0};
+  std::atomic<uint32_t> specRejects{0};
+  std::atomic<bool> done{false};
+};
+
+}  // namespace tt::api

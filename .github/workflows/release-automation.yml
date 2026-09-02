@@ -1,0 +1,711 @@
+name: Release Automation (promote specs, docs, helm & docker images)
+
+run-name: ${{ inputs.version && format('Release automation v{0}', inputs.version) || 'Release automation (push)' }}
+
+# ---------------------------------------------------------------------------
+# Automates the release pipeline (dispatch-only). In order:
+#   - Guard: only the sanctioned release branch may run.
+#   - Validate inputs: version == VERSION file; vllm-commit present when the
+#     release ships vLLM; tt-metal/vllm commits match the tt-shield run.
+#   1. promote_dev_spec_to_prod.py  (dev -> prod model specs, release-scoped)
+#   1b. assert no shadowed duplicate model_id in the promoted prod catalogue
+#   2. export_model_spec.py         (docs/model_support + release_model_spec.json)
+#   3. python -m workflows.helm_generator  (charts/.../values.yaml)
+#   4. helm-docs                    (chart README / supported-models docs)
+#   - commit + push the generated files to the release branch, then tag.
+#   - build the release-artifacts zip from the tt-shield run (upload artifact).
+#   - resolve tt-shield source images -> map to release images -> crane copy
+#     (publish) -> re-bake the prod catalogue into the vLLM image -> verify.
+#   - create post-release-v<version> off main (carry VERSION + models-ci-config,
+#     re-run the 4 generators) and open a draft PR to main.
+# Suffixes (tag-suffix / post-release-suffix) mark testing artifacts; empty = real release.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version for the run title, e.g. 0.21.0 - must match the VERSION"
+        required: true
+        type: string
+      tt-shield-run-id:
+        description: "tt-shield Release run ID"
+        required: true
+        type: string
+      tt-metal-commit:
+        description: "tt-metal commit SHA pinned into the prod catalogue"
+        required: true
+        type: string
+      vllm-commit:
+        description: "vLLM commit SHA (needed for LLM models)"
+        required: false
+        type: string
+      tag-suffix:
+        description: "Suffix appended to the commit message & tag. Empty for a real release; set e.g. '-temp' while testing."
+        required: false
+        default: ""
+        type: string
+      post-release-suffix:
+        description: "Suffix for the post-release branch. Empty for a real release; set e.g. '-test' while testing."
+        required: false
+        default: ""
+        type: string
+
+# The pipeline commits generated files + a tag to the branch and opens a draft PR.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-automation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  HELM_DOCS_VERSION: "1.14.2"
+  CRANE_VERSION: "0.21.5"
+
+jobs:
+  release-prep:
+    name: Promote specs, regenerate docs & helm, then commit + tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      # Refuse to run from anywhere but the sanctioned release branches. Runs
+      # first (before checkout) so a wrong branch (e.g. main) fails immediately.
+      - name: "Guard: allowed release branch only"
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          case "$REF" in
+            stable | vcankovic/automated-release-pipeline)
+              echo "Branch '$REF' is allowed — proceeding." ;;
+            *)
+              echo "::error::Release automation may only run from 'stable', 'vcankovic/stable-automated-release-pipeline', or 'vcankovic/automated-release-pipeline'. Refusing to run on '$REF'."
+              exit 1 ;;
+          esac
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install Python dependencies
+        # requirements-dev.txt provides ruamel.yaml + jsonschema for the helm
+        # generator and PyYAML for the promote /
+        # export scripts. 
+        # One environment serves all four commands — CI does not .venv.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Install helm-docs
+        # helm-docs is a Go binary and is not present on ubuntu-latest.
+        run: |
+          curl -fsSL -o /tmp/helm-docs.tar.gz \
+            "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz"
+          sudo tar -xzf /tmp/helm-docs.tar.gz -C /usr/local/bin helm-docs
+          helm-docs --version
+
+      - name: Resolve inputs
+        env:
+          IN_VERSION: ${{ github.event.inputs.version }}
+          IN_TT_METAL_COMMIT: ${{ github.event.inputs['tt-metal-commit'] }}
+          IN_VLLM_COMMIT: ${{ github.event.inputs['vllm-commit'] }}
+          IN_TT_SHIELD_RUN_ID: ${{ github.event.inputs['tt-shield-run-id'] }}
+          IN_TAG_SUFFIX: ${{ github.event.inputs['tag-suffix'] }}
+          IN_POST_RELEASE_SUFFIX: ${{ github.event.inputs['post-release-suffix'] }}
+        run: |
+          # The VERSION file is the source of truth (checkout runs first, so it
+          # is present). The `version` input is only for the run title; require
+          # it to match the file so the title can never misrepresent the release.
+          RELEASE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "$RELEASE_VERSION" ]; then
+            echo "::error::VERSION file is empty or missing"; exit 1
+          fi
+          if [ -n "$IN_VERSION" ] && [ "$IN_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "::error::version input ('$IN_VERSION') does not match the VERSION file ('$RELEASE_VERSION'). Update the input or the VERSION file so they agree."
+            exit 1
+          fi
+          if [ -z "$IN_TT_SHIELD_RUN_ID" ]; then
+            echo "::error::tt-shield-run-id is required"; exit 1
+          fi
+          # If this release ships any vLLM model, vllm-commit is mandatory: an
+          # empty value would pin an empty vllm_commit in prod and produce a
+          # malformed image tag '<ver>-<ttm>-'. Derive the release engine
+          # families from the config (same rule the crane publish step uses).
+          RELEASE_FAMS=$(python3 -c "import json,sys; sys.path.insert(0,'.'); from workflows.workflow_types import InferenceEngine as E; c=json.load(open('.github/workflows/models-ci-config.json')); print(' '.join(sorted({E.from_string(i['inference_engine']).value.lower() for _n,e in c['models'].items() for i in e.get('implementations',[e]) if i.get('ci',{}).get('release')})))")
+          echo "Release engine families: ${RELEASE_FAMS:-<none>}"
+          case " ${RELEASE_FAMS} " in
+            *" vllm "*)
+              if [ -z "$IN_VLLM_COMMIT" ]; then
+                echo "::error::this release ships vLLM models (families: ${RELEASE_FAMS}) but vllm-commit is empty — provide it."
+                exit 1
+              fi ;;
+          esac
+          {
+            echo "RELEASE_VERSION=${RELEASE_VERSION}"
+            echo "TT_METAL_COMMIT=${IN_TT_METAL_COMMIT}"
+            echo "VLLM_COMMIT=${IN_VLLM_COMMIT}"
+            echo "TT_SHIELD_RUN_ID=${IN_TT_SHIELD_RUN_ID}"
+          } >> "$GITHUB_ENV"
+          # Suffixes: use the dispatch inputs verbatim (empty = real release).
+          {
+            echo "TAG_SUFFIX=${IN_TAG_SUFFIX}"
+            echo "POST_RELEASE_SUFFIX=${IN_POST_RELEASE_SUFFIX}"
+          } >> "$GITHUB_ENV"
+
+      - name: Show effective parameters
+        run: |
+          echo "version          = ${RELEASE_VERSION}"
+          echo "tt-metal-commit  = ${TT_METAL_COMMIT}"
+          echo "vllm-commit      = ${VLLM_COMMIT}"
+          echo "tt-shield-run-id = ${TT_SHIELD_RUN_ID}"
+          echo "commit/tag       = v${RELEASE_VERSION}${TAG_SUFFIX}"
+          echo "post-release br  = post-release-v${RELEASE_VERSION}${POST_RELEASE_SUFFIX} (from main)"
+
+      # ----- Cross-check the hand-typed commits against what the tt-shield run
+      #       actually built, BEFORE any promote/commit/tag/publish. Fails fast on
+      #       a typo'd tt-metal-commit / vllm-commit (wrong pins + wrong image
+      #       tags). Empty vllm-commit is ignored here (guarded above by #8). -----
+      - name: "Validate input commits against the tt-shield run"
+        env:
+          GH_TOKEN: ${{ secrets.TMP_VCANKOVIC_SHIELD_CRANE_PAT }}
+        run: |
+          python3 scripts/release/resolve_release_source_images.py \
+            --run-id "${TT_SHIELD_RUN_ID}" \
+            --expect "ttm=${TT_METAL_COMMIT},vllm=${VLLM_COMMIT}"
+
+      # ----- Step 1: promote dev model specs -> prod (release-scoped only) -----
+      - name: "Step 1 — promote dev specs to prod"
+        run: |
+          python3 scripts/release/promote_dev_spec_to_prod.py \
+            --version "${RELEASE_VERSION}" \
+            --tt-metal-commit "${TT_METAL_COMMIT}" \
+            --vllm-commit "${VLLM_COMMIT}"
+
+      # ----- Step 2: regenerate model-support docs + release_model_spec.json ----
+      - name: "Step 2 — export model spec (docs + JSON)"
+        run: python3 scripts/release/export_model_spec.py
+
+      # ----- Step 3: regenerate charts/tt-inference-server/values.yaml ---------
+      - name: "Step 3 — generate Helm values.yaml"
+        run: python -m workflows.helm_generator
+
+      # ----- Step 4: regenerate chart README / supported-models docs ----------
+      - name: "Step 4 — generate Helm chart docs (helm-docs)"
+        run: |
+          helm-docs \
+            --chart-search-root=charts/tt-inference-server \
+            --template-files=_supportedModels.gotmpl \
+            --template-files=README.md.gotmpl
+
+      # ----- Show what the generators produced (before committing) ------------
+      - name: "Show generated changes (added or modified files)"
+        if: always()
+        run: |
+          echo "=== git status ==="
+          git status --short --untracked-files=all
+          echo
+          echo "=== git diff --stat ==="
+          git diff --stat
+          {
+            echo "## Release automation — v${RELEASE_VERSION}${TAG_SUFFIX}"
+            echo
+            echo "version=\`${RELEASE_VERSION}\`, tt-metal-commit=\`${TT_METAL_COMMIT}\`, vllm-commit=\`${VLLM_COMMIT}\`"
+            echo
+            echo '```'
+            git status --short --untracked-files=all
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----- Commit + push + tag, from the pipeline (only if steps 1-4 ok) -----
+      - name: Configure git identity for push operation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: "git add + git commit on stable branch"
+        run: |
+          TAG="v${RELEASE_VERSION}${TAG_SUFFIX}"
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes produced by the release-prep scripts — nothing to commit."
+            echo "COMMITTED=false" >> "$GITHUB_ENV"
+          else
+            git commit -m "${TAG}"
+            echo "Committed as '${TAG}'."
+            echo "COMMITTED=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: "git push on stable branch"
+        if: env.COMMITTED == 'true'
+        run: git push origin "HEAD:${{ github.ref_name }}"
+
+      - name: "git tag + git push origin <tag>"
+        # Force so re-runs of the pipeline re-point/replace the (temp) tag
+        # instead of failing on an already-existing tag.
+        run: |
+          TAG="v${RELEASE_VERSION}${TAG_SUFFIX}"
+          git tag -f "${TAG}"
+          git push -f origin "refs/tags/${TAG}"
+          echo "Tagged HEAD and pushed '${TAG}'."
+
+      - name: "git branch <tag> from release HEAD + push"
+        # README_MANUAL also cuts a v<version> BRANCH (besides the tag) from the
+        # release HEAD. Use `git branch -f` (NOT switch/checkout) so HEAD stays on
+        # the current release branch — later steps (crane copy / re-bake / verify /
+        # post-release) are unaffected. The branch is taken from HEAD (never
+        # references 'stable' or the branch name), and NO branch is deleted. Force
+        # so a re-run re-points the (temp) branch instead of failing.
+        run: |
+          TAG="v${RELEASE_VERSION}${TAG_SUFFIX}"
+          git branch -f "${TAG}" HEAD
+          git push -f origin "refs/heads/${TAG}"
+          echo "Created branch '${TAG}' at release HEAD and pushed it (stable left intact)."
+
+      # Preserve the generated files so they can be inspected / downloaded.
+      - name: "Upload generated changes as an artifact"
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-automation-generated-changes
+          path: |
+            workflows/model_specs/prod/**
+            release_model_spec.json
+            docs/model_support/**
+            charts/tt-inference-server/values.yaml
+            charts/tt-inference-server/README.md
+            README.md
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: "Build release artifacts zip (download from tt-shield)"
+        env:
+          GH_TOKEN: ${{ secrets.TMP_VCANKOVIC_SHIELD_CRANE_PAT }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/release_artifacts"
+          python3 scripts/release/build_release_artifacts.py \
+            --run-id "${TT_SHIELD_RUN_ID}" \
+            --version "v${RELEASE_VERSION}" \
+            --output-dir "${RUNNER_TEMP}/release_artifacts"
+
+      - name: "Upload release artifacts zip"
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-artifacts-v${{ env.RELEASE_VERSION }}
+          path: ${{ runner.temp }}/release_artifacts/*.zip
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ----- Resolve the source dev images (vllm/media/forge) built by the
+      #       tt-shield run, and expose them as STEP OUTPUTS for later steps
+      #       plus a run-summary table.
+      - name: "Resolve source docker images (vllm/media/forge)"
+        id: source-images
+        env:
+          GH_TOKEN: ${{ secrets.TMP_VCANKOVIC_SHIELD_CRANE_PAT }}
+        run: |
+          python3 scripts/release/resolve_release_source_images.py \
+            --run-id "${TT_SHIELD_RUN_ID}" --json > "${RUNNER_TEMP}/source_images.json"
+          cat "${RUNNER_TEMP}/source_images.json"
+
+          # Expose one output per engine family (value or the literal "None").
+          for fam in vllm media forge; do
+            val=$(python3 -c "import json;print(json.load(open('${RUNNER_TEMP}/source_images.json'))['images']['$fam'] or 'None')")
+            echo "${fam}=${val}" >> "$GITHUB_OUTPUT"
+          done
+
+          # Human-readable summary on the run page.
+          {
+            echo "## Resolve source docker images (tt-shield run ${TT_SHIELD_RUN_ID})"
+            echo
+            echo "| Engine | Source dev image |"
+            echo "|--------|------------------|"
+            for fam in vllm media forge; do
+              val=$(python3 -c "import json;print(json.load(open('${RUNNER_TEMP}/source_images.json'))['images']['$fam'] or 'None')")
+              echo "| ${fam} | \`${val}\` |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----- Map each source dev image to the tt-inference-server RELEASE image
+      #       to publish, and emit the publish plan (source -> destination) as
+      #       step outputs + a crane-copy preview.
+      #         vllm  -> ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:<ver>-<ttm>-<vllm>
+      #         media -> ghcr.io/tenstorrent/tt-media-inference-server:<ver>-<ttm>
+      #         forge -> ghcr.io/tenstorrent/tt-media-inference-server-forge:<ver>-<ttm>
+      - name: "Map source -> target docker images to publish"
+        id: image-mapping
+        env:
+          SRC_VLLM: ${{ steps.source-images.outputs.vllm }}
+          SRC_MEDIA: ${{ steps.source-images.outputs.media }}
+          SRC_FORGE: ${{ steps.source-images.outputs.forge }}
+        run: |
+          # Destination tags built from the release inputs (mirrors
+          # generate_default_docker_link; commits truncated to 12 like it does).
+          VER="${RELEASE_VERSION}"
+          TTM="${TT_METAL_COMMIT:0:12}"
+          VLL="${VLLM_COMMIT:0:12}"
+          DST_VLLM="ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:${VER}-${TTM}-${VLL}"
+          DST_MEDIA="ghcr.io/tenstorrent/tt-media-inference-server:${VER}-${TTM}"
+          DST_FORGE="ghcr.io/tenstorrent/tt-media-inference-server-forge:${VER}-${TTM}"
+
+          # No source built for a family -> nothing to publish for it.
+          [ "$SRC_VLLM" = "None" ] && DST_VLLM="None"
+          [ "$SRC_MEDIA" = "None" ] && DST_MEDIA="None"
+          [ "$SRC_FORGE" = "None" ] && DST_FORGE="None"
+
+          # Publish plan as step outputs (source + destination per family).
+          {
+            echo "vllm_source=$SRC_VLLM";   echo "vllm_dest=$DST_VLLM"
+            echo "media_source=$SRC_MEDIA"; echo "media_dest=$DST_MEDIA"
+            echo "forge_source=$SRC_FORGE"; echo "forge_dest=$DST_FORGE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "vllm : $SRC_VLLM -> $DST_VLLM"
+          echo "media: $SRC_MEDIA -> $DST_MEDIA"
+          echo "forge: $SRC_FORGE -> $DST_FORGE"
+
+          # Summary table + publish plan (source -> destination).
+          {
+            echo "## Release image publish plan (v${VER})"
+            echo
+            echo "| Engine | Source (tt-shield dev) | Destination (tt-inference-server release) |"
+            echo "|--------|------------------------|-------------------------------------------|"
+            echo "| vllm  | \`$SRC_VLLM\` | \`$DST_VLLM\` |"
+            echo "| media | \`$SRC_MEDIA\` | \`$DST_MEDIA\` |"
+            echo "| forge | \`$SRC_FORGE\` | \`$DST_FORGE\` |"
+            echo
+            echo "_Release-scoped crane copy commands are run by the 'crane copy (publish release images)' step below._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----- Install crane (google/go-containerregistry) — used to promote the
+      #       release images from tt-shield to tt-inference-server
+      - name: "Install crane"
+        run: |
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | sudo tar -xzf - -C /usr/local/bin crane
+          crane version
+
+      # ----- crane login to ghcr.io (README_MANUAL pattern), as vcankovicTT with
+      #       the TMP_VCANKOVIC_SHIELD_CRANE_PAT secret (read:packages for
+      #       tt-shield + write:packages for tt-inference-server). Verifies the
+      #       login and, if a source image resolved, that the token can PULL it
+      #       (needs read:packages) — an early diagnostic; the real crane copy
+      #       below hard-fails if auth is insufficient. -----
+      - name: "crane login to ghcr.io (real) + verify"
+        env:
+          CRANE_USER: vcankovicTT
+          CRANE_PAT: ${{ secrets.TMP_VCANKOVIC_SHIELD_CRANE_PAT }}
+          SRC_VLLM: ${{ steps.image-mapping.outputs.vllm_source }}
+          SRC_MEDIA: ${{ steps.image-mapping.outputs.media_source }}
+          SRC_FORGE: ${{ steps.image-mapping.outputs.forge_source }}
+        run: |
+          # Password via stdin so the token is never in the process args.
+          printf '%s' "$CRANE_PAT" | crane auth login ghcr.io -u "$CRANE_USER" --password-stdin
+          echo "✅ crane auth login ghcr.io succeeded as ${CRANE_USER}"
+
+          # Prove the token can pull a real source image (needs read:packages).
+          for src in "$SRC_VLLM" "$SRC_MEDIA" "$SRC_FORGE"; do
+            [ "$src" = "None" ] && continue
+            if crane manifest "$src" >/dev/null 2>&1; then
+              echo "✅ verified pull: $src"
+            else
+              echo "::warning::crane could not pull '$src' — the PAT likely lacks read:packages; crane copy would fail."
+            fi
+            break
+          done
+
+      # ----- Publish the release images: crane copy each source -> destination,
+      #       gated by which ENGINE FAMILIES the current release actually ships
+      #       (from models-ci-config.json release entries, via the InferenceEngine
+      #       enum — same rule as generate_default_docker_link). A family is copied
+      #       only if it is in the release AND a source image was built. -----
+      - name: "crane copy (publish release images)"
+        id: crane-plan
+        env:
+          SRC_VLLM: ${{ steps.image-mapping.outputs.vllm_source }}
+          DST_VLLM: ${{ steps.image-mapping.outputs.vllm_dest }}
+          SRC_MEDIA: ${{ steps.image-mapping.outputs.media_source }}
+          DST_MEDIA: ${{ steps.image-mapping.outputs.media_dest }}
+          SRC_FORGE: ${{ steps.image-mapping.outputs.forge_source }}
+          DST_FORGE: ${{ steps.image-mapping.outputs.forge_dest }}
+        run: |
+          # Engine families the current release ships (reuses InferenceEngine).
+          # Single-line python so YAML block indentation can't corrupt it.
+          RELEASE_FAMS=$(python3 -c "import json,sys; sys.path.insert(0,'.'); from workflows.workflow_types import InferenceEngine as E; c=json.load(open('.github/workflows/models-ci-config.json')); print(' '.join(sorted({E.from_string(i['inference_engine']).value.lower() for _n,e in c['models'].items() for i in e.get('implementations',[e]) if i.get('ci',{}).get('release')})))")
+          echo "Release engine families: ${RELEASE_FAMS:-<none>}"
+          echo
+
+          in_release() { for f in $RELEASE_FAMS; do [ "$f" = "$1" ] && return 0; done; return 1; }
+
+          copy_cmds=""
+          promoted=""   # just the destination images that will be published
+          for fam in vllm media forge; do
+            case "$fam" in
+              vllm)  src="$SRC_VLLM";  dst="$DST_VLLM";;
+              media) src="$SRC_MEDIA"; dst="$DST_MEDIA";;
+              forge) src="$SRC_FORGE"; dst="$DST_FORGE";;
+            esac
+            if ! in_release "$fam"; then
+              echo "# skip ${fam}: no ${fam} models in this release"
+            elif [ "$src" = "None" ] || [ -z "$src" ] || [ "$dst" = "None" ]; then
+              echo "# skip ${fam}: release ships ${fam} models but no source image was built (UNKNOWN)"
+            else
+              cmd="crane copy ${src} ${dst}"
+              echo "${cmd}"
+              copy_cmds="${copy_cmds}${cmd}"$'\n'
+              promoted="${promoted}${dst}"$'\n'
+              crane copy "${src}" "${dst}" || { echo "::error::crane copy failed: ${src} -> ${dst}"; exit 1; }
+            fi
+          done
+
+          # Single source of truth for the publish list: expose the destination
+          # images (release-scoped + source built) so the PR step can list them
+          # under 'Images Promoted from Models CI'.
+          {
+            echo "promoted_images<<PROMOTED_EOF"
+            printf '%s' "$promoted"
+            echo "PROMOTED_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## crane copy — release-scoped publish (v${RELEASE_VERSION})"
+            echo
+            echo "Release engine families: \`${RELEASE_FAMS:-<none>}\`"
+            echo
+            echo "Commands executed:"
+            echo '```bash'
+            if [ -n "$copy_cmds" ]; then printf '%s' "$copy_cmds"; else echo "# (nothing to publish)"; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----- Re-bake the model catalogue into the published vLLM image.
+      #       crane copy re-labels, it does not rebuild. The tt-shield source
+      #       image was built BEFORE this run promoted dev->prod, so its baked
+      #       /home/container_app_user/model_specs/model_spec.json holds the
+      #       PREVIOUS release's catalogue. Anything promoted in this release is
+      #       missing from it, so the container either dies with
+      #       "No model spec found" or silently serves the old config.
+      #       Affected v0.17.0 through v0.20.0 (gemma-4-31B-it, gpt-oss-120b,
+      #       Qwen3.6-27B, Llama-3.1-8B).
+      #       Appending the fresh catalogue as a new top layer leaves every other
+      #       layer byte-identical, so no model re-validation is needed.
+      #       vLLM only: media/forge containers take their config from host env
+      #       vars and bake no catalogue.
+      #       NOTE: must run AFTER the real vLLM `crane copy`.
+      - name: "Re-bake model catalogue into the published vLLM image"
+        env:
+          DST_VLLM: ${{ steps.image-mapping.outputs.vllm_dest }}
+          SRC_VLLM: ${{ steps.image-mapping.outputs.vllm_source }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DST_VLLM}" ] || [ "${DST_VLLM}" = "None" ]; then
+            echo "No vLLM image published this release - nothing to re-bake."
+            exit 0
+          fi
+          if ! crane manifest "${DST_VLLM}" >/dev/null 2>&1; then
+            echo "::warning::${DST_VLLM} not in the registry - skipping re-bake."
+            exit 0
+          fi
+
+          REPO="${DST_VLLM%%:*}"
+
+          # The published tag is an OCI index (amd64 image + buildkit
+          # attestation); crane append needs a single image.
+          AMD64=$(crane manifest "${DST_VLLM}" | python3 -c "import json,sys; m=json.load(sys.stdin); print([x['digest'] for x in m['manifests'] if x['platform']['architecture']=='amd64'][0] if 'manifests' in m else '')")
+          if [ -z "${AMD64}" ]; then
+            echo "::error::could not resolve an amd64 manifest for ${DST_VLLM}"; exit 1
+          fi
+          echo "amd64 base: ${REPO}@${AMD64}"
+
+          # Generate from the promoted prod/ catalogue in this workspace.
+          python3 -c "from scripts.build_docker_images import generate_model_specs_json; generate_model_specs_json()"
+
+          BAKED_VER=$(python3 -c "import json; print(json.load(open('model_spec.json'))['release_version'])")
+          if [ "${BAKED_VER}" != "${RELEASE_VERSION}" ]; then
+            echo "::error::generated catalogue says ${BAKED_VER}, expected ${RELEASE_VERSION} - wrong branch or VERSION not bumped"
+            exit 1
+          fi
+
+          # Pack at the exact path + ownership the image uses
+          # (uid/gid 1000 = container_app_user) so the new layer masks the stale file.
+          rm -rf /tmp/catalog
+          mkdir -p /tmp/catalog/home/container_app_user/model_specs
+          cp model_spec.json /tmp/catalog/home/container_app_user/model_specs/
+          tar --owner=1000 --group=1000 -C /tmp/catalog -cf /tmp/catalog-layer.tar home
+
+          crane append -b "${REPO}@${AMD64}" -f /tmp/catalog-layer.tar -t "${DST_VLLM}"
+          NEW_DIGEST=$(crane digest "${DST_VLLM}")
+          echo "Re-baked ${DST_VLLM} -> ${NEW_DIGEST}"
+
+          {
+            echo "## Model catalogue re-baked into the published vLLM image"
+            echo
+            echo "- image: \`${DST_VLLM}\`"
+            echo "- catalogue release_version: \`${BAKED_VER}\`"
+            echo "- new digest: \`${NEW_DIGEST}\`"
+            echo "- rollback: \`crane copy ${SRC_VLLM} ${DST_VLLM}\`"
+            echo
+            echo "> Tag unchanged; the digest changes and the buildkit attestation is dropped."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----- The gate: fail the release if the published image cannot resolve
+      #       every spec that points at it. Catches both known causes above and
+      #       any future one.
+      - name: "Verify published vLLM image resolves every spec pinned to it"
+        env:
+          DST_VLLM: ${{ steps.image-mapping.outputs.vllm_dest }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DST_VLLM}" ] || [ "${DST_VLLM}" = "None" ]; then
+            echo "No vLLM image published this release - nothing to verify."
+            exit 0
+          fi
+          if ! crane manifest "${DST_VLLM}" >/dev/null 2>&1; then
+            echo "::warning::${DST_VLLM} not in the registry - skipping verification."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import io, json, os, subprocess, sys, tarfile
+
+          dst = os.environ["DST_VLLM"]
+          expected = os.environ["RELEASE_VERSION"]
+          repo = dst.rsplit(":", 1)[0]
+
+          def sh(args):
+              p = subprocess.run(args, capture_output=True)
+              if p.returncode:
+                  sys.exit(p.stderr.decode(errors="replace")[:300])
+              return p.stdout
+
+          idx = json.loads(sh(["crane", "manifest", dst]))
+          ref = dst
+          if "manifests" in idx:
+              ref = repo + "@" + next(m["digest"] for m in idx["manifests"]
+                                      if m.get("platform", {}).get("architecture") == "amd64")
+
+          man = json.loads(sh(["crane", "manifest", ref]))
+          baked = None
+          for layer in reversed(man["layers"]):
+              if layer["size"] > 3_000_000:
+                  continue
+              try:
+                  with tarfile.open(
+                      fileobj=io.BytesIO(sh(["crane", "blob", f"{repo}@{layer['digest']}"])),
+                      mode="r:gz",
+                  ) as tf:
+                      m = next((m for m in tf.getmembers()
+                                if m.name.endswith("model_specs/model_spec.json")), None)
+                      if m is None:
+                          continue
+                      baked = json.load(tf.extractfile(m))
+              except Exception:
+                  continue
+              break
+
+          if baked is None:
+              sys.exit(f"::error::no baked model_spec.json found in {dst}")
+          if baked["release_version"] != expected:
+              sys.exit(f"::error::{dst} bakes catalogue v{baked['release_version']}, expected v{expected}")
+
+          catalog = baked["model_specs"]
+          published = json.load(open("release_model_spec.json"))["model_specs"]
+
+          missing = []
+          for hf, devices in published.items():
+              for dev, engines in devices.items():
+                  for spec in (s for impls in engines.values() for s in impls.values()):
+                      if spec.get("docker_image") != dst:
+                          continue
+                      if hf not in catalog or dev not in catalog[hf]:
+                          missing.append(f"{hf} [{dev}]")
+
+          for entry in missing:
+              print(f"::error::{entry} is pinned to {dst} but absent from its baked catalogue")
+          if missing:
+              sys.exit(f"{len(missing)} spec(s) unresolvable inside the published image")
+          print(f"OK - catalogue v{baked['release_version']}, every spec pinned to this image resolves")
+          PY
+
+      # ----- Post-release branch off main. Branches from origin/main, carries this branch's VERSION
+      #       + models-ci-config.json onto it, RE-RUNS the same four generators
+      #       there, then commits everything in ONE commit and pushes.
+      - name: "Post-release: branch from main + carry VERSION/config"
+        env:
+          SRC_REF: ${{ github.ref_name }}
+        run: |
+          NEW_BRANCH="post-release-v${RELEASE_VERSION}${POST_RELEASE_SUFFIX}"
+          {
+            echo "POST_RELEASE_BRANCH=${NEW_BRANCH}"
+            echo "POST_RELEASE_SRC_REF=${SRC_REF}"
+          } >> "$GITHUB_ENV"
+          echo "Creating '${NEW_BRANCH}' from main, carrying VERSION + models-ci-config.json from '${SRC_REF}'."
+
+          # Stash the carried files + the PR script (the post-release branch is
+          # main-based and won't contain this script) outside the repo before
+          # switching branches.
+          cp VERSION "${RUNNER_TEMP}/VERSION.carry"
+          cp .github/workflows/models-ci-config.json "${RUNNER_TEMP}/models-ci-config.json.carry"
+          cp scripts/release/create_post_release_pr.py "${RUNNER_TEMP}/create_post_release_pr.py"
+
+          # Branch off the latest main, then overlay the carried files.
+          git fetch origin main
+          git checkout -b "${NEW_BRANCH}" FETCH_HEAD
+          cp "${RUNNER_TEMP}/VERSION.carry" VERSION
+          cp "${RUNNER_TEMP}/models-ci-config.json.carry" .github/workflows/models-ci-config.json
+
+      - name: "Post-release: regenerate artifacts (same 4 steps, on post-release branch)"
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python3 scripts/release/promote_dev_spec_to_prod.py \
+            --version "${RELEASE_VERSION}" \
+            --tt-metal-commit "${TT_METAL_COMMIT}" \
+            --vllm-commit "${VLLM_COMMIT}"
+          python3 scripts/release/export_model_spec.py
+          python -m workflows.helm_generator
+          helm-docs \
+            --chart-search-root=charts/tt-inference-server \
+            --template-files=_supportedModels.gotmpl \
+            --template-files=README.md.gotmpl
+
+      - name: "Post-release: commit + push the branch"
+        # ONE commit: carried VERSION/config + all regenerated artifacts.
+        # Force so re-runs replace the throwaway branch instead of failing.
+        run: |
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes vs main — pushing '${POST_RELEASE_BRANCH}' at main's tip."
+          else
+            git commit -m "post-release v${RELEASE_VERSION}${POST_RELEASE_SUFFIX}: carry VERSION/models-ci-config.json + regenerate prod specs, docs & helm (from ${POST_RELEASE_SRC_REF})"
+          fi
+          git push -f origin "${POST_RELEASE_BRANCH}"
+          echo "Pushed '${POST_RELEASE_BRANCH}'."
+
+      # ----- FINAL step: open the draft "Post release v<version>" PR
+      #       (post-release branch -> main) in the PR #4398 format.
+      - name: "Post-release: open draft PR -> main"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TMP_VCANKOVIC_SHIELD_CRANE_PAT: ${{ secrets.TMP_VCANKOVIC_SHIELD_CRANE_PAT }}
+          # Release-scoped publish list from the crane-plan step; rendered under
+          # 'Images Promoted from Models CI' in the PR body.
+          PROMOTED_IMAGES: ${{ steps.crane-plan.outputs.promoted_images }}
+        run: |
+          cp "${RUNNER_TEMP}/create_post_release_pr.py" scripts/release/create_post_release_pr.py
+          python3 scripts/release/create_post_release_pr.py \
+            --tt-shield-run-id "${TT_SHIELD_RUN_ID}" \
+            --head-branch "${POST_RELEASE_BRANCH}" \
+            --base main \
+            --promoted-images "${PROMOTED_IMAGES}"

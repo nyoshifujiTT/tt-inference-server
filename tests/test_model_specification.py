@@ -14,19 +14,28 @@ from workflows.model_spec import (
     VERSION,
     DeviceModelSpec,
     ImplSpec,
+    KnownIssue,
     ModelSpec,
     ModelSpecTemplate,
+    ProdModelSpecTemplate,
     VersionRequirement,
     export_model_specs_json,
     get_model_spec_map,
+    resolve_model_spec,
     spec_templates,
     SystemRequirements,
+)
+from workflows.acceptance_criteria import (
+    _is_check_failing,
+    enforce_acceptance_criteria,
 )
 from workflows.workflow_types import (
     DeviceTypes,
     InferenceEngine,
     ModelStatusTypes,
+    ReportCheckTypes,
     VersionMode,
+    WorkflowType,
 )
 
 
@@ -58,8 +67,9 @@ class TestModelSpecTemplateSystem:
 
     def test_template_creation_and_expansion(self, sample_impl):
         """Test template creation and expansion."""
-        template = ModelSpecTemplate(
+        template = ProdModelSpecTemplate(
             impl=sample_impl,
+            version="0.0.0",
             tt_metal_commit="v1.0.0",
             vllm_commit="abc123",
             inference_engine=InferenceEngine.VLLM.value,
@@ -103,12 +113,47 @@ class TestModelSpecTemplateSystem:
             )
             assert spec.device_model_spec.tensor_cache_timeout == expected_timeout
 
-    def test_template_defaults(self, sample_impl):
-        """Test template creation with defaults."""
-        template = ModelSpecTemplate(
+    def test_expand_to_specs_propagates_known_issues(self, sample_impl):
+        known_issues = [
+            KnownIssue(
+                workflow_type=WorkflowType.BENCHMARKS,
+                reason="GH#2600 - OOM on N150",
+                task_name="isl-128_osl-1024_con-32",
+            ),
+            KnownIssue(
+                workflow_type=WorkflowType.EVALS,
+                reason="GH#2550 - eval harness crash",
+            ),
+        ]
+        template = ProdModelSpecTemplate(
             impl=sample_impl,
+            version="0.0.0",
             tt_metal_commit="v1.0.0",
             vllm_commit="abc123",
+            inference_engine=InferenceEngine.VLLM.value,
+            device_model_specs=[
+                DeviceModelSpec(
+                    device=DeviceTypes.N150,
+                    max_concurrency=16,
+                    max_context=8192,
+                    known_issues=known_issues,
+                ),
+            ],
+            weights=["test/model-7B"],
+        )
+        specs = template.expand_to_specs()
+        assert len(specs) == 1
+        expanded_issues = specs[0].device_model_spec.known_issues
+        assert len(expanded_issues) == 2
+        assert expanded_issues[0].workflow_type is WorkflowType.BENCHMARKS
+        assert expanded_issues[0].task_name == "isl-128_osl-1024_con-32"
+        assert expanded_issues[1].workflow_type is WorkflowType.EVALS
+        assert expanded_issues[1].task_name is None
+
+    def test_template_defaults(self, sample_impl):
+        """The dev base template carries no release pins at all."""
+        template = ModelSpecTemplate(
+            impl=sample_impl,
             inference_engine=InferenceEngine.VLLM.value,
             device_model_specs=[
                 DeviceModelSpec(
@@ -120,14 +165,66 @@ class TestModelSpecTemplateSystem:
             weights=["test/model"],
         )
         assert template.repacked == 0
-        assert template.version == VERSION
         assert template.status == ModelStatusTypes.EXPERIMENTAL
-        assert template.docker_image is None
+        # The base (dev) template has no pin fields; they live on
+        # ProdModelSpecTemplate only.
+        assert not hasattr(template, "version")
+        assert not hasattr(template, "tt_metal_commit")
+        assert not hasattr(template, "docker_image")
+        # Directly-constructed templates default to pinned so they are never
+        # dropped from IMAGE_PINNED_MODEL_SPECS.
+        assert template.image_pinned is True
+
+    def test_prod_template_requires_version_and_tt_metal_commit(self, sample_impl):
+        """ProdModelSpecTemplate enforces the release pins at construction."""
+        kwargs = dict(
+            impl=sample_impl,
+            inference_engine=InferenceEngine.VLLM.value,
+            device_model_specs=[
+                DeviceModelSpec(
+                    device=DeviceTypes.N150, max_concurrency=1, max_context=1024
+                )
+            ],
+            weights=["test/model"],
+        )
+        with pytest.raises(TypeError):
+            ProdModelSpecTemplate(**kwargs)  # missing version + tt_metal_commit
+        prod = ProdModelSpecTemplate(version="0.1.0", tt_metal_commit="abc", **kwargs)
+        assert prod.version == "0.1.0"
+        assert prod.tt_metal_commit == "abc"
+        assert prod.vllm_commit is None  # optional
+
+    def test_build_template_sets_image_pinned_from_yaml_keys(self):
+        """image_pinned reflects whether the entry sets `version` or `docker_image`:
+        prod templates (which require version) are pinned; dev templates are not."""
+        from workflows.model_spec import _IMPL_REGISTRY, _build_template
+
+        base = {
+            "weights": ["acme/Foo-7B"],
+            "impl": next(iter(_IMPL_REGISTRY)),
+            "inference_engine": "VLLM",
+            "device_model_specs": [
+                {"device": "N150", "max_concurrency": 16, "max_context": 8192}
+            ],
+        }
+
+        # dev: no pins → not image-pinned
+        assert _build_template(dict(base), env="dev").image_pinned is False
+        # prod: version is required and present → image-pinned
+        prod = {**base, "version": "0.10.0", "tt_metal_commit": "abc1234"}
+        assert _build_template(prod, env="prod").image_pinned is True
+        assert (
+            _build_template(
+                {**prod, "docker_image": "ghcr.io/x/y:1.0"}, env="prod"
+            ).image_pinned
+            is True
+        )
 
     def test_system_requirement_template_level(self, sample_impl):
         """Test that SystemRequirements propagate correctly from templates and device specs."""
-        template1 = ModelSpecTemplate(
+        template1 = ProdModelSpecTemplate(
             impl=sample_impl,
+            version="0.0.0",
             tt_metal_commit="v1.0.0",
             vllm_commit="abc123",
             inference_engine=InferenceEngine.VLLM.value,
@@ -160,8 +257,9 @@ class TestModelSpecTemplateSystem:
         assert specs1[0].system_requirements.kmd.mode == VersionMode.STRICT
 
     def test_system_requirements_device_model_spec_level(self, sample_impl):
-        template2 = ModelSpecTemplate(
+        template2 = ProdModelSpecTemplate(
             impl=sample_impl,
+            version="0.0.0",
             tt_metal_commit="v1.1.0",
             vllm_commit="abc123",
             inference_engine=InferenceEngine.VLLM.value,
@@ -194,8 +292,9 @@ class TestModelSpecTemplateSystem:
         assert specs2[0].system_requirements.kmd.mode == VersionMode.SUGGESTED
 
     def test_system_requirements_both_levels(self, sample_impl):
-        template3 = ModelSpecTemplate(
+        template3 = ProdModelSpecTemplate(
             impl=sample_impl,
+            version="0.0.0",
             tt_metal_commit="v1.2.0",
             vllm_commit="abc123",
             inference_engine=InferenceEngine.VLLM.value,
@@ -239,8 +338,9 @@ class TestModelSpecTemplateSystem:
 
     def test_metadata_per_weight(self, sample_impl):
         """Test that metadata is correctly assigned per weight during expansion."""
-        template = ModelSpecTemplate(
+        template = ProdModelSpecTemplate(
             impl=sample_impl,
+            version="0.0.0",
             tt_metal_commit="v1.0.0",
             vllm_commit="abc123",
             inference_engine=InferenceEngine.VLLM.value,
@@ -270,8 +370,9 @@ class TestModelSpecTemplateSystem:
 
     def test_metadata_defaults_empty(self, sample_impl):
         """Test that metadata defaults to empty dict when not provided."""
-        template = ModelSpecTemplate(
+        template = ProdModelSpecTemplate(
             impl=sample_impl,
+            version="0.0.0",
             tt_metal_commit="v1.0.0",
             vllm_commit="abc123",
             inference_engine=InferenceEngine.VLLM.value,
@@ -291,8 +392,9 @@ class TestModelSpecTemplateSystem:
 
     def test_metadata_partial_weights(self, sample_impl):
         """Test that weights without metadata entries get empty dict."""
-        template = ModelSpecTemplate(
+        template = ProdModelSpecTemplate(
             impl=sample_impl,
+            version="0.0.0",
             tt_metal_commit="v1.0.0",
             vllm_commit="abc123",
             inference_engine=InferenceEngine.VLLM.value,
@@ -319,8 +421,9 @@ class TestModelSpecTemplateSystem:
     def test_metadata_invalid_key_raises(self, sample_impl):
         """Test that metadata with keys not in weights raises an error."""
         with pytest.raises(AssertionError, match="These keys do not exist as weights"):
-            ModelSpecTemplate(
+            ProdModelSpecTemplate(
                 impl=sample_impl,
+                version="0.0.0",
                 tt_metal_commit="v1.0.0",
                 vllm_commit="abc123",
                 inference_engine=InferenceEngine.VLLM.value,
@@ -352,6 +455,7 @@ class TestModelSpecSystem:
             model_name="TestModel-7B",
             tt_metal_commit="v1.0.0",
             vllm_commit="abc123",
+            version="0.10.0",
             inference_engine=InferenceEngine.VLLM.value,
             device_model_spec=sample_device_model_spec,
         )
@@ -493,16 +597,213 @@ class TestModelSpecSystem:
         assert spec.tt_metal_commit == new_tt_metal_commit
         assert spec.vllm_commit == new_vllm_commit
         assert spec.docker_image == docker_image_with_commits
+        # version is also re-parsed from the override tag — see comment in
+        # apply_overrides. Drives the pre-0.11 support check in
+        # validate_setup._check_image_version_supported.
+        assert spec.version == "0.4.0"
+
+    def test_apply_overrides_unparseable_tag_keeps_template_version(
+        self, sample_impl, sample_device_model_spec
+    ):
+        """Override tags like ':dev' / ':latest' have no parseable version;
+        the template's declared version must be left alone."""
+        from workflows.runtime_config import RuntimeConfig
+
+        spec = ModelSpec(
+            device_type=DeviceTypes.N150,
+            impl=sample_impl,
+            hf_model_repo="test/TestModel-7B",
+            model_id="id_test-impl_TestModel-7B_n150",
+            model_name="TestModel-7B",
+            tt_metal_commit="x",
+            vllm_commit="y",
+            inference_engine=InferenceEngine.VLLM.value,
+            device_model_spec=sample_device_model_spec,
+            version="0.13.0",
+        )
+        rc = RuntimeConfig(
+            model="TestModel-7B",
+            workflow="benchmarks",
+            device="n150",
+            override_docker_image="ghcr.io/foo/bar:dev",
+        )
+
+        spec.apply_overrides(rc)
+        assert spec.version == "0.13.0"
 
 
 class TestSystemIntegration:
     """Integration tests for the model spec system."""
 
+    @staticmethod
+    def _impl(impl_id):
+        return ImplSpec(
+            impl_id=impl_id,
+            impl_name=impl_id,
+            repo_url=f"https://github.com/test/{impl_id}",
+            code_path=f"models/{impl_id}",
+        )
+
+    @staticmethod
+    def _template(
+        impl,
+        *,
+        weights=None,
+        device=DeviceTypes.N150,
+        engine=InferenceEngine.VLLM.value,
+        default_impl=False,
+        model_display_name=None,
+    ):
+        return ProdModelSpecTemplate(
+            impl=impl,
+            version="0.0.0",
+            tt_metal_commit="v1.0.0",
+            vllm_commit="abc123",
+            inference_engine=engine,
+            device_model_specs=[
+                DeviceModelSpec(
+                    device=device,
+                    max_concurrency=16,
+                    max_context=64 * 1024,
+                    default_impl=default_impl,
+                ),
+            ],
+            weights=weights or ["test/model-A"],
+            model_display_name=model_display_name,
+        )
+
+    def test_performance_reference_is_looked_up_per_weight(self, monkeypatch):
+        """Every weight is graded against the targets measured for itself.
+
+        Keying the lookup on the family name applied one member's numbers to all
+        of its siblings, so a model built to be faster or slower than the family
+        head was judged at a bar that had never been measured for it.
+        """
+        lookups = []
+        monkeypatch.setattr(
+            "workflows.model_spec.get_perf_reference_map",
+            lambda model_name, targets: lookups.append(model_name) or {},
+        )
+        template = self._template(
+            self._impl("impl-a"),
+            weights=["org/model-base", "org/model-instruct"],
+            model_display_name="stable-model-family",
+        )
+
+        template.expand_to_specs()
+
+        assert lookups == ["model-base", "model-instruct"]
+
+    def _template_with_device_targets(self, device_targets, template_targets=None):
+        """A two-device template where only the second device overrides its tiers."""
+        impl = self._impl("impl-a")
+        return ProdModelSpecTemplate(
+            impl=impl,
+            version="0.0.0",
+            tt_metal_commit="v1.0.0",
+            vllm_commit="abc123",
+            inference_engine=InferenceEngine.VLLM.value,
+            perf_targets_map=template_targets or {},
+            device_model_specs=[
+                DeviceModelSpec(
+                    device=DeviceTypes.N150, max_concurrency=16, max_context=1024
+                ),
+                DeviceModelSpec(
+                    device=DeviceTypes.N300,
+                    max_concurrency=16,
+                    max_context=1024,
+                    perf_targets_map=device_targets,
+                ),
+            ],
+            weights=["test/model-A"],
+        )
+
+    def test_device_perf_targets_override_the_template_tiers(self, monkeypatch):
+        """A device can be graded at a different fraction of theoretical.
+
+        The theoretical reference is a property of the model and the hardware, so
+        it stays shared; what a device may differ in is how much of it counts as
+        passing. Before this the field existed on `DeviceModelSpec`, was accepted
+        from catalog YAML, and was never read -- the tiers always came from the
+        template.
+        """
+        calls = []
+        monkeypatch.setattr(
+            "workflows.model_spec.get_perf_reference_map",
+            lambda model_name, targets: calls.append(dict(targets)) or {},
+        )
+
+        self._template_with_device_targets({"complete": 0.30}).expand_to_specs()
+
+        template_default = {"functional": 0.10, "complete": 0.50, "target": 1.0}
+        assert calls == [
+            template_default,
+            # tier-by-tier: `complete` loosened, the others inherited
+            {**template_default, "complete": 0.30},
+        ]
+
+    def test_a_device_without_an_override_reuses_the_template_map(self, monkeypatch):
+        """The common case must not pay for the feature: one lookup per weight."""
+        calls = []
+        monkeypatch.setattr(
+            "workflows.model_spec.get_perf_reference_map",
+            lambda model_name, targets: calls.append(dict(targets)) or {},
+        )
+
+        self._template_with_device_targets({}).expand_to_specs()
+
+        assert calls == [{"functional": 0.10, "complete": 0.50, "target": 1.0}]
+
+    def _real_reference_template(self, device_targets):
+        """A template on a weight that actually has reference data, so the tiers
+        are computed from real numbers rather than a monkeypatched map."""
+        return ProdModelSpecTemplate(
+            impl=self._impl("impl-a"),
+            version="0.0.0",
+            tt_metal_commit="v1.0.0",
+            vllm_commit="abc123",
+            inference_engine=InferenceEngine.VLLM.value,
+            device_model_specs=[
+                DeviceModelSpec(
+                    device=DeviceTypes.P300X2,
+                    max_concurrency=16,
+                    max_context=1024,
+                    perf_targets_map=device_targets,
+                ),
+            ],
+            weights=["google/gemma-4-31b-it"],
+        )
+
+    def test_device_override_reaches_the_expanded_targets(self):
+        """End to end against the real reference data, not a monkeypatch.
+
+        `tput` scales with the percentage and `ttft_ms` divides by it, so halving
+        `complete` halves the throughput bar and doubles the latency budget, while
+        the untouched tiers stay put.
+        """
+        base = self._real_reference_template({}).expand_to_specs()[0]
+        halved = self._real_reference_template({"complete": 0.25}).expand_to_specs()[0]
+
+        base_targets = base.device_model_spec.perf_reference[0].targets
+        halved_targets = halved.device_model_spec.perf_reference[0].targets
+
+        assert base_targets["complete"].tput == pytest.approx(37 * 0.50)
+        assert halved_targets["complete"].tput == pytest.approx(37 * 0.25)
+        assert halved_targets["complete"].ttft_ms == pytest.approx(46 / 0.25)
+        # tier-by-tier: `functional` and `target` are inherited unchanged
+        assert halved_targets["functional"].tput == pytest.approx(
+            base_targets["functional"].tput
+        )
+        assert halved_targets["target"].tput == pytest.approx(
+            base_targets["target"].tput
+        )
+
     def test_model_spec_map_generation(self, sample_impl):
         """Test spec map generation from templates."""
         templates = [
-            ModelSpecTemplate(
+            ProdModelSpecTemplate(
                 impl=sample_impl,
+                version="0.0.0",
                 tt_metal_commit="v1.0.0",
                 vllm_commit="abc123",
                 inference_engine=InferenceEngine.VLLM.value,
@@ -524,6 +825,238 @@ class TestSystemIntegration:
             assert isinstance(spec, ModelSpec)
             assert model_id.startswith("id_")
             assert spec.model_id == model_id
+
+    def test_model_spec_map_rejects_duplicate_leaf_identity(self):
+        template = self._template(self._impl("impl-a"))
+
+        with pytest.raises(ValueError) as exc_info:
+            get_model_spec_map([template, template])
+
+        message = str(exc_info.value)
+        assert "Duplicate model spec leaf identity" in message
+        assert "test/model-A" in message
+        assert DeviceTypes.N150.to_string() in message
+        assert InferenceEngine.VLLM.value in message
+        assert "impl-a" in message
+
+    def test_model_spec_map_rejects_multiple_default_implementations(self):
+        templates = [
+            self._template(self._impl("impl-a"), default_impl=True),
+            self._template(self._impl("impl-b"), default_impl=True),
+        ]
+
+        with pytest.raises(ValueError) as exc_info:
+            get_model_spec_map(templates)
+
+        message = str(exc_info.value)
+        assert "Multiple default implementations" in message
+        assert "test/model-A" in message
+        assert DeviceTypes.N150.to_string() in message
+        assert InferenceEngine.VLLM.value in message
+        assert "impl-a" in message
+        assert "impl-b" in message
+
+    def test_model_spec_map_accepts_one_default_implementation(self):
+        templates = [
+            self._template(self._impl("impl-a"), default_impl=True),
+            self._template(self._impl("impl-b")),
+        ]
+
+        assert len(get_model_spec_map(templates)) == 2
+
+    def test_model_spec_map_accepts_no_default_implementation(self):
+        templates = [
+            self._template(self._impl("impl-a")),
+            self._template(self._impl("impl-b")),
+        ]
+
+        assert len(get_model_spec_map(templates)) == 2
+
+    def test_model_spec_map_accepts_distinct_leaf_groups(self):
+        templates = [
+            self._template(self._impl("impl-a"), default_impl=True),
+            self._template(
+                self._impl("impl-a"),
+                device=DeviceTypes.N300,
+                default_impl=True,
+            ),
+            self._template(
+                self._impl("impl-b"),
+                weights=["test/model-B"],
+                engine=InferenceEngine.MEDIA.value,
+                default_impl=True,
+            ),
+        ]
+
+        assert len(get_model_spec_map(templates)) == 3
+
+    def test_model_spec_map_rejects_distinct_leaves_with_same_model_id(self):
+        impl = self._impl("impl-a")
+        templates = [
+            self._template(impl, weights=["org-one/model-A"]),
+            self._template(impl, weights=["org-two/model-A"]),
+        ]
+
+        with pytest.raises(ValueError) as exc_info:
+            get_model_spec_map(templates)
+
+        message = str(exc_info.value)
+        assert "maps to multiple leaf identities" in message
+        assert "org-one/model-A" in message
+        assert "org-two/model-A" in message
+
+    def test_resolve_model_spec_selects_engine_scoped_default(self):
+        specs = [
+            spec
+            for template in [
+                self._template(self._impl("impl-a")),
+                self._template(self._impl("impl-b"), default_impl=True),
+            ]
+            for spec in template.expand_to_specs()
+        ]
+
+        selected = resolve_model_spec(
+            specs,
+            model="test/model-A",
+            device="n150",
+            engine="vllm",
+            catalog_name="test dev catalog",
+        )
+
+        assert selected.impl.impl_id == "impl-b"
+
+    def test_resolve_model_spec_selects_explicit_non_default_impl(self):
+        specs = [
+            spec
+            for template in [
+                self._template(self._impl("impl-a"), default_impl=True),
+                self._template(self._impl("impl-b")),
+            ]
+            for spec in template.expand_to_specs()
+        ]
+
+        selected = resolve_model_spec(
+            specs,
+            model="model-A",
+            device=DeviceTypes.N150,
+            engine=InferenceEngine.VLLM,
+            impl="impl-b",
+        )
+
+        assert selected.impl.impl_id == "impl-b"
+
+    def test_resolve_model_spec_rejects_engine_scoped_order_fallback(self):
+        specs = [
+            spec
+            for template in [
+                self._template(self._impl("impl-a")),
+                self._template(self._impl("impl-b")),
+            ]
+            for spec in template.expand_to_specs()
+        ]
+
+        with pytest.raises(ValueError, match="No unique default implementation"):
+            resolve_model_spec(
+                specs,
+                model="model-A",
+                device="N150",
+                engine="VLLM",
+            )
+
+    def test_resolve_model_spec_accepts_sole_engine_candidate_without_default(self):
+        [spec] = self._template(self._impl("impl-a")).expand_to_specs()
+
+        assert (
+            resolve_model_spec(
+                [spec],
+                model="model-A",
+                device="N150",
+                engine="VLLM",
+            )
+            is spec
+        )
+
+    def test_resolve_model_spec_preserves_cross_engine_default_precedence(self):
+        [vllm_spec] = self._template(
+            self._impl("impl-a"), default_impl=True
+        ).expand_to_specs()
+        [media_spec] = self._template(
+            self._impl("impl-b"),
+            engine=InferenceEngine.MEDIA.value,
+            default_impl=True,
+        ).expand_to_specs()
+
+        assert (
+            resolve_model_spec(
+                [vllm_spec, media_spec],
+                model="model-A",
+                device="N150",
+            )
+            is vllm_spec
+        )
+
+    def test_resolve_model_spec_rejects_basename_collision(self):
+        specs = [
+            spec
+            for template in [
+                self._template(self._impl("impl-a"), weights=["org-one/model-A"]),
+                self._template(self._impl("impl-b"), weights=["org-two/model-A"]),
+            ]
+            for spec in template.expand_to_specs()
+        ]
+
+        with pytest.raises(ValueError) as exc_info:
+            resolve_model_spec(
+                specs,
+                model="model-A",
+                device="N150",
+                engine="VLLM",
+            )
+
+        message = str(exc_info.value)
+        assert "ambiguous" in message
+        assert "org-one/model-A" in message
+        assert "org-two/model-A" in message
+
+    def test_resolve_model_spec_full_repo_disambiguates_basename_collision(self):
+        specs = [
+            spec
+            for template in [
+                self._template(
+                    self._impl("impl-a"),
+                    weights=["org-one/model-A"],
+                    default_impl=True,
+                ),
+                self._template(
+                    self._impl("impl-b"),
+                    weights=["org-two/model-A"],
+                    default_impl=True,
+                ),
+            ]
+            for spec in template.expand_to_specs()
+        ]
+
+        selected = resolve_model_spec(
+            specs,
+            model="org-two/model-A",
+            device="N150",
+            engine="VLLM",
+        )
+
+        assert selected.hf_model_repo == "org-two/model-A"
+
+    def test_resolve_model_spec_rejects_missing_leaf(self):
+        [spec] = self._template(
+            self._impl("impl-a"), default_impl=True
+        ).expand_to_specs()
+
+        with pytest.raises(ValueError, match="No model spec matches"):
+            resolve_model_spec(
+                [spec],
+                model="model-A",
+                device="N300",
+                engine="VLLM",
+            )
 
     def test_export_model_specs_json_includes_metadata(
         self, sample_impl, sample_device_model_spec, tmp_path
@@ -628,6 +1161,375 @@ class TestModelSpecsStructure:
             add_cfg = dms.vllm_args.get("additional-config", "")
             assert '"trace_mode": "decode_only"' in add_cfg
             assert "none" not in add_cfg
+
+
+class TestRequiredTargetTiers:
+    """Tests for ModelStatusTypes.required_target_tiers property."""
+
+    def test_experimental_has_no_required_tiers(self):
+        assert ModelStatusTypes.EXPERIMENTAL.required_target_tiers == []
+
+    def test_functional_requires_functional(self):
+        assert ModelStatusTypes.FUNCTIONAL.required_target_tiers == ["functional"]
+
+    def test_complete_requires_functional_and_complete(self):
+        assert ModelStatusTypes.COMPLETE.required_target_tiers == [
+            "functional",
+            "complete",
+        ]
+
+    def test_top_perf_requires_all_tiers(self):
+        assert ModelStatusTypes.TOP_PERF.required_target_tiers == [
+            "functional",
+            "complete",
+            "target",
+        ]
+
+    def test_evals_enforced_false_only_for_experimental(self):
+        assert ModelStatusTypes.EXPERIMENTAL.evals_enforced is False
+        assert ModelStatusTypes.FUNCTIONAL.evals_enforced is True
+        assert ModelStatusTypes.COMPLETE.evals_enforced is True
+        assert ModelStatusTypes.TOP_PERF.evals_enforced is True
+
+    def test_resolve_looks_up_by_name(self):
+        assert ModelStatusTypes.resolve("EXPERIMENTAL") is ModelStatusTypes.EXPERIMENTAL
+
+    def test_resolve_returns_none_for_missing_or_unrecognized(self):
+        assert ModelStatusTypes.resolve(None) is None
+        assert ModelStatusTypes.resolve("") is None
+        assert ModelStatusTypes.resolve("not_a_real_status") is None
+
+
+class TestEnforceAcceptanceCriteria:
+    """Tests for the enforce_acceptance_criteria function."""
+
+    @pytest.fixture
+    def passing_target_checks(self):
+        return {
+            "functional": {
+                "ttft_check": ReportCheckTypes.PASS,
+                "tput_check": ReportCheckTypes.PASS,
+            },
+            "complete": {
+                "ttft_check": ReportCheckTypes.PASS,
+                "tput_check": ReportCheckTypes.PASS,
+            },
+            "target": {
+                "ttft_check": ReportCheckTypes.PASS,
+                "tput_check": ReportCheckTypes.PASS,
+            },
+        }
+
+    @pytest.fixture
+    def failing_target_checks(self):
+        return {
+            "functional": {
+                "ttft_check": ReportCheckTypes.PASS,
+                "tput_check": ReportCheckTypes.PASS,
+            },
+            "complete": {
+                "ttft_check": ReportCheckTypes.FAIL,
+                "tput_check": ReportCheckTypes.PASS,
+            },
+            "target": {
+                "ttft_check": ReportCheckTypes.FAIL,
+                "tput_check": ReportCheckTypes.FAIL,
+            },
+        }
+
+    def test_experimental_passes_even_when_all_fail(self, failing_target_checks):
+        result = enforce_acceptance_criteria(
+            failing_target_checks, ModelStatusTypes.EXPERIMENTAL
+        )
+        assert result["enforcement_result"] == "PASS"
+        assert result["enforced_tiers"] == []
+        assert result["failed_enforced_tiers"] == []
+        assert set(result["informational_tiers"]) == {
+            "functional",
+            "complete",
+            "target",
+        }
+
+    def test_functional_passes_when_functional_passes(self, failing_target_checks):
+        result = enforce_acceptance_criteria(
+            failing_target_checks, ModelStatusTypes.FUNCTIONAL
+        )
+        assert result["enforcement_result"] == "PASS"
+        assert result["enforced_tiers"] == ["functional"]
+        assert result["failed_enforced_tiers"] == []
+
+    def test_complete_fails_when_complete_fails(self, failing_target_checks):
+        result = enforce_acceptance_criteria(
+            failing_target_checks, ModelStatusTypes.COMPLETE
+        )
+        assert result["enforcement_result"] == "FAIL"
+        assert "complete" in result["failed_enforced_tiers"]
+
+    def test_top_perf_fails_when_any_tier_fails(self, failing_target_checks):
+        result = enforce_acceptance_criteria(
+            failing_target_checks, ModelStatusTypes.TOP_PERF
+        )
+        assert result["enforcement_result"] == "FAIL"
+        assert "complete" in result["failed_enforced_tiers"]
+        assert "target" in result["failed_enforced_tiers"]
+
+    def test_all_pass(self, passing_target_checks):
+        result = enforce_acceptance_criteria(
+            passing_target_checks, ModelStatusTypes.TOP_PERF
+        )
+        assert result["enforcement_result"] == "PASS"
+        assert result["failed_enforced_tiers"] == []
+
+    def test_handles_integer_check_values(self):
+        """Media model reports use raw integers (2=PASS, 3=FAIL)."""
+        target_checks = {
+            "functional": {"ttft_check": 2, "tput_check": 3},
+            "complete": {"ttft_check": 2, "tput_check": 2},
+            "target": {"ttft_check": 2, "tput_check": 2},
+        }
+        result = enforce_acceptance_criteria(target_checks, ModelStatusTypes.FUNCTIONAL)
+        assert result["enforcement_result"] == "FAIL"
+        assert "functional" in result["failed_enforced_tiers"]
+
+    def test_na_checks_are_not_failures(self):
+        target_checks = {
+            "functional": {
+                "ttft_check": ReportCheckTypes.NA,
+                "tput_check": ReportCheckTypes.PASS,
+            },
+        }
+        result = enforce_acceptance_criteria(target_checks, ModelStatusTypes.FUNCTIONAL)
+        assert result["enforcement_result"] == "PASS"
+
+    def test_model_status_is_included_in_result(self, passing_target_checks):
+        result = enforce_acceptance_criteria(
+            passing_target_checks, ModelStatusTypes.COMPLETE
+        )
+        assert result["model_status"] == "COMPLETE"
+
+
+class TestKnownIssue:
+    def test_known_issue_creation_with_enum(self):
+        ki = KnownIssue(
+            workflow_type=WorkflowType.BENCHMARKS,
+            reason="GH#2600 - OOM on T3K",
+            task_name="isl-128_osl-1024_con-32",
+        )
+        assert ki.workflow_type is WorkflowType.BENCHMARKS
+        assert ki.reason == "GH#2600 - OOM on T3K"
+        assert ki.task_name == "isl-128_osl-1024_con-32"
+
+    def test_known_issue_string_workflow_type_is_coerced(self):
+        ki = KnownIssue(workflow_type="benchmarks", reason="case insensitive")
+        assert ki.workflow_type is WorkflowType.BENCHMARKS
+
+    def test_known_issue_invalid_workflow_type_raises(self):
+        with pytest.raises(ValueError):
+            KnownIssue(workflow_type="BENCHMRKS", reason="typo should fail")
+
+    def test_known_issue_defaults(self):
+        ki = KnownIssue(workflow_type=WorkflowType.EVALS, reason="test reason")
+        assert ki.task_name is None
+
+    def test_device_model_spec_with_known_issues(self):
+        dms = DeviceModelSpec(
+            device=DeviceTypes.N150,
+            max_concurrency=16,
+            max_context=8192,
+            known_issues=[
+                KnownIssue(
+                    workflow_type=WorkflowType.BENCHMARKS,
+                    reason="whole workflow mask",
+                ),
+                KnownIssue(
+                    workflow_type=WorkflowType.EVALS,
+                    reason="specific task mask",
+                    task_name="mmlu",
+                ),
+            ],
+        )
+        assert len(dms.known_issues) == 2
+
+    def test_matches_workflow_level(self):
+        ki = KnownIssue(workflow_type=WorkflowType.BENCHMARKS, reason="mask all")
+        assert ki.matches(WorkflowType.BENCHMARKS, None) is True
+        assert ki.matches(WorkflowType.BENCHMARKS, "any_task") is True
+        assert ki.matches(WorkflowType.EVALS, None) is False
+
+    def test_matches_task_level(self):
+        ki = KnownIssue(
+            workflow_type=WorkflowType.EVALS, reason="mask mmlu", task_name="mmlu"
+        )
+        assert ki.matches(WorkflowType.EVALS, "mmlu") is True
+        assert ki.matches(WorkflowType.EVALS, "hellaswag") is False
+        assert ki.matches(WorkflowType.EVALS, None) is False
+        assert ki.matches(WorkflowType.BENCHMARKS, "mmlu") is False
+
+    def test_find_known_issue_returns_first_match(self):
+        dms = DeviceModelSpec(
+            device=DeviceTypes.N150,
+            max_concurrency=16,
+            max_context=8192,
+            known_issues=[
+                KnownIssue(
+                    workflow_type=WorkflowType.EVALS,
+                    reason="mmlu broken",
+                    task_name="mmlu",
+                ),
+            ],
+        )
+        assert dms.find_known_issue(WorkflowType.EVALS, "mmlu") is not None
+        assert dms.find_known_issue(WorkflowType.EVALS, "hellaswag") is None
+        assert dms.find_known_issue(WorkflowType.BENCHMARKS) is None
+
+    def test_no_known_issues_matches_nothing(self):
+        dms = DeviceModelSpec(
+            device=DeviceTypes.N150,
+            max_concurrency=16,
+            max_context=8192,
+        )
+        assert dms.find_known_issue(WorkflowType.BENCHMARKS) is None
+        assert dms.find_known_issue(WorkflowType.EVALS, "mmlu") is None
+
+    def test_known_issue_json_roundtrip(self, tmp_path):
+        impl = ImplSpec(
+            impl_id="test-impl",
+            impl_name="test-impl",
+            repo_url="https://github.com/test/repo",
+            code_path="models/test",
+        )
+        dms = DeviceModelSpec(
+            device=DeviceTypes.N150,
+            max_concurrency=16,
+            max_context=8192,
+            known_issues=[
+                KnownIssue(
+                    workflow_type=WorkflowType.BENCHMARKS,
+                    reason="GH#100 - test issue",
+                    task_name="specific_task",
+                ),
+                KnownIssue(
+                    workflow_type=WorkflowType.EVALS,
+                    reason="GH#200 - another issue",
+                ),
+            ],
+        )
+        spec = ModelSpec(
+            device_type=DeviceTypes.N150,
+            impl=impl,
+            hf_model_repo="test/model-7B",
+            model_id="test_id",
+            model_name="model-7B",
+            tt_metal_commit="v1.0.0",
+            vllm_commit="abc123",
+            inference_engine=InferenceEngine.VLLM.value,
+            device_model_spec=dms,
+        )
+
+        json_file = spec.to_json(run_id="test_ki", output_dir=str(tmp_path))
+        loaded_spec = ModelSpec.from_json(json_file)
+
+        assert len(loaded_spec.device_model_spec.known_issues) == 2
+        ki0 = loaded_spec.device_model_spec.known_issues[0]
+        ki1 = loaded_spec.device_model_spec.known_issues[1]
+        assert ki0.workflow_type is WorkflowType.BENCHMARKS
+        assert ki0.reason == "GH#100 - test issue"
+        assert ki0.task_name == "specific_task"
+        assert ki1.workflow_type is WorkflowType.EVALS
+        assert ki1.task_name is None
+
+    def test_known_issue_json_roundtrip_serializes_enum_name(self, tmp_path):
+        impl = ImplSpec(
+            impl_id="test-impl",
+            impl_name="test-impl",
+            repo_url="https://github.com/test/repo",
+            code_path="models/test",
+        )
+        dms = DeviceModelSpec(
+            device=DeviceTypes.N150,
+            max_concurrency=16,
+            max_context=8192,
+            known_issues=[
+                KnownIssue(
+                    workflow_type=WorkflowType.BENCHMARKS,
+                    reason="GH#1 - serialized as name",
+                ),
+            ],
+        )
+        spec = ModelSpec(
+            device_type=DeviceTypes.N150,
+            impl=impl,
+            hf_model_repo="test/model-7B",
+            model_id="test_id",
+            model_name="model-7B",
+            tt_metal_commit="v1.0.0",
+            vllm_commit="abc123",
+            inference_engine=InferenceEngine.VLLM.value,
+            device_model_spec=dms,
+        )
+        json_file = spec.to_json(run_id="test_ki_wire", output_dir=str(tmp_path))
+        with open(json_file, "r", encoding="utf-8") as f:
+            wire = json.load(f)
+
+        ki_wire = wire["device_model_spec"]["known_issues"][0]
+        assert ki_wire["workflow_type"] == "BENCHMARKS"
+
+    def test_known_issue_from_json_with_invalid_workflow_type_raises(self, tmp_path):
+        spec_json = tmp_path / "bad_known_issue_spec.json"
+        spec_payload = {
+            "device_type": "N150",
+            "impl": {
+                "impl_id": "test-impl",
+                "impl_name": "test-impl",
+                "repo_url": "https://github.com/test/repo",
+                "code_path": "models/test",
+            },
+            "hf_model_repo": "test/model-7B",
+            "model_id": "test_id",
+            "model_name": "model-7B",
+            "tt_metal_commit": "v1.0.0",
+            "vllm_commit": "abc123",
+            "inference_engine": InferenceEngine.VLLM.value,
+            "device_model_spec": {
+                "device": "N150",
+                "max_concurrency": 16,
+                "max_context": 8192,
+                "known_issues": [
+                    {
+                        "workflow_type": "BOGUS_WORKFLOW",
+                        "reason": "this should fail to deserialize",
+                        "task_name": None,
+                    }
+                ],
+            },
+        }
+        with open(spec_json, "w", encoding="utf-8") as f:
+            json.dump(spec_payload, f)
+        with pytest.raises(ValueError):
+            ModelSpec.from_json(spec_json)
+
+
+class TestIsCheckFailing:
+    """Tests for _is_check_failing helper."""
+
+    def test_report_check_fail(self):
+        assert _is_check_failing(ReportCheckTypes.FAIL) is True
+
+    def test_report_check_pass(self):
+        assert _is_check_failing(ReportCheckTypes.PASS) is False
+
+    def test_report_check_na(self):
+        assert _is_check_failing(ReportCheckTypes.NA) is False
+
+    def test_integer_fail(self):
+        assert _is_check_failing(3) is True  # ReportCheckTypes.FAIL == 3
+
+    def test_integer_pass(self):
+        assert _is_check_failing(2) is False  # ReportCheckTypes.PASS == 2
+
+    def test_non_check_values(self):
+        assert _is_check_failing("FAIL") is False
+        assert _is_check_failing(None) is False
 
 
 if __name__ == "__main__":

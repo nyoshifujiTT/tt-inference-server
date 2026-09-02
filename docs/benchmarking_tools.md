@@ -4,13 +4,14 @@ Comprehensive guide to performance benchmarking tools integrated with tt-inferen
 
 ## Overview
 
-tt-inference-server supports three benchmarking tools for measuring LLM inference performance on Tenstorrent accelerators:
+tt-inference-server supports four benchmarking tools for measuring LLM inference performance on Tenstorrent accelerators:
 
 | Tool | Source | Installation | Best For |
 |------|--------|--------------|----------|
 | **vLLM** | vLLM project | Docker | Baseline reference |
 | **GenAI-Perf** | NVIDIA Triton SDK | Docker (~10GB) | Official Triton validation |
 | **AIPerf** | NVIDIA ai-dynamo | `pip install` | Detailed percentiles, VLM support |
+| **GuideLLM** | vLLM project | `pip install` | Multi-turn, custom datasets, omni-modal scenarios |
 
 ## Quick Start
 
@@ -25,6 +26,9 @@ python run.py --model gemma-3-4b-it --device n300 --workflow benchmarks --docker
 
 # AIPerf
 python run.py --model gemma-3-4b-it --device n300 --workflow benchmarks --docker-server --tools aiperf
+
+# GuideLLM
+python run.py --model gemma-3-4b-it --device n300 --workflow benchmarks --docker-server --tools guidellm
 ```
 
 ## Tool Comparison
@@ -43,7 +47,7 @@ Server-side benchmarking using vLLM's built-in `benchmark_serving.py` script.
 **Metrics provided:**
 - TTFT (mean only)
 - TPOT (mean only)
-- Throughput (decode, prefill, user-level)
+- Throughput (input, output, total, user-level)
 - E2EL (mean only)
 - Request throughput
 
@@ -52,7 +56,9 @@ Server-side benchmarking using vLLM's built-in `benchmark_serving.py` script.
 {
   "mean_ttft_ms": 73.2,
   "mean_tpot_ms": 38.2,
-  "tps_decode_throughput": 26.1,
+  "tps_input_throughput": 73.9,
+  "tps_output_throughput": 26.1,
+  "tps_total_throughput": 100.0,
   "mean_e2el_ms": 4930.4
 }
 ```
@@ -258,7 +264,7 @@ python run.py --model gemma-3-4b-it --device n300 --workflow reports
 
 Stacks all three tools for direct comparison:
 
-| Source | ISL | OSL | Concur | TTFT (ms) | TPOT (ms) | Tput Decode (TPS) |
+| Source | ISL | OSL | Concur | TTFT (ms) | TPOT (ms) | Tput Output (TPS) |
 |--------|-----|-----|--------|-----------|-----------|-------------------|
 | vLLM | 128 | 128 | 1 | 73.2 | 38.2 | 26.1 |
 | aiperf | 128 | 128 | 1 | 93.5 | 40.2 | 25.1 |
@@ -274,6 +280,56 @@ Separate tables with AIPerf's unique percentile metrics:
 |-----|-----|--------|----------|----------|----------|----------|----------|----------|
 | 128 | 128 | 1 | 93.5 | 91.2 | 112.8 | 40.2 | 39.8 | 48.7 |
 | 128 | 128 | 32 | 2396.5 | 2580.1 | 2729.4 | 44.7 | 43.3 | 62.8 |
+
+---
+
+## Prefix-Caching Benchmarks (v2)
+
+Prefix-caching benchmarks are **not** wired through v1 `run.py`. Use the v2
+orchestrator against an already-running vLLM-compatible server:
+
+```bash
+# CI smoke (~12 runs)
+python run_workflows.py \
+  --model Llama-3.1-8B-Instruct \
+  --workflow benchmarks \
+  --device gpu \
+  --service-port 8000 \
+  --prefix-cache \
+  --prefix-cache-preset ci \
+  --jwt-secret "$JWT_SECRET"
+
+# Full validation sweep
+python run_workflows.py \
+  --model Llama-3.1-8B-Instruct \
+  --workflow benchmarks \
+  --device gpu \
+  --service-port 8000 \
+  --prefix-cache
+```
+
+On first use, `run.py` materializes the `PREFIX_CACHE` venv
+(`.workflow_venvs/.venv_prefix_cache`) and re-execs inside it so AIPerf and
+its dependencies are available without manual setup.
+
+### Scenarios
+
+| Scenario | Reuse model | What it answers |
+|----------|-------------|-----------------|
+| `shared_system` | 100% shared system prompt | Best-case prefix-cache uplift |
+| `prefix_pool` | Pool of N prefixes | Realistic chat-style reuse at tunable rates |
+| `multi_turn` | Organic reuse via re-sent chat history | Multi-turn chatting scenario |
+| `mooncake_trace` | Mooncake JSONL trace + AIPerf synthesis multipliers | Production-realistic patterns |
+| `baseline` | Zero shared prefix (control) | Reference for measuring uplift |
+
+Scenarios and per-preset grids are defined in
+`llm_module/prefix_cache/manifest.json`. Override with
+`--prefix-cache-scenarios-json`, subset with `--prefix-cache-scenarios`, and
+point `mooncake_trace` at a production trace via `--prefix-cache-trace`.
+
+See [the workflow development guide](workflow_development.md#prefix-caching-benchmark)
+for flags, report layout, and TT hardware notes (prefix caching may be disabled
+in `tt-vllm-plugin` until lifted).
 
 ---
 
@@ -302,8 +358,9 @@ python run.py --model gemma-3-4b-it --device n300 --workflow benchmarks \
 | **ITL** | Inter-Token Latency - same as TPOT | ms |
 | **E2EL** | End-to-End Latency - total request duration | ms |
 | **Tput User** | User-level throughput (single request) | tokens/sec |
-| **Tput Decode** | Decode throughput (all concurrent requests) | tokens/sec |
-| **Tput Prefill** | Prefill/prompt processing throughput | tokens/sec |
+| **Tput Input** | Input (prefill) token throughput, all concurrent requests | tokens/sec |
+| **Tput Output** | Output (decode) token throughput, all concurrent requests | tokens/sec |
+| **Tput Total** | Input + output token throughput, all concurrent requests | tokens/sec |
 | **Req Tput** | Request throughput | requests/sec |
 
 ### Percentile Statistics (AIPerf only)
@@ -440,7 +497,7 @@ python run.py --model gemma-3-4b-it --device n300 --workflow reports
 
 ### Text Benchmark Comparison (ISL=128, OSL=128, Concurrency=1)
 
-| Source | TTFT (ms) | TPOT (ms) | Tput Decode (TPS) | E2EL (ms) | Req Tput (RPS) |
+| Source | TTFT (ms) | TPOT (ms) | Tput Output (TPS) | E2EL (ms) | Req Tput (RPS) |
 |--------|-----------|-----------|-------------------|-----------|----------------|
 | vLLM | 73.2 | 38.2 | 26.1 | 4930.4 | 0.203 |
 | aiperf | 93.5 | 40.2 | 25.1 | 5180.3 | 0.194 |

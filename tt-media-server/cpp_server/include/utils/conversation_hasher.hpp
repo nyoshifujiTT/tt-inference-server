@@ -5,12 +5,15 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
-#include "domain/chat_message.hpp"
+#include "domain/llm/chat_message.hpp"
 
 namespace tt::utils {
+
+using namespace tt::domain::llm;
 
 /**
  * Conversation hashing utilities for prefix caching simulation.
@@ -33,8 +36,8 @@ namespace tt::utils {
  * @param messages Input chat messages
  * @return Messages with tool/function messages filtered out
  */
-std::vector<domain::ChatMessage> stripToolMessages(
-    const std::vector<domain::ChatMessage>& messages);
+std::vector<ChatMessage> stripToolMessages(
+    const std::vector<ChatMessage>& messages);
 
 /**
  * Return the prefix used to LOOK UP a continuing session: messages with
@@ -52,8 +55,8 @@ std::vector<domain::ChatMessage> stripToolMessages(
  * @param messages Input chat messages (must end with user message)
  * @return Prior-turn prefix or nullopt if no prior turn exists
  */
-std::optional<std::vector<domain::ChatMessage>> extractPriorTurnPrefix(
-    const std::vector<domain::ChatMessage>& messages);
+std::optional<std::vector<ChatMessage>> extractPriorTurnPrefix(
+    const std::vector<ChatMessage>& messages);
 
 /**
  * Stable 64-bit hash of a chat-message prefix, computed from the rendered
@@ -65,42 +68,131 @@ std::optional<std::vector<domain::ChatMessage>> extractPriorTurnPrefix(
  *               messages stripped)
  * @return 64-bit hash value
  */
-uint64_t hashConversationPrefix(const std::vector<domain::ChatMessage>& prefix);
+uint64_t hashConversationPrefix(const std::vector<ChatMessage>& prefix);
 
 /**
- * Render the LAST user message on its own, with addGenerationPrompt=true and
- * without any BOS/system wrapper. This is the delta sent to the model when
- * the slot's KV cache already contains the prior-turn prefix.
+ * Render the LAST user message on its own, with addGenerationPrompt=true.
  *
- * @param messages Input chat messages (must end with user message)
+ * BOS handling: when hasPriorTurn is true, the leading BOS produced by the
+ * chat template is stripped because it is already in the slot's KV cache.
+ * When false, BOS is kept so the model sees the start-of-sequence marker on
+ * the fresh conversation.
+ *
+ * @param messages Input chat messages (typically ends with user message)
+ * @param hasPriorTurn True iff the conversation continues a previously-cached
+ *     [assistant, user] turn (see extractPriorTurnPrefix).
  * @return Rendered delta prompt for the last user turn
  */
-std::string renderLastUserTurn(
-    const std::vector<domain::ChatMessage>& messages);
+std::string renderLastUserTurn(const std::vector<ChatMessage>& messages,
+                               bool hasPriorTurn);
+
+/**
+ * Per-block information for prefix caching, including hash and accumulated
+ * thinking token count up to and including that block.
+ */
+struct BlockHashInfo {
+  uint64_t hash;
+  uint32_t
+      accumulatedThinkTokens;  // Thinking content tokens (excluding markers)
+};
+
+/**
+ * Convert a vector of hashes to BlockHashInfo with zero think token counts.
+ * Used for backward compatibility and cross-server communication where think
+ * token counts are not available.
+ */
+inline std::vector<BlockHashInfo> hashesToBlockInfos(
+    const std::vector<uint64_t>& hashes) {
+  std::vector<BlockHashInfo> result;
+  result.reserve(hashes.size());
+  for (uint64_t h : hashes) {
+    result.push_back({h, 0});
+  }
+  return result;
+}
 
 /**
  * Routing information computed from conversation messages for prefix caching.
  * Used by the controller to determine session lookup and registration.
  */
 struct PrefixCachingInfo {
-  std::optional<uint64_t>
-      lookupHash;  // Hash of prior-turn prefix (for session lookup)
-  uint64_t registrationHash =
-      0;  // Hash of current conversation (for next turn's lookup)
-  std::string deltaPrompt;  // Last user turn rendered (for continuations)
-  bool hasPriorTurn =
-      false;  // True if assistant messages exist (enables lookup)
+  std::vector<BlockHashInfo> blocks;  // Per-block hash and think token info
+
+  // Backward-compat accessor: extract just the hashes
+  std::vector<uint64_t> hashes() const {
+    std::vector<uint64_t> result;
+    result.reserve(blocks.size());
+    for (const auto& b : blocks) {
+      result.push_back(b.hash);
+    }
+    return result;
+  }
 };
 
+// ---------------------------------------------------------------------------
+// Token-level helpers (used by the Dynamo backend, where the frontend has
+// already applied the chat template and we receive only token ids).
+// ---------------------------------------------------------------------------
+
 /**
- * Compute prefix caching routing information from conversation messages.
- * This is the entry point for controllers to extract all routing data needed
- * for hash-based session lookup and registration.
- *
- * @param messages Input chat messages (should end with user message)
- * @return Complete routing information for prefix caching
+ * Stable 64-bit hash over a sequence of token ids. Computed from the byte
+ * representation of the int sequence so two callers produce matching hashes
+ * iff the underlying token ids are identical.
  */
-PrefixCachingInfo computePrefixCachingInfo(
-    const std::vector<domain::ChatMessage>& messages);
+uint64_t hashTokenPrefix(std::span<const uint32_t> tokens);
+
+/**
+ * Compute prefix caching routing information from a tokenized prompt.
+ * The assistant-header sequence is read from the active tokenizer strategy.
+ *
+ * @param tokens Full token-id sequence from the request.
+ * @return Complete routing information for prefix caching (per-block hashes).
+ */
+PrefixCachingInfo computePrefixCachingInfoFromTokens(
+    std::span<const uint32_t> tokens);
+
+/**
+ * Compute per-block KV cache hashes using vLLM's prefix caching approach.
+ *
+ * Tokens are divided into blocks of `prefixCacheBlockSize` (from config). Each
+ * block's hash is computed as `xxh64(block_tokens, seed=parent_hash)`, where
+ * `parent_hash` is the hash of the previous block (0 for the first block).
+ * This chaining ensures that two sequences sharing a common prefix produce
+ * identical hashes for the shared blocks.
+ *
+ * Only FULL blocks are hashed — any trailing partial block is ignored (it
+ * hasn't been committed to the KV cache yet).
+ *
+ * @param tokens Token-id sequence to hash.
+ * @param parentHash Optional seed hash from a prior block. When non-zero,
+ *        hashing uses standard block size (not first block size) and chains
+ *        from this seed. Use `hashes.back()` from a prior call to continue.
+ * @return Vector of per-block hashes (one per full block). Empty if the
+ *         sequence is shorter than one block.
+ */
+std::vector<uint64_t> getPrefixCacheHashesByBlocks(
+    std::span<const uint32_t> tokens, uint64_t parentHash = 0);
+
+/**
+ * Compute per-block KV cache hashes, filtering out thinking tokens.
+ *
+ * Thinking tokens (content between thinkStartId and thinkEndId markers) are
+ * excluded from the hash computation but their count is tracked. The markers
+ * themselves are also excluded from both the hash and the count.
+ *
+ * Uses the same marker state machine as session tracking to classify tokens as
+ * thinking or non-thinking.
+ *
+ * @param tokens Token-id sequence to hash.
+ * @param thinkStartId Token ID for <|begin_think|> (kNoThinkTokenId to disable)
+ * @param thinkEndId Token ID for <|end_think|>
+ * @param parentHash Optional seed hash from a prior block.
+ * @param parentThinkCount Accumulated think tokens from prior blocks.
+ * @return Vector of BlockHashInfo (one per full block of non-thinking tokens).
+ */
+std::vector<BlockHashInfo> getPrefixCacheHashesByBlocksWithThinking(
+    std::span<const uint32_t> tokens, uint32_t thinkStartId,
+    uint32_t thinkEndId, uint64_t parentHash = 0,
+    uint32_t parentThinkCount = 0);
 
 }  // namespace tt::utils

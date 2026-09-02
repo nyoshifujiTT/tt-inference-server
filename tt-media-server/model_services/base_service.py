@@ -7,6 +7,7 @@ from abc import ABC
 
 from config.settings import settings
 from domain.base_request import BaseRequest
+from fastapi import HTTPException
 from model_services.scheduler import Scheduler
 from resolver.scheduler_resolver import get_scheduler
 from telemetry.telemetry_client import TelemetryEvent, jobs_in_progress
@@ -85,8 +86,10 @@ class BaseService(ABC):
             in_flight.dec()
 
     def check_is_model_ready(self) -> dict:
-        """Detailed system status for monitoring"""
-        return {
+        """Detailed system status for monitoring."""
+        monitor = getattr(self.scheduler, "canary_monitor", None)
+        canary_alive = monitor.is_alive() if monitor else True
+        status = {
             "model_ready": self.scheduler.check_is_model_ready(),
             "queue_size": self.scheduler.task_queue.qsize()
             if hasattr(self.scheduler.task_queue, "qsize")
@@ -96,7 +99,14 @@ class BaseService(ABC):
             "device": settings.device or "Not defined",
             "worker_info": self.scheduler.get_worker_info(),
             "runner_in_use": settings.model_runner,
+            "canary_alive": canary_alive,
+            "canary_state": monitor.current_state.value if monitor else "disabled",
         }
+        if monitor and not canary_alive and settings.canary_gate_readiness:
+            raise HTTPException(
+                status_code=503, detail="Canary monitor: model not serving"
+            )
+        return status
 
     async def deep_reset(self) -> bool:
         """Reset the device and all the scheduler workers and processes"""
@@ -133,6 +143,14 @@ class BaseService(ABC):
     async def pre_process(self, request):
         return request
 
+    def _teardown_task(self, task_id: str) -> None:
+        """Drop the per-task result queue and signal the worker to abort any
+        in-flight asyncio task for this id. Idempotent — on the success path
+        the worker has already finished and the cancel signal is a no-op.
+        See #3533 (Problem 1)."""
+        self.scheduler.result_queues.pop(task_id, None)
+        self.scheduler.cancel_task(task_id)
+
     async def process(self, request):
         queue = asyncio.Queue()
         self.scheduler.result_queues[request._task_id] = queue
@@ -143,6 +161,13 @@ class BaseService(ABC):
             result = await asyncio.wait_for(
                 queue.get(), timeout=settings.request_processing_timeout_seconds
             )
+            # Mirror process_streaming: scheduler.error_listener pushes
+            # Exception(error) onto the result queue when the worker fails.
+            # Without unwrapping here the exception flows into post_process
+            # and crashes downstream workers with confusing AttributeError
+            # chains that hide the real failure cause.
+            if isinstance(result, Exception):
+                raise result
             return result
         except asyncio.TimeoutError:
             self.logger.error(
@@ -153,7 +178,7 @@ class BaseService(ABC):
             self.logger.error(f"Error processing request: {e}")
             raise e
         finally:
-            self.scheduler.result_queues.pop(request._task_id, None)
+            self._teardown_task(request._task_id)
 
     def handle_streaming_chunk(self, chunk):
         formatted_chunk = chunk["chunk"]
@@ -219,4 +244,4 @@ class BaseService(ABC):
             )
             raise
         finally:
-            self.scheduler.result_queues.pop(request._task_id, None)
+            self._teardown_task(request._task_id)

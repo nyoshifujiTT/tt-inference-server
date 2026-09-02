@@ -10,9 +10,11 @@
 #include <prometheus/registry.h>
 #include <prometheus/summary.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -21,6 +23,8 @@
 #include <thread>
 #include <unordered_map>
 #include <variant>
+
+#include "metrics/tts_conditioning_stage.hpp"
 
 namespace tt::metrics {
 
@@ -78,6 +82,25 @@ class ServerMetrics {
   void setActiveSessionsCount(double n);
 
   /**
+   * Set the number of committed KV-cache blocks occupied by a slot.
+   *
+   * This is the *logical* prefix-cache block count tracked by SessionManager
+   * (1 key block + remaining blocks), counting only full/committed blocks and
+   * refreshed when a session's prefix is registered at turn end. It is not the
+   * memory-manager's physical occupancy.
+   *
+   * Called directly (session-lifecycle frequency, not per token). `slotId` is
+   * a bounded label (slot pool size); never label by session UUID.
+   */
+  void setSlotBlocks(uint32_t slotId, double blocks);
+
+  /**
+   * Remove a slot's block gauge. MUST be called when a slot is deallocated
+   * (session closed/evicted) so Prometheus stops reporting a stale value.
+   */
+  void removeSlot(uint32_t slotId);
+
+  /**
    * Record one completed HTTP request/response pair. Called from the Drogon
    * pre-sending advice hook. `status_code` is the numeric HTTP status
    * (200, 4xx, 5xx).
@@ -89,18 +112,45 @@ class ServerMetrics {
   void onHttpResponse(const std::string& method, int statusCode);
 
   /**
-   * Record one prefix-cache lookup attempt. Called once per request that
-   * enters the hash-based prefix cache routing path (i.e. has a prior
-   * [assistant, user] turn pair).
+   * Record one prefix-cache lookup on a per-token basis. Called once per
+   * request that enters the hash-based prefix cache routing path, on every
+   * worker role (prefill, decode, or aggregated).
    *
-   * `hit` is true if an existing session matching the lookup hash was
-   * acquired and its KV cache reused; false if the lookup missed and a new
-   * session had to be allocated.
+   * `promptTokens` is the request's full (block-aligned) prompt length and
+   * increments the queries denominator; `matchedTokens` is how many of
+   * those tokens were already cached and reused, incrementing the hits
+   * numerator (0 on a miss). Hit rate is then
+   * `rate(hits) / rate(queries)` — a continuous per-token measure rather
+   * than the old whole-prompt hit/miss.
    *
-   * Writes directly to the counter; lookup rate is request-level, not
-   * token-level, so queueing would be unnecessary overhead.
+   * Writes directly to the counters (two Increments per request, not per
+   * token), so queueing would be unnecessary overhead.
    */
-  void onPrefixCacheLookup(bool hit);
+  void onPrefixCacheLookup(uint32_t promptTokens, uint32_t matchedTokens);
+
+  /**
+   * Record how long one conditioning stage took for a TTS request. Called once
+   * per stage that actually ran, at most four times per request.
+   *
+   * Stages that did not run are not observed at all, rather than observed as
+   * zero: a `voice_encode` sample of 0 would otherwise be indistinguishable
+   * from a cache hit and would drag every quantile for that stage toward zero.
+   *
+   * Writes the Summary directly rather than via the event queue — this is
+   * per-request, not per-token, frequency, and prometheus-cpp Summary::Observe
+   * takes its own mutex, so calling from Drogon request threads and from the
+   * TTS audio-drain threads is safe.
+   */
+  void onTtsConditioning(TtsConditioningStage stage, double seconds);
+
+  /**
+   * Record a finished TTS request's total time, from service entry (before any
+   * conditioning) through delivery of its terminal event. Conditioning is
+   * measured inside this interval, which is what lets it be read as a share of
+   * engine time rather than an unrelated number.
+   * Same direct-write rationale as onTtsConditioning().
+   */
+  void onTtsRequestDuration(double seconds);
 
   /** Render the full registry in Prometheus text exposition format. */
   std::string renderText() const;
@@ -173,6 +223,8 @@ class ServerMetrics {
   prometheus::Counter* prompt_tokens_total_{nullptr};
   prometheus::Counter* generation_tokens_total_{nullptr};
   prometheus::Family<prometheus::Counter>* request_success_family_{nullptr};
+  std::unordered_map<std::string, prometheus::Counter*>
+      request_success_by_reason_;
   prometheus::Family<prometheus::Counter>* http_requests_family_{nullptr};
   prometheus::Counter* prefix_cache_queries_total_{nullptr};
   prometheus::Counter* prefix_cache_hits_total_{nullptr};
@@ -182,6 +234,9 @@ class ServerMetrics {
   prometheus::Gauge* max_queue_size_{nullptr};
   prometheus::Gauge* decoding_requests_{nullptr};
   prometheus::Gauge* active_sessions_{nullptr};
+  prometheus::Family<prometheus::Gauge>* slot_blocks_family_{nullptr};
+
+  std::mutex slot_blocks_mutex_;
 
   // --- latency summaries (exact quantiles via CKMS, 60 s sliding window) ---
   prometheus::Summary* e2e_latency_seconds_{nullptr};
@@ -192,6 +247,13 @@ class ServerMetrics {
   // --- token-count histograms ---
   prometheus::Histogram* request_prompt_tokens_{nullptr};
   prometheus::Histogram* request_generation_tokens_{nullptr};
+
+  // --- TTS conditioning summaries (one per stage, plus the denominator) ---
+  // The family itself is not kept: every stage series is pre-created in the
+  // constructor, so nothing on the request path ever has to Add() a label set.
+  std::array<prometheus::Summary*, TTS_CONDITIONING_STAGE_COUNT>
+      tts_conditioning_{};
+  prometheus::Summary* tts_request_duration_seconds_{nullptr};
 };
 
 }  // namespace tt::metrics

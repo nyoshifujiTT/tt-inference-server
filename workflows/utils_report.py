@@ -108,6 +108,11 @@ class BenchmarkTaskParams:
     image_width: int = None
     images_per_prompt: int = 0
     task_type: str = "text"
+    # When set, this entry describes the device running with this
+    # data_parallel_size, and its targets are already expressed for the WHOLE
+    # device. get_perf_reference() uses such an entry as-is: no subdevice
+    # remap, no data-parallel scaling.
+    data_parallel: int = None
     theoretical_ttft_ms: float = None
     theoretical_tput_user: float = None
     targets: Dict[str, PerformanceTarget] = field(default_factory=dict)
@@ -121,6 +126,13 @@ class BenchmarkTaskParams:
 
     # has to go in here so init can read it
     num_inference_steps: int = None  # Used for CNN models
+
+    # Structured-output benchmark fields. structured_dataset is one of
+    # {"json", "json-unique", "grammar", "regex", "choice", "xgrammar_bench"}.
+    # structured_output_ratio is the fraction of requests using structured
+    # outputs; None means run with --no-structured-output (the baseline).
+    structured_dataset: str = None
+    structured_output_ratio: float = None
 
     def __post_init__(self):
         self._infer_data()

@@ -5,6 +5,7 @@
 
 #include <prometheus/text_serializer.h>
 
+#include <array>
 #include <sstream>
 
 #include "config/settings.hpp"
@@ -32,6 +33,23 @@ static const prometheus::Histogram::BucketBoundaries K_PROMPT_TOKEN_BUCKETS{
 static const prometheus::Histogram::BucketBoundaries K_GEN_TOKEN_BUCKETS{
     1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 4096};
 
+static const std::array<std::string, 5> K_PRECREATED_FINISH_REASONS = {
+    "stop", "length", "tool_calls", "abort", "error"};
+
+const char* ttsConditioningStageLabel(TtsConditioningStage stage) {
+  switch (stage) {
+    case TtsConditioningStage::TextConditioning:
+      return "text_conditioning";
+    case TtsConditioningStage::VoiceNormalization:
+      return "voice_normalization";
+    case TtsConditioningStage::VoiceEncode:
+      return "voice_encode";
+    case TtsConditioningStage::PromptCompile:
+      return "prompt_compile";
+  }
+  return "unknown";
+}
+
 ServerMetrics::ServerMetrics() {
   model_name_ = tt::config::runnerType();
   registry_ = std::make_shared<prometheus::Registry>();
@@ -58,6 +76,11 @@ ServerMetrics::ServerMetrics() {
            .Name("tt_request_success_total")
            .Help("Number of completed requests labelled by finish reason")
            .Register(*registry_);
+  for (const auto& reason : K_PRECREATED_FINISH_REASONS) {
+    request_success_by_reason_.emplace(
+        reason, &request_success_family_->Add({{"model_name", model_name_},
+                                               {"finished_reason", reason}}));
+  }
 
   http_requests_family_ =
       &prometheus::BuildCounter()
@@ -72,9 +95,10 @@ ServerMetrics::ServerMetrics() {
       &prometheus::BuildCounter()
            .Name("tt_prefix_cache_queries_total")
            .Help(
-               "Number of requests that attempted a prefix-cache lookup "
-               "(i.e. had a prior [assistant, user] turn pair). Denominator "
-               "for the prefix cache hit rate: "
+               "Total prompt tokens that entered the prefix-cache lookup "
+               "path (block-aligned), across every request. Denominator for "
+               "the per-token prefix cache hit rate (matches vLLM's "
+               "vllm:prefix_cache_queries_total): "
                "rate(tt_prefix_cache_hits_total[5m]) / "
                "rate(tt_prefix_cache_queries_total[5m]).")
            .Register(*registry_)
@@ -84,9 +108,10 @@ ServerMetrics::ServerMetrics() {
       &prometheus::BuildCounter()
            .Name("tt_prefix_cache_hits_total")
            .Help(
-               "Number of prefix-cache lookups that found an existing "
-               "session and reused its KV cache (continuation path, delta "
-               "prompt only).")
+               "Total prompt tokens served from an existing session's KV "
+               "cache (the reused prefix), across every request. Numerator "
+               "for the per-token prefix cache hit rate (matches vLLM's "
+               "vllm:prefix_cache_hits_total).")
            .Register(*registry_)
            .Add(modelLabel);
 
@@ -124,6 +149,17 @@ ServerMetrics::ServerMetrics() {
            .Help("Number of active sessions currently managed by the server")
            .Register(*registry_)
            .Add({});
+
+  slot_blocks_family_ =
+      &prometheus::BuildGauge()
+           .Name("tt_slot_blocks")
+           .Help(
+               "Number of committed KV-cache blocks occupied by each slot "
+               "(logical prefix-cache view: 1 key block + remaining blocks, "
+               "full blocks only). Refreshed when a session's prefix is "
+               "registered at turn end. Labelled by slot_id (bounded by the "
+               "slot pool size).")
+           .Register(*registry_);
 
   // ----- latency summaries (exact quantiles, 60 s sliding window) ----------
   e2e_latency_seconds_ =
@@ -172,13 +208,58 @@ ServerMetrics::ServerMetrics() {
            .Register(*registry_)
            .Add(modelLabel, K_GEN_TOKEN_BUCKETS);
 
+  // ----- TTS conditioning (preprocessing vs synthesis) ---------------------
+  // Pre-created per stage so a stage that has not run yet still exposes a
+  // series, and so no label map is built on the request path.
+  auto* conditioningFamily =
+      &prometheus::BuildSummary()
+           .Name("tt_tts_conditioning_seconds")
+           .Help(
+               "Time spent preparing a TTS request rather than synthesizing "
+               "it: building the conditioning from text or from a voice "
+               "sample. Labelled by stage (text_conditioning, "
+               "voice_normalization, voice_encode, prompt_compile); the two "
+               "paths are disjoint, and text_conditioning covers the whole "
+               "text-only path including its prompt compilation, so it never "
+               "runs alongside prompt_compile. Short utterances can be "
+               "dominated by this rather than by audio generation; its share "
+               "of engine time is sum(rate(tt_tts_conditioning_seconds_sum)) / "
+               "sum(rate(tt_tts_request_duration_seconds_sum)) — both sides "
+               "aggregated, since the stage label would otherwise stop the two "
+               "series from pairing at all. Only stages that "
+               "actually ran are observed, so voice_encode is silent on a "
+               "voice-sample cache hit rather than reporting zero.")
+           .Register(*registry_);
+  for (size_t i = 0; i < TTS_CONDITIONING_STAGE_COUNT; ++i) {
+    auto stageLabels = modelLabel;
+    stageLabels.emplace("stage", ttsConditioningStageLabel(
+                                     static_cast<TtsConditioningStage>(i)));
+    tts_conditioning_[i] = &conditioningFamily->Add(
+        stageLabels, K_LATENCY_QUANTILES, std::chrono::seconds{60}, 5);
+  }
+
+  tts_request_duration_seconds_ =
+      &prometheus::BuildSummary()
+           .Name("tt_tts_request_duration_seconds")
+           .Help(
+               "Total time for a finished TTS request, from service entry "
+               "(before any conditioning) through delivery of its terminal "
+               "event. Conditioning is measured inside this interval, so it is "
+               "the denominator for conditioning's share of engine time. Only "
+               "requests the engine ran to a terminal event are observed.")
+           .Register(*registry_)
+           .Add(modelLabel, K_LATENCY_QUANTILES, std::chrono::seconds{60}, 5);
+
   // ----- start background metrics thread ----------------------------------
   running_ = true;
   metrics_thread_ = std::thread(&ServerMetrics::metricsLoop, this);
 }
 
 ServerMetrics::~ServerMetrics() {
-  running_ = false;
+  {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    running_ = false;
+  }
   event_queue_cv_.notify_all();
   if (metrics_thread_.joinable()) metrics_thread_.join();
 }
@@ -219,6 +300,28 @@ void ServerMetrics::setActiveSessionsCount(double n) {
   active_sessions_->Set(n);
 }
 
+void ServerMetrics::setSlotBlocks(uint32_t slotId, double blocks) {
+  // Called at turn-end prefix registration — session-lifecycle frequency.
+  // Family::Add is idempotent for identical labels, so this reuses the
+  // existing gauge for the slot.
+  std::lock_guard<std::mutex> lock(slot_blocks_mutex_);
+  slot_blocks_family_
+      ->Add({{"model_name", model_name_}, {"slot_id", std::to_string(slotId)}})
+      .Set(blocks);
+}
+
+void ServerMetrics::removeSlot(uint32_t slotId) {
+  // Drop the series so Prometheus stops reporting a stale value after the
+  // slot is deallocated. Add() returns the existing gauge (or creates one),
+  // which Remove() then deletes from the family. Locked against setSlotBlocks
+  // (see above): Remove() destroys the Gauge that a concurrent Add().Set()
+  // could still be writing.
+  std::lock_guard<std::mutex> lock(slot_blocks_mutex_);
+  auto& gauge = slot_blocks_family_->Add(
+      {{"model_name", model_name_}, {"slot_id", std::to_string(slotId)}});
+  slot_blocks_family_->Remove(&gauge);
+}
+
 void ServerMetrics::onHttpResponse(const std::string& method, int statusCode) {
   http_requests_family_
       ->Add({{"model_name", model_name_},
@@ -227,9 +330,25 @@ void ServerMetrics::onHttpResponse(const std::string& method, int statusCode) {
       .Increment();
 }
 
-void ServerMetrics::onPrefixCacheLookup(bool hit) {
-  prefix_cache_queries_total_->Increment();
-  if (hit) prefix_cache_hits_total_->Increment();
+void ServerMetrics::onPrefixCacheLookup(uint32_t promptTokens,
+                                        uint32_t matchedTokens) {
+  if (promptTokens > 0) prefix_cache_queries_total_->Increment(promptTokens);
+  if (matchedTokens > 0) prefix_cache_hits_total_->Increment(matchedTokens);
+}
+
+void ServerMetrics::onTtsConditioning(TtsConditioningStage stage,
+                                      double seconds) {
+  const auto index = static_cast<size_t>(stage);
+  if (index >= tts_conditioning_.size() ||
+      tts_conditioning_[index] == nullptr) {
+    return;
+  }
+  tts_conditioning_[index]->Observe(seconds);
+}
+
+void ServerMetrics::onTtsRequestDuration(double seconds) {
+  if (tts_request_duration_seconds_ == nullptr) return;
+  tts_request_duration_seconds_->Observe(seconds);
 }
 
 // -----------------------------------------------------------------------------
@@ -344,9 +463,14 @@ void ServerMetrics::handleRequestCompleted(const EventRequestCompleted& e) {
   request_generation_tokens_->Observe(
       static_cast<double>(ctx.generation_tokens));
 
-  request_success_family_
-      ->Add({{"model_name", model_name_}, {"finished_reason", e.finish_reason}})
-      .Increment();
+  auto reasonIt = request_success_by_reason_.find(e.finish_reason);
+  if (reasonIt == request_success_by_reason_.end()) {
+    auto* counter = &request_success_family_->Add(
+        {{"model_name", model_name_}, {"finished_reason", e.finish_reason}});
+    reasonIt =
+        request_success_by_reason_.emplace(e.finish_reason, counter).first;
+  }
+  reasonIt->second->Increment();
 }
 
 // -----------------------------------------------------------------------------

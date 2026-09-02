@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+
+#pragma once
+
+#include <cstdint>
+#include <iostream>
+
+#include "domain/llm/llm_error_reason.hpp"
+
+namespace tt::ipc {
+
+struct SharedToken {
+  uint32_t token_index = 0;
+  uint32_t flags = 0;
+  uint32_t token_id = 0;
+  uint32_t task_id = 0;
+  uint32_t spec_accepts = 0;
+  uint32_t spec_rejects = 0;
+
+  static constexpr uint32_t FLAG_FINAL = 1;
+  static constexpr uint32_t FLAG_ERROR = 2;
+  static constexpr uint32_t FLAG_DONE = 4;
+  static constexpr uint32_t FLAG_ABORT = 8;
+  static constexpr uint32_t FLAG_TIMEOUT = 16;
+
+  bool isFinal() const { return flags & FLAG_FINAL; }
+  bool isError() const { return flags & FLAG_ERROR; }
+  bool isDone() const { return flags & FLAG_DONE; }
+  bool isAbort() const { return flags & FLAG_ABORT; }
+  bool isTimeout() const { return flags & FLAG_TIMEOUT; }
+
+  void serialize(std::ostream& os) const {
+    os.write(reinterpret_cast<const char*>(&token_index), sizeof(token_index));
+    os.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+    os.write(reinterpret_cast<const char*>(&token_id), sizeof(token_id));
+    os.write(reinterpret_cast<const char*>(&task_id), sizeof(task_id));
+    os.write(reinterpret_cast<const char*>(&spec_accepts),
+             sizeof(spec_accepts));
+    os.write(reinterpret_cast<const char*>(&spec_rejects),
+             sizeof(spec_rejects));
+  }
+
+  static SharedToken deserialize(std::istream& is) {
+    SharedToken token{};
+    is.read(reinterpret_cast<char*>(&token.token_index),
+            sizeof(token.token_index));
+    is.read(reinterpret_cast<char*>(&token.flags), sizeof(token.flags));
+    is.read(reinterpret_cast<char*>(&token.token_id), sizeof(token.token_id));
+    is.read(reinterpret_cast<char*>(&token.task_id), sizeof(token.task_id));
+    is.read(reinterpret_cast<char*>(&token.spec_accepts),
+            sizeof(token.spec_accepts));
+    is.read(reinterpret_cast<char*>(&token.spec_rejects),
+            sizeof(token.spec_rejects));
+    return token;
+  }
+};
+
+inline tt::domain::llm::LLMErrorReason errorReasonFromToken(
+    const SharedToken& token) {
+  return token.isTimeout() ? tt::domain::llm::LLMErrorReason::TIMEOUT
+                           : tt::domain::llm::LLMErrorReason::GENERIC;
+}
+
+/**
+ * Abstract interface for a token result queue (worker -> main process).
+ *
+ * - push        -- non-blocking enqueue, returns false if full.
+ * - tryPop      -- non-blocking dequeue.
+ * - blockingPop -- blocks until a token is available or shutdown.
+ * - shutdown    -- signal consumers to stop.
+ */
+class IResultQueue {
+ public:
+  virtual ~IResultQueue() = default;
+
+  virtual bool push(const SharedToken& token) = 0;
+  virtual bool tryPop(SharedToken& out) = 0;
+  virtual bool blockingPop(SharedToken& out) = 0;
+  virtual void shutdown() = 0;
+  virtual void remove() {}
+};
+
+}  // namespace tt::ipc

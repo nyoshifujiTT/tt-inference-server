@@ -4,13 +4,13 @@
 #
 # Build cpp_server on exabox (no sudo, ephemeral /home).
 #
-# All local installs (Drogon, Rust) go to /data/$USER/.local so they
-# persist across compute nodes.  System apt packages (libjsoncpp-dev,
-# uuid-dev, libboost-all-dev, …) are assumed to already be installed.
+# All local installs (jsoncpp, libuuid, Drogon, Rust) go to
+# /data/$USER/.local so they persist across compute nodes.
+# Only libboost-dev is expected to be a system package.
 #
 # Usage:
 #   ./build_exabox.sh [OPTIONS]        # same flags as build.sh
-#   ./build_exabox.sh --install-deps   # one-time: build+install Drogon & Rust
+#   ./build_exabox.sh --install-deps   # one-time: build jsoncpp, libuuid, Drogon + install Rust
 #
 # After building, run the binary with:
 #   LD_LIBRARY_PATH=/data/$USER/.local/lib:$LD_LIBRARY_PATH \
@@ -26,16 +26,26 @@ LOCAL_PREFIX="/data/${USER}/.local"
 RUSTUP_DIR="/data/${USER}/.rustup"
 CARGO_DIR="/data/${USER}/.cargo"
 
+# Avoid /tmp-full build failures on shared login nodes: if /tmp has < 2 GB
+# free, redirect compiler temp files to /data.
+_tmp_avail_kb=$(df --output=avail /tmp 2>/dev/null | tail -1 | tr -d ' ')
+if [[ "${_tmp_avail_kb}" =~ ^[0-9]+$ ]] && [ "${_tmp_avail_kb}" -lt 2097152 ]; then
+    export TMPDIR="/data/${USER}/tmp"
+    mkdir -p "${TMPDIR}"
+fi
+
 # ── Parse arguments ──────────────────────────────────────────────────────
 BUILD_TYPE="Release"
 SANITIZE_THREAD="OFF"
 SANITIZE_ADDRESS="OFF"
 ENABLE_TRACY="OFF"
 ENABLE_BLAZE="OFF"
+ENABLE_BLAZE_MIGRATION="OFF"
 CLANG_TIDY="OFF"
 TOOLCHAIN_PATH_ARG=""
 CXX_COMPILER_PATH=""
 KAFKA_ENABLED="OFF"
+ENABLE_MOONCAKE="OFF"
 INSTALL_DEPS=0
 
 while [[ $# -gt 0 ]]; do
@@ -46,24 +56,32 @@ while [[ $# -gt 0 ]]; do
         --asan)          SANITIZE_ADDRESS="ON"; BUILD_TYPE="Debug"; shift ;;
         --tracy)         ENABLE_TRACY="ON"; shift ;;
         --blaze)         ENABLE_BLAZE="ON"; shift ;;
+        --blaze-with-migration)
+            ENABLE_BLAZE="ON"
+            ENABLE_BLAZE_MIGRATION="ON"
+            shift
+            ;;
         --clang-tidy)    CLANG_TIDY="ON"; shift ;;
         --kafka)         KAFKA_ENABLED="ON"; shift ;;
+        --mooncake)      ENABLE_MOONCAKE="ON"; shift ;;
         --toolchain-path)   TOOLCHAIN_PATH_ARG="$2"; shift 2 ;;
         --cxx-compiler-path) CXX_COMPILER_PATH="$2"; shift 2 ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Exabox-specific options:"
-            echo "  --install-deps       One-time setup: build Drogon + install Rust to /data/\$USER/.local"
+            echo "  --install-deps       One-time setup: build jsoncpp, libuuid, Drogon + install Rust to /data/\$USER/.local"
             echo ""
             echo "Build options (same as build.sh):"
             echo "  --debug              Debug build (default: Release)"
             echo "  --tsan               ThreadSanitizer"
             echo "  --asan               AddressSanitizer"
             echo "  --tracy              Tracy profiling"
-            echo "  --blaze              tt-blaze pipeline_manager support"
+            echo "  --blaze              tt-llm-engine / mock_pipeline support"
+            echo "  --blaze-with-migration  Same as --blaze plus real shmem migration"
             echo "  --clang-tidy         Run clang-tidy during build"
             echo "  --kafka              Kafka support (needs librdkafka-dev)"
+            echo "  --mooncake           Build with the Mooncake Transfer Engine transport (third_party/Mooncake; RDMA always on)"
             echo "  --toolchain-path P   CMake toolchain file"
             echo "  --cxx-compiler-path P  C++ compiler path"
             exit 0
@@ -77,6 +95,71 @@ if [ "${SANITIZE_THREAD}" = "ON" ] && [ "${SANITIZE_ADDRESS}" = "ON" ]; then
 fi
 
 # ── Dependency installation (--install-deps) ─────────────────────────────
+# On exabox there is no sudo, so system packages that are missing
+# (libjsoncpp-dev, uuid-dev) are built from source into $LOCAL_PREFIX.
+
+_build_tmp="/data/${USER}/tmp/exabox_deps_$$"
+_nproc=$(nproc 2>/dev/null || echo 4)
+
+have_lib() {
+    local pkg="$1" lib="$2"
+    pkg-config --exists "${pkg}" 2>/dev/null || \
+    [ -f "${LOCAL_PREFIX}/lib/lib${lib}.so" ] || \
+    [ -f "${LOCAL_PREFIX}/lib/lib${lib}.a" ]
+}
+
+install_jsoncpp() {
+    if have_lib jsoncpp jsoncpp; then
+        echo "jsoncpp already available"
+        return 0
+    fi
+
+    echo ""
+    echo "Building jsoncpp → ${LOCAL_PREFIX} ..."
+    local src="${_build_tmp}/jsoncpp"
+    git clone --depth 1 --branch 1.9.6 \
+        https://github.com/open-source-parsers/jsoncpp.git "${src}"
+    mkdir -p "${src}/build" && cd "${src}/build"
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${LOCAL_PREFIX}" \
+        -DJSONCPP_WITH_TESTS=OFF \
+        -DJSONCPP_WITH_POST_BUILD_UNITTEST=OFF \
+        -DBUILD_SHARED_LIBS=ON
+    make -j"${_nproc}"
+    make install
+    cd "${SCRIPT_DIR}"
+    echo "jsoncpp installed to ${LOCAL_PREFIX}"
+}
+
+install_uuid() {
+    if have_lib uuid uuid; then
+        echo "libuuid already available"
+        return 0
+    fi
+
+    echo ""
+    echo "Building libuuid → ${LOCAL_PREFIX} ..."
+    local src="${_build_tmp}/util-linux"
+    local ver="2.39.3"
+    local sha256="7b6605e48d1a49f43cc4b4cfc59f313d0dd5402fa40b96810bd572e167dfed0f"
+    local tarball="${_build_tmp}/util-linux-${ver}.tar.xz"
+    mkdir -p "${_build_tmp}"
+    wget -q -O "${tarball}" \
+        "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v${ver%.*}/util-linux-${ver}.tar.xz"
+    echo "${sha256}  ${tarball}" | sha256sum -c - || {
+        echo "ERROR: SHA-256 mismatch for util-linux-${ver}.tar.xz"; return 1; }
+    tar -xf "${tarball}" -C "${_build_tmp}"
+    cd "${_build_tmp}/util-linux-${ver}"
+    ./configure --prefix="${LOCAL_PREFIX}" \
+        --disable-all-programs --enable-libuuid \
+        --without-python --without-systemd --without-ncurses
+    make -j"${_nproc}"
+    make install
+    cd "${SCRIPT_DIR}"
+    echo "libuuid installed to ${LOCAL_PREFIX}"
+}
+
 install_drogon() {
     local drogon_cmake="${LOCAL_PREFIX}/lib/cmake/Drogon/DrogonConfig.cmake"
     if [ -f "${drogon_cmake}" ]; then
@@ -92,7 +175,7 @@ install_drogon() {
     if [ -d "${drogon_src}" ]; then
         echo "  Using bundled source: ${drogon_src}"
     else
-        drogon_tmp="/tmp/drogon_build_$$"
+        drogon_tmp="${_build_tmp}/drogon"
         echo "  Cloning drogon v1.9.12 → ${drogon_tmp}"
         git clone --depth 1 --branch v1.9.12 --recurse-submodules \
             https://github.com/drogonframework/drogon.git "${drogon_tmp}"
@@ -103,10 +186,15 @@ install_drogon() {
     cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="${LOCAL_PREFIX}" \
+        -DCMAKE_PREFIX_PATH="${LOCAL_PREFIX}" \
         -DBUILD_EXAMPLES=OFF \
         -DBUILD_CTL=OFF \
-        -DBUILD_YAML_CONFIG=OFF
-    make -j"$(nproc 2>/dev/null || echo 4)"
+        -DBUILD_YAML_CONFIG=OFF \
+        -DBUILD_POSTGRESQL=OFF \
+        -DBUILD_MYSQL=OFF \
+        -DBUILD_SQLITE=OFF \
+        -DBUILD_REDIS=OFF
+    make -j"${_nproc}"
     make install
     cd "${SCRIPT_DIR}"
     [ -n "${drogon_tmp}" ] && rm -rf "${drogon_tmp}"
@@ -132,7 +220,10 @@ install_rust() {
 }
 
 if [ "${INSTALL_DEPS}" -eq 1 ]; then
-    mkdir -p "${LOCAL_PREFIX}"
+    mkdir -p "${LOCAL_PREFIX}" "${_build_tmp}"
+    trap 'rm -rf "${_build_tmp}"' EXIT
+    install_jsoncpp
+    install_uuid
     install_drogon
     install_rust
     echo ""
@@ -144,11 +235,19 @@ if [ "${INSTALL_DEPS}" -eq 1 ]; then
 fi
 
 # ── Verify prerequisites ─────────────────────────────────────────────────
-if [ ! -f "${LOCAL_PREFIX}/lib/cmake/Drogon/DrogonConfig.cmake" ]; then
-    echo "ERROR: Drogon not found at ${LOCAL_PREFIX}."
+_missing=()
+[ ! -f "${LOCAL_PREFIX}/lib/cmake/Drogon/DrogonConfig.cmake" ] && _missing+=("Drogon")
+have_lib jsoncpp jsoncpp || _missing+=("jsoncpp")
+have_lib uuid uuid       || _missing+=("libuuid")
+if [ ${#_missing[@]} -gt 0 ]; then
+    echo "ERROR: Missing dependencies at ${LOCAL_PREFIX}: ${_missing[*]}"
     echo "  Run:  $0 --install-deps"
     exit 1
 fi
+
+# Make local-prefix libs visible to CMake, pkg-config, and the linker
+export PKG_CONFIG_PATH="${LOCAL_PREFIX}/lib/pkgconfig:${LOCAL_PREFIX}/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+export LD_LIBRARY_PATH="${LOCAL_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 
 # ── Rust: prefer /data paths over ephemeral /home ────────────────────────
 # Rustup proxies in .cargo/bin (both /data and /home) fail unless a default
@@ -186,6 +285,7 @@ echo "  Build type:    ${BUILD_TYPE}"
 echo "  Local prefix:  ${LOCAL_PREFIX}"
 echo "  Rust:          $(command -v cargo) ($(cargo --version 2>/dev/null || echo '?'))"
 echo "  Blaze:         ${ENABLE_BLAZE}"
+echo "  Blaze migration: ${ENABLE_BLAZE_MIGRATION}"
 echo "  Kafka:         ${KAFKA_ENABLED}"
 echo "=============================================="
 
@@ -280,8 +380,10 @@ CMAKE_ARGS=(
     -DSANITIZE_ADDRESS="${SANITIZE_ADDRESS}"
     -DENABLE_TRACY="${ENABLE_TRACY}"
     -DENABLE_BLAZE="${ENABLE_BLAZE}"
+    -DENABLE_BLAZE_MIGRATION="${ENABLE_BLAZE_MIGRATION}"
     -DCLANG_TIDY="${CLANG_TIDY}"
     -DKAFKA_ENABLED="${KAFKA_ENABLED}"
+    -DENABLE_MOONCAKE="${ENABLE_MOONCAKE}"
     -DCARGO_EXECUTABLE="${RESOLVED_CARGO}"
 )
 [ -n "${TT_METAL_HOME:-}" ] && CMAKE_ARGS+=(-DTT_METAL_HOME="${TT_METAL_HOME}")

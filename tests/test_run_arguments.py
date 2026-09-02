@@ -29,6 +29,7 @@ from workflows.device_utils import _get_tt_smi_board_type_counts, infer_default_
 from workflows.model_spec import get_runtime_model_spec
 from workflows.run_docker_server import (
     generate_docker_run_command,
+    get_media_server_docker_env_vars,
 )
 from workflows.runtime_config import RuntimeConfig
 from workflows.workflow_types import DeviceTypes, InferenceEngine, ModelType
@@ -105,6 +106,7 @@ def mock_model_spec():
     mock_spec = MagicMock()
     mock_spec.model_id = "id_tt-transformers_Mistral-7B-Instruct-v0.3_n150"
     mock_spec.model_name = "Mistral-7B-Instruct-v0.3"
+    mock_spec.hf_model_repo = "mistralai/Mistral-7B-Instruct-v0.3"
     mock_spec.tt_metal_commit = "test-commit"
     mock_spec.vllm_commit = "test-vllm-commit"
     mock_spec.inference_engine = "vLLM"
@@ -188,6 +190,30 @@ class TestArgumentParsing:
                     "invalid choice" in stderr_output.lower()
                     or "error" in stderr_output.lower()
                 )
+
+    @pytest.mark.parametrize(
+        "invalid_value",
+        [
+            "not-a-real-tool",
+            "VLLM",  # case-sensitive: uppercase variant should be rejected
+            "guidellm ",  # trailing whitespace should be rejected
+            "",  # empty string
+        ],
+    )
+    def test_invalid_tools_choice(self, base_args, invalid_value):
+        """--tools must be restricted to the documented choice set."""
+        full_args = base_args + ["--tools", invalid_value]
+        with patch("sys.argv", ["run.py"] + full_args):
+            with patch("sys.stderr") as mock_stderr:
+                with pytest.raises(SystemExit) as exc_info:
+                    parse_arguments()
+
+                assert exc_info.value.code == 2
+
+                stderr_calls = [str(call) for call in mock_stderr.write.call_args_list]
+                stderr_output = "".join(stderr_calls).lower()
+                assert "--tools" in stderr_output
+                assert "invalid choice" in stderr_output
 
 
 class TestModelSpecCliArgsCompatibility:
@@ -289,6 +315,108 @@ class TestModelSpecCliArgsCompatibility:
         else:
             assert args.vllm_override_args == test_value
 
+    def test_agentic_traces_mode_defaults_to_full(self, base_args):
+        with patch("sys.argv", ["run.py"] + base_args):
+            args = parse_arguments()
+        assert args.agentic_traces is False
+        assert args.agentic_traces_mode == "full"
+        assert args.agentic_traces_sources is None
+        assert args.agentic_traces_duration is None
+        assert args.agentic_traces_git_ref is None
+        # Unset means AIPerf scrapes only the load target's own /metrics.
+        assert args.agentic_traces_metrics_url is None
+
+    def test_agentic_traces_metrics_url_is_repeatable(self, base_args):
+        args = [a if a != "benchmarks" else "agentic_traces" for a in base_args]
+        with patch(
+            "sys.argv",
+            ["run.py"]
+            + args
+            + [
+                "--agentic-traces-metrics-url",
+                "worker-a:9000",
+                "--agentic-traces-metrics-url",
+                "worker-b:9000/metrics",
+            ],
+        ):
+            parsed = parse_arguments()
+        assert parsed.agentic_traces_metrics_url == [
+            "worker-a:9000",
+            "worker-b:9000/metrics",
+        ]
+
+    def test_agentic_traces_opt_in_requires_release(self, base_args, capsys):
+        # base_args uses --workflow benchmarks
+        with patch("sys.argv", ["run.py"] + base_args + ["--agentic-traces"]):
+            with pytest.raises(SystemExit):
+                parse_arguments()
+        assert "requires --workflow release" in capsys.readouterr().err
+
+    def test_agentic_traces_opt_in_accepted_for_release(self, base_args):
+        args = [a if a != "benchmarks" else "release" for a in base_args]
+        with patch("sys.argv", ["run.py"] + args + ["--agentic-traces"]):
+            parsed = parse_arguments()
+        assert parsed.agentic_traces is True
+
+    def test_agentic_traces_overrides_allowed_on_an_opted_in_release(self, base_args):
+        """The release child runs the same sweep, so it takes the same overrides."""
+        args = [a if a != "benchmarks" else "release" for a in base_args]
+        with patch(
+            "sys.argv",
+            ["run.py"]
+            + args
+            + ["--agentic-traces", "--agentic-traces-sources", "inferencex_agentx"],
+        ):
+            parsed = parse_arguments()
+        assert parsed.agentic_traces_sources == "inferencex_agentx"
+
+    def test_agentic_traces_overrides_rejected_on_a_plain_release(
+        self, base_args, capsys
+    ):
+        args = [a if a != "benchmarks" else "release" for a in base_args]
+        with patch(
+            "sys.argv", ["run.py"] + args + ["--agentic-traces-sources", "swarmone"]
+        ):
+            with pytest.raises(SystemExit):
+                parse_arguments()
+        assert "--workflow release --agentic-traces" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "flag,value",
+        [
+            ("--agentic-traces-sources", "inferencex_agentx"),
+            ("--agentic-traces-duration", "1800"),
+            ("--agentic-traces-git-ref", "abc123"),
+            ("--agentic-traces-metrics-url", "worker-a:9000"),
+        ],
+    )
+    def test_agentic_traces_overrides_require_their_workflow(
+        self, base_args, flag, value, capsys
+    ):
+        # base_args uses --workflow benchmarks
+        with patch("sys.argv", ["run.py"] + base_args + [flag, value]):
+            with pytest.raises(SystemExit):
+                parse_arguments()
+        assert "require --workflow agentic_traces" in capsys.readouterr().err
+
+    def test_agentic_traces_duration_below_the_scenario_floor_is_rejected(
+        self, base_args, capsys
+    ):
+        args = [a if a != "benchmarks" else "agentic_traces" for a in base_args]
+        with patch("sys.argv", ["run.py"] + args + ["--agentic-traces-duration", "60"]):
+            with pytest.raises(SystemExit):
+                parse_arguments()
+        assert "must be at least 900s" in capsys.readouterr().err
+
+    def test_agentic_traces_duration_at_the_floor_is_accepted(self, base_args):
+        args = [a if a != "benchmarks" else "agentic_traces" for a in base_args]
+        with patch(
+            "sys.argv",
+            ["run.py"] + args + ["--agentic-traces-duration", "900"],
+        ):
+            parsed = parse_arguments()
+        assert parsed.agentic_traces_duration == 900
+
     def test_optional_args_and_defaults(self, base_args):
         """Test optional arguments and default values."""
         # Test with all optional args
@@ -318,6 +446,8 @@ class TestModelSpecCliArgsCompatibility:
             "/opt/tt-metal",
             "--vllm-dir",
             "/opt/vllm",
+            "--tools",
+            "guidellm",
         ]
         with patch("sys.argv", ["run.py"] + full_args):
             args = parse_arguments()
@@ -338,6 +468,7 @@ class TestModelSpecCliArgsCompatibility:
         assert args.concurrency_sweeps is True
         assert args.tt_metal_home == "/opt/tt-metal"
         assert args.vllm_dir == "/opt/vllm"
+        assert args.tools == "guidellm"
 
         # Test defaults
         with patch("sys.argv", ["run.py"] + base_args):
@@ -380,8 +511,9 @@ class TestModelSpecCliArgsCompatibility:
 
         assert args.tt_metal_home == "/env/tt-metal"
 
-    def test_vllm_dir_defaults_from_env(self, base_args):
-        """Test --vllm-dir falls back to vllm_dir env var."""
+    def test_vllm_dir_still_accepted_from_env(self, base_args):
+        """--vllm-dir is deprecated but still parsed, so old invocations and an
+        exported vllm_dir do not become hard errors."""
         full_args = base_args + ["--local-server", "--tt-metal-home", "/srv/tt-metal"]
         with patch.dict(os.environ, {"vllm_dir": "/env/vllm"}, clear=False):
             with patch("sys.argv", ["run.py"] + full_args):
@@ -389,13 +521,20 @@ class TestModelSpecCliArgsCompatibility:
 
         assert args.vllm_dir == "/env/vllm"
 
-    def test_vllm_dir_defaults_from_tt_metal_home(self, base_args):
-        """Test --vllm-dir defaults to tt-metal-home/vllm."""
-        full_args = base_args + ["--local-server", "--tt-metal-home", "/srv/tt-metal"]
-        with patch("sys.argv", ["run.py"] + full_args):
-            args = parse_arguments()
+    def test_vllm_dir_is_not_derived_from_tt_metal_home(self, base_args):
+        """No vLLM source tree is assumed any more.
 
-        assert args.vllm_dir == "/srv/tt-metal/vllm"
+        vLLM is an ordinary installed package in the tt-metal venv and the TT
+        platform comes from the separately installed vllm-tt-plugin, so run.py
+        must not synthesise a tt-metal-home/vllm path.
+        """
+        full_args = base_args + ["--local-server", "--tt-metal-home", "/srv/tt-metal"]
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("vllm_dir", None)
+            with patch("sys.argv", ["run.py"] + full_args):
+                args = parse_arguments()
+
+        assert args.vllm_dir is None
 
     def test_host_hf_cache_bare_flag_defaults_from_env(self, base_args):
         """Test bare --host-hf-cache resolves via HOST_HF_HOME/HF_HOME defaults."""
@@ -464,6 +603,7 @@ class TestArgsInference:
         spec = MagicMock()
         spec.model_id = model_id
         spec.model_name = "Mistral-7B-Instruct-v0.3"
+        spec.hf_model_repo = "mistralai/Mistral-7B-Instruct-v0.3"
         spec.device_type = DeviceTypes.N150
         spec.inference_engine = "vLLM"
         spec.impl.impl_name = impl_name
@@ -627,25 +767,26 @@ class TestRuntimeValidation:
         [
             ("benchmarks", True),
             ("evals", True),  # Mistral-7B-Instruct-v0.3 is in EVAL_CONFIGS
-            ("reports", True),
+            ("agentic", True),
             ("release", True),  # Mistral-7B-Instruct-v0.3 is in both configs
             ("stress_tests", True),
         ],
     )
-    def test_workflow_validation(
-        self, mock_model_spec, mock_runtime_config, workflow, should_pass
-    ):
+    def test_workflow_validation(self, mock_runtime_config, workflow, should_pass):
         """Test validation for different workflows."""
         mock_runtime_config.workflow = workflow
+        model_spec, _, _ = get_runtime_model_spec(
+            model="Mistral-7B-Instruct-v0.3", device="n150"
+        )
         with patch.dict(
             "workflows.validate_setup.MODEL_SPECS",
-            {mock_model_spec.model_id: mock_model_spec},
+            {model_spec.model_id: model_spec},
         ):
             if should_pass:
-                validate_runtime_args(mock_model_spec, mock_runtime_config)
+                validate_runtime_args(model_spec, mock_runtime_config)
             else:
                 with pytest.raises(AssertionError):
-                    validate_runtime_args(mock_model_spec, mock_runtime_config)
+                    validate_runtime_args(model_spec, mock_runtime_config)
 
     def test_server_workflow_validation(self, mock_model_spec, mock_runtime_config):
         """Test server workflow specific validation."""
@@ -684,6 +825,17 @@ class TestRuntimeValidation:
             ):
                 validate_runtime_args(mock_model_spec, mock_runtime_config)
 
+    def test_external_runtime_model_spec_skips_catalog_membership(
+        self, mock_model_spec, mock_runtime_config
+    ):
+        """A supplied runtime spec is the source of truth for model/device support."""
+        mock_model_spec.model_id = "id_autoport_Mistral-7B-Instruct-v0.3_n150"
+        mock_runtime_config.workflow = "agentic"
+        mock_runtime_config.runtime_model_spec_json = "/tmp/custom-runtime-spec.json"
+
+        with patch.dict("workflows.validate_setup.MODEL_SPECS", {}):
+            validate_runtime_args(mock_model_spec, mock_runtime_config)
+
 
 class TestOverrideArgsIntegration:
     """Test override arguments integration with model_spec apply_runtime_args."""
@@ -702,6 +854,7 @@ class TestOverrideArgsIntegration:
         mock_model_spec = MagicMock()
         mock_model_spec.model_id = "id_tt-transformers_Mistral-7B-Instruct-v0.3_n150"
         mock_model_spec.model_name = "Mistral-7B-Instruct-v0.3"
+        mock_model_spec.hf_model_repo = "mistralai/Mistral-7B-Instruct-v0.3"
         mock_model_spec.device_type = DeviceTypes.N150
         mock_model_spec.inference_engine = "vLLM"
         mock_model_spec.impl.impl_name = "tt-transformers"
@@ -726,6 +879,7 @@ class TestOverrideArgsIntegration:
         mock_model_spec = MagicMock()
         mock_model_spec.model_id = "test-model-id"
         mock_model_spec.model_name = "Mistral-7B-Instruct-v0.3"
+        mock_model_spec.hf_model_repo = "mistralai/Mistral-7B-Instruct-v0.3"
         mock_model_spec.device_type = "n150"
         mock_model_spec.docker_image = "test:image"
         mock_model_spec.impl.impl_name = "tt-transformers"
@@ -1063,6 +1217,48 @@ class TestOverrideArgsIntegration:
         assert not any("vllm-tt-metal/src" in m for m in mounts), mounts
 
 
+class TestMediaServerDockerEnvVars:
+    def test_single_runner_sdxl_uses_cpp_server(self):
+        model_spec, _, _ = get_runtime_model_spec(
+            model="stable-diffusion-xl-base-1.0",
+            device="n150",
+        )
+
+        env_vars = get_media_server_docker_env_vars(model_spec)
+
+        assert env_vars["SERVER_MODE"] == "cpp"
+        assert env_vars["MODEL_SERVICE"] == "image"
+        assert env_vars["MODEL_RUNNER_TYPE"] == "tt_sdxl_generate"
+        assert env_vars["DEVICE_IDS"] == "(0)"
+
+    @pytest.mark.parametrize("device", ["galaxy"])
+    def test_multi_runner_sdxl_uses_cpp_server(self, device):
+        model_spec, _, _ = get_runtime_model_spec(
+            model="stable-diffusion-xl-base-1.0",
+            device=device,
+        )
+
+        env_vars = get_media_server_docker_env_vars(model_spec)
+
+        assert env_vars["SERVER_MODE"] == "cpp"
+        assert env_vars["MODEL_SERVICE"] == "image"
+        assert env_vars["MODEL_RUNNER_TYPE"] == "tt_sdxl_generate"
+        assert env_vars["DEVICE_IDS"].replace(" ", "").count("(") > 1
+
+    def test_non_cpp_media_persists_hf_cache_on_cache_root(self):
+        """Whisper (uvicorn media server) must place HF_HOME on the cache_root
+        volume so weights survive container restarts."""
+        model_spec, _, _ = get_runtime_model_spec(
+            model="whisper-large-v3",
+            device="n150",
+        )
+
+        env_vars = get_media_server_docker_env_vars(model_spec)
+
+        assert env_vars.get("SERVER_MODE") != "cpp"
+        assert env_vars["HF_HOME"] == "/home/container_app_user/cache_root/huggingface"
+
+
 class TestSecretsHandling:
     """Tests for secrets handling functionality."""
 
@@ -1076,7 +1272,7 @@ class TestSecretsHandling:
             ("server", True, True, False, False, False),  # Interactive mode
             ("server", True, False, True, False, True),  # Server with docker + no-auth
             ("release", False, False, False, False, True),  # Non-client workflow
-            ("reports", False, False, False, False, True),  # Non-client workflow
+            ("agentic", False, False, False, False, True),  # Non-client workflow
         ],
     )
     def test_secrets_requirements(
