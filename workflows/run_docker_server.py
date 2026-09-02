@@ -141,6 +141,41 @@ def _media_server_dev_mounts(repo_root_path, user_home_path, model_spec) -> List
     return mounts
 
 
+def _tt_metal_model_dev_mounts(user_home_path) -> List[str]:
+    """Bind host tt-metal model sources over the image's copy, from TT_METAL_MODEL_DEV_MOUNTS.
+
+    Iterating on a model implementation otherwise means rebuilding the serving image for every
+    edit, because the sources live inside it. The variable holds ``src:dst`` pairs separated by
+    commas, where a relative dst resolves under the image's tt-metal checkout::
+
+        TT_METAL_MODEL_DEV_MOUNTS=/host/qwen36:models/demos/blackhole/qwen36
+
+    Absolute dst paths are used as given, so files outside tt-metal can be replaced too.
+    """
+    spec = os.getenv("TT_METAL_MODEL_DEV_MOUNTS")
+    if not spec:
+        return []
+    mounts: List[str] = []
+    for entry in spec.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        src, sep, dst = entry.partition(":")
+        if not sep or not dst:
+            raise ValueError(
+                f"TT_METAL_MODEL_DEV_MOUNTS entry {entry!r} is not 'src:dst'"
+            )
+        src_path = Path(src).expanduser().resolve()
+        if not src_path.exists():
+            raise FileNotFoundError(
+                f"TT_METAL_MODEL_DEV_MOUNTS source does not exist: {src_path}"
+            )
+        dst_path = dst if dst.startswith("/") else f"{user_home_path}/tt-metal/{dst}"
+        mounts += ["--mount", f"type=bind,src={src_path},dst={dst_path}"]
+        logger.info("Using tt-metal model dev mount: %s -> %s", src_path, dst_path)
+    return mounts
+
+
 def get_media_server_docker_env_vars(model_spec):
     """Get media server environment variables for Docker container."""
     if _is_cpp_media_spec(model_spec):
@@ -569,6 +604,7 @@ def generate_docker_run_command(
             docker_command += [
                 "--mount", f"type=bind,src={repo_root_path}/vllm-tt-metal/src,dst={user_home_path}/app/src",
             ]
+        docker_command += _tt_metal_model_dev_mounts(user_home_path)
         # fmt: on
 
     for key, value in docker_env_vars.items():
