@@ -125,7 +125,7 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +    - neosophie/Qwen3-ASR-1.7B-JA
 +  version: "0.1.0"
 +  tt_metal_commit: "1395635"
-+  vllm_commit: "2bcb717"
++  vllm_commit: "50695d8"
 +  impl: tt_vllm_plugin
 +  min_disk_gb: 15
 +  min_ram_gb: 6
@@ -272,7 +272,7 @@ it is replaced, so keep at least 60 GB free.
 ```
 python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 --workflow server \
   --docker-server --dev-mode --no-auth --service-port 8110 --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-1395635-2bcb717
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-1395635-50695d8
 ```
 
 `/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the

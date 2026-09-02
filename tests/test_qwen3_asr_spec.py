@@ -143,6 +143,7 @@ def test_vllm_commit_pins_a_plugin_commit_not_a_fork_commit():
 SUPERSEDED_VLLM_FORK_COMMITS = (
     "e1a3825",  # fork upstream base
     "5e69638",  # fork bring-up branch head
+    "2bcb717",  # plugin head before the upstream merge (vLLM 0.24.0)
 )
 
 
