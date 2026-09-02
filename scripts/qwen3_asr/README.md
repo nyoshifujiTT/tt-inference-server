@@ -24,6 +24,18 @@ docker buildx bake -f dockerfile/docker-bake.hcl \
 
 The script then sees the base locally and only builds the dev image.
 
+### Where the pins live
+
+`workflows/model_specs/dev/audio_tts.yaml` carries no `version`,
+`tt_metal_commit` or `vllm_commit`: the dev catalog contract rejects them. Those
+are release pins, added when `scripts/release/promote_dev_spec_to_prod.py`
+promotes a dev entry into `workflows/model_specs/prod/`. Hand-writing them into
+prod would forge a release artifact, and prod is not this bring-up's to edit.
+
+`scripts/build_docker_images.py` reads both pins from the catalog, so building
+before promotion needs them supplied temporarily. That is the second half of the
+manual patch below, applied and reverted the same way as the clone URLs.
+
 ### Why the pin may lag the branch head
 
 `tt_metal_commit` names the tree the image is BUILT from, so it only has to move
@@ -43,24 +55,26 @@ If that prints anything, bump the pin and rebuild.
 
 ### 2. Dev image (from the bring-up forks)
 
-The spec pins the bring-up branch heads, which live on forks until they land
-upstream. Every repository in this bring-up uses the same branch name:
+The bring-up branch heads live on forks until they land upstream. Every
+repository in this bring-up uses the same branch name:
 
-| repository | branch | pinned commit |
+| repository | branch | pinned by |
 |---|---|---|
-| `nyoshifujiTT/tt-metal` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `tt_metal_commit` in the spec |
-| `nyoshifujiTT/vllm-tt-plugin` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `vllm_commit` in the spec |
+| `nyoshifujiTT/tt-metal` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `tt_metal_commit` |
+| `nyoshifujiTT/vllm-tt-plugin` | `nyoshifujiTT/qwen3-asr-17b_p150x1` | `vllm_commit` |
 
 The clone checks out the pinned commit, not the branch, so the branch only has
-to *contain* it. The pins live in `workflows/model_spec.py`; this old spec
-format keeps every model's commits there directly, so the Qwen3-ASR entry is
-ordinary committed source and needs no build-time patching.
+to *contain* it.
 
 #### The one manual patch
 
-The committed Dockerfile always clones upstream, so the two clone URLs are the
-only thing that has to change while the commits are on forks. Apply the patch,
-build, then restore -- the recipe PR#4837 established:
+Two things have to change to build before release, and both are temporary:
+
+1. the two clone URLs, which the committed Dockerfile always points upstream;
+2. the release pins, which the dev catalog contract does not allow (see
+   *Where the pins live*).
+
+Apply, build, then restore -- the recipe PR#4837 established:
 
 ```
 cd $TT_INFERENCE_SERVER
@@ -68,40 +82,58 @@ git apply <<'PATCH'
 diff --git a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile b/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 --- a/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
 +++ b/vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
-@@ -77,7 +77,7 @@ RUN /bin/bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-     && rustup update"
- 
- # Build tt-metal - clone with minimal history, build, and clean
--RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${TT_METAL_HOME} \
-+RUN /bin/bash -c "git clone https://github.com/nyoshifujiTT/tt-metal.git ${TT_METAL_HOME} \
+@@ -86,7 +86,7 @@ ENV UV_HTTP_RETRIES=10
+ # A full-history clone of tt-metal has taken over an hour on CI, connection dropped ("fatal: early
+ # EOF"). Only the pinned commit is needed, so fetch just that (matches the shallow
+ # clone already used by tt-media-server/Dockerfile).
+-RUN /bin/bash -c "git clone --depth 1 https://github.com/tenstorrent-metal/tt-metal.git ${TT_METAL_HOME} \
++RUN /bin/bash -c "git clone --depth 1 https://github.com/nyoshifujiTT/tt-metal.git ${TT_METAL_HOME} \
      && cd ${TT_METAL_HOME} \
+     && git fetch --depth 1 origin ${TT_METAL_COMMIT_SHA_OR_TAG} \
      && git checkout ${TT_METAL_COMMIT_SHA_OR_TAG} \
-     && git submodule update --init --recursive \
-@@ -106,7 +106,7 @@ RUN /bin/bash -c "git clone https://github.com/tenstorrent-metal/tt-metal.git ${
- # processors lazily via __getattr__, and install-vllm-tt.sh actively uninstalls
- # torchaudio because the CUDA wheel cannot load next to the CPU torch that
- # tt-metal installs.
+@@ -101,7 +101,7 @@ RUN /bin/bash -c "git clone --depth 1 https://github.com/tenstorrent-metal/tt-me
+ # Build vllm-tt-plugin - clone with minimal history and clean.
+ # The plugin owns the vLLM version pin and its dependency overrides, so the
+ # install is delegated to its own docs/install-vllm-tt.sh rather than restated here
 -RUN /bin/bash -c "git clone https://github.com/tenstorrent/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
 +RUN /bin/bash -c "git clone https://github.com/nyoshifujiTT/vllm-tt-plugin.git ${vllm_tt_plugin_dir} \
      && cd ${vllm_tt_plugin_dir} \
      && git checkout ${TT_VLLM_COMMIT_SHA_OR_TAG} \
      && source ${PYTHON_ENV_DIR}/bin/activate \
+diff --git a/workflows/model_specs/dev/audio_tts.yaml b/workflows/model_specs/dev/audio_tts.yaml
+--- a/workflows/model_specs/dev/audio_tts.yaml
++++ b/workflows/model_specs/dev/audio_tts.yaml
+@@ -144,6 +144,9 @@ templates:
+     - Qwen/Qwen3-ASR-1.7B
+     - neosophie/Qwen3-ASR-1.7B-JA
+   impl: tt_vllm_plugin
++  version: "0.1.0"
++  tt_metal_commit: "1395635"
++  vllm_commit: "2bcb717"
+   min_disk_gb: 15
+   min_ram_gb: 6
+   model_type: AUDIO
 PATCH
 
-python3 scripts/build_docker_images.py --build-metal-commit 1395635 --single-threaded
+MODEL_SPECS_ENV=dev python3 scripts/build_docker_images.py \
+  --build-metal-commit 1395635 --single-threaded
 
-git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile
+git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile \
+             workflows/model_specs/dev/audio_tts.yaml
 ```
 
-This is the *only* manual patch. The pins are committed source and the image is
-supplied to `run.py` with `--override-docker-image`, so nothing in
-`workflows/` is touched.
+`MODEL_SPECS_ENV=dev` is required: the catalog defaults to prod, which has no
+Qwen3-ASR entry, and the build would silently skip the model.
+
+This is the *only* manual patch, and it touches nothing under
+`workflows/model_specs/prod/`. The image is handed to `run.py` with
+`--override-docker-image`.
 
 Without the tt-metal half the image lacks the vLLM adapter and the server dies
 with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`.
 Without the plugin half it lacks the TT adapter registration and the engine
-fails to resolve the architecture. Both halves disappear once the commits are
-upstream: then the pins alone are enough.
+fails to resolve the architecture. The URL halves disappear once the commits
+are upstream, and the pin half disappears once the spec is promoted to prod.
 
 There is deliberately no build arg for either URL. Build args for exactly this
 were added earlier in the bring-up and withdrawn: they let an image built from

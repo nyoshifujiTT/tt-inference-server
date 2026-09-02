@@ -5,6 +5,7 @@
 """Spec invariants for the vLLM-served Qwen3-ASR bring-up."""
 
 import os
+import re
 
 import pytest
 
@@ -53,57 +54,49 @@ def test_asr_spec_declares_builtin_warmup(spec_id):
     assert MODEL_SPECS[spec_id].has_builtin_warmup is True
 
 
-def test_readme_docker_image_tag_matches_the_spec():
-    """The runbook's --override-docker-image must be the tag the spec resolves to.
+def test_readme_pins_agree_with_the_runbook_tag():
+    """The patched pins and the image tag the runbook runs must be the same.
 
-    The tag encodes the pinned tt-metal and vLLM commits, so a spec bump that
-    leaves the README behind sends people to an image that cannot serve the
-    model.
+    Dev specs carry no pins (and so no docker_image); the build gets them from
+    the patch in the runbook. If that patch and the --override-docker-image tag
+    drift apart, the reader builds one image and then starts another.
     """
-    readme = (
-        get_repo_root_path() / "scripts" / "qwen3_asr" / "README.md"
-    ).read_text()
-    spec = MODEL_SPECS["id_tt-vllm-plugin_Qwen3-ASR-1.7B-JA_p150"]
-    # the runbook builds the dev image; the spec names the release one
-    dev_image = spec.docker_image.replace("-release-", "-dev-")
-    _, _, version_tag = dev_image.partition(":")
-    _, metal_commit, vllm_commit = version_tag.split("-")
+    readme = _readme()
+    metal, vllm = _patched_pins(readme)
 
-    assert f"{metal_commit}-{vllm_commit}" in readme, (
-        f"README must reference the image tag for the pinned commits "
-        f"({metal_commit}-{vllm_commit})"
+    assert f"--build-metal-commit {metal}" in readme, (
+        "the build command must use the tt_metal_commit the patch sets"
     )
-    assert f"--build-metal-commit {metal_commit}" in readme
-    assert f"ubuntu-22.04-amd64:{metal_commit}" in readme, (
+    assert f"ubuntu-22.04-amd64:{metal}" in readme, (
         "the base-image bake command must tag the pinned tt-metal commit"
     )
+    assert f"{metal}-{vllm}" in readme, (
+        f"the runbook must start the image built from the pinned commits "
+        f"({metal}-{vllm})"
+    )
 
 
-def test_tt_metal_commit_matches_the_rebased_bring_up_head():
-    """The pinned tt-metal commit must be the CURRENT bring-up head.
+def _patched_pins(readme):
+    """Return (tt_metal_commit, vllm_commit) as set by the runbook's patch."""
+    metal = re.search(r'^\+  tt_metal_commit: "([0-9a-f]{7,})"', readme, re.M)
+    vllm = re.search(r'^\+  vllm_commit: "([0-9a-f]{7,})"', readme, re.M)
+    assert metal and vllm, "the patch must add both release pins"
+    return metal.group(1), vllm.group(1)
 
-    The bring-up branch was rebased onto upstream/yito/qwen3_asr_pr. A spec left
-    pinned to a pre-rebase commit would build a docker image from a tree that no
-    longer exists on the branch, so the served model would silently differ from
-    what the repo tests.
+
+def test_the_patched_pin_is_the_one_the_docs_build_from():
+    """The pin names the tree the image is built from.
+
+    It used to live in model_spec.py; upstream moved catalogs to YAML and the
+    dev contract rejects pins, so it now reaches the build through the runbook
+    patch. Wherever it lives, a stale value builds a tree the repo no longer
+    tests.
     """
-    import re
-
-    spec_src = open(os.path.join(os.path.dirname(__file__), "..", "workflows", "model_spec.py")).read()
-    # model_spec.py pins a commit for every model; scope the search to the
-    # Qwen3-ASR entry so another model's pin cannot satisfy this test.
-    anchor = spec_src.index("Qwen3-ASR-1.7B-JA")
-    window = spec_src[anchor : anchor + 4000]
-    match = re.search(r'tt_metal_commit="([0-9a-f]{7,})"', window)
-    assert match, "the Qwen3-ASR spec must pin a tt_metal_commit"
-    pinned = match.group(1)
-
-    readme = open(
-        os.path.join(os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "README.md")
-    ).read()
-    assert pinned in readme, (
-        f"the documented build steps must use the pinned commit ({pinned}); "
-        "a stale README sends the reader to build a different tree"
+    readme = _readme()
+    metal, _ = _patched_pins(readme)
+    assert readme.count(metal) >= 3, (
+        f"the pinned commit {metal} must appear in the patch, the bake tag and "
+        "the build command; a partial update builds a different tree"
     )
 
 
@@ -133,27 +126,16 @@ def test_no_superseded_commit_is_referenced_anywhere():
 def test_vllm_commit_pins_a_plugin_commit_not_a_fork_commit():
     """vllm_commit names a vllm-tt-plugin commit, as it does upstream.
 
-    The dev image clones tenstorrent/vllm-tt-plugin and lets its
-    docs/install-vllm-tt.sh pull the vLLM release it pins, so a value left over
-    from the days of cloning the tenstorrent/vllm fork would check out a SHA
-    that does not exist in the plugin repo and fail the build.
+    The Dockerfile resolves TT_VLLM_COMMIT_SHA_OR_TAG against
+    tenstorrent/vllm-tt-plugin, so a value left over from the days of cloning
+    the tenstorrent/vllm fork would fail at git checkout in the builder --
+    exactly what scripts/release/README.md warns about.
     """
-    import re
-
-    spec_src = open(
-        os.path.join(os.path.dirname(__file__), "..", "workflows", "model_spec.py")
-    ).read()
-    anchor = spec_src.index("Qwen3-ASR-1.7B-JA")
-    window = spec_src[anchor : anchor + 4000]
-    match = re.search(r'vllm_commit="([0-9a-f]{7,})"', window)
-    assert match, "the Qwen3-ASR spec must pin a vllm_commit"
-    assert match.group(1) not in SUPERSEDED_VLLM_FORK_COMMITS, (
+    _, vllm = _patched_pins(_readme())
+    assert vllm not in SUPERSEDED_VLLM_FORK_COMMITS, (
         "vllm_commit still points at a tenstorrent/vllm fork commit; it must "
-        "name a vllm-tt-plugin commit now that the image clones the plugin"
+        "name a vllm-tt-plugin commit"
     )
-    # the comment must say what the field means, or the next reader repeats the
-    # mistake the rename does not prevent
-    assert "vllm-tt-plugin* commit" in window or "vllm-tt-plugin commit" in window
 
 
 # vLLM *fork* commits this spec pinned back when the dev image cloned
@@ -293,19 +275,10 @@ def test_the_readme_documents_the_unpushed_branch_path():
 
 
 def test_the_current_pin_is_not_itself_listed_as_superseded():
-    """Guard the bookkeeping: bumping the pin must also retire the old entry.
-
-    Without this, someone could add the NEW commit to the list above and the
-    test would then demand the spec not reference the very commit it pins.
-    """
-    import re
-
-    spec_src = open(os.path.join(os.path.dirname(__file__), "..", "workflows", "model_spec.py")).read()
-    anchor = spec_src.index("Qwen3-ASR-1.7B-JA")
-    window = spec_src[anchor : anchor + 4000]
-    pinned = re.search(r'tt_metal_commit="([0-9a-f]{7,})"', window).group(1)
-    assert pinned not in SUPERSEDED_TT_METAL_COMMITS, (
-        f"the active pin {pinned} is listed as superseded"
+    """Guard the bookkeeping: bumping the pin must also retire the old entry."""
+    metal, _ = _patched_pins(_readme())
+    assert metal not in SUPERSEDED_TT_METAL_COMMITS, (
+        f"the active pin {metal} is listed as superseded"
     )
 
 
