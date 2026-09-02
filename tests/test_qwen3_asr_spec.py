@@ -430,3 +430,21 @@ def test_the_readme_explains_why_prod_is_patched():
     assert "git checkout" in readme and "prod/audio_tts.yaml" in readme, (
         "the revert step must cover the prod file too"
     )
+
+
+def test_the_runbook_image_tag_carries_the_repo_version():
+    """The tag the runbook starts must be the one the build produces.
+
+    build_docker_images.py prefixes the image tag with the repo VERSION, so
+    merging upstream (which bumped VERSION) silently invalidates a hardcoded
+    tag: the reader builds 0.21.0-... and then tries to start 0.13.0-... .
+    """
+    version = (get_repo_root_path() / "VERSION").read_text().strip()
+    readme = _readme()
+    metal, vllm = _patched_pins(readme)
+    expected = f"{version}-{metal}-{vllm}"
+    assert expected in readme, (
+        f"the runbook must reference the image tag the build produces "
+        f"({expected}); a stale VERSION prefix points at an image that was "
+        "never built"
+    )

@@ -272,7 +272,7 @@ it is replaced, so keep at least 60 GB free.
 ```
 python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 --workflow server \
   --docker-server --dev-mode --no-auth --service-port 8110 --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.13.0-1395635-2bcb717
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-1395635-2bcb717
 ```
 
 `/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the
