@@ -148,6 +148,9 @@ templates:
   min_ram_gb: 6
   model_type: AUDIO
   inference_engine: VLLM
+  # Multi-weight templates must pin a display name, or it would be derived from
+  # whichever weight happens to be first and shift if that order changes.
+  model_display_name: Qwen3-ASR-1.7B
   # The TT adapter warms up (and captures the decode trace) itself while the
   # engine starts -- see warmup_model_decode in the startup log. The generic
   # background trace capture must therefore stay off: it drives /v1/completions
