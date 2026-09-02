@@ -1137,9 +1137,6 @@ def build_dev_image(
         f"TT_VLLM_COMMIT_SHA_OR_TAG={vllm_commit}",
         "--build-arg",
         f"CONTAINER_APP_UID={container_app_uid}",
-    ]
-
-    build_command += [
         "-f",
         "vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile",
         ".",
