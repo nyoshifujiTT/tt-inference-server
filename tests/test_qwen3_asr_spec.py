@@ -602,3 +602,16 @@ def test_the_supervisor_launches_the_model_the_way_run_py_still_accepts():
     assert "MODEL_SPECS_ENV=dev" in sh, (
         "the spec lives only in the dev catalog; run.py defaults to prod"
     )
+
+
+def test_the_supervisor_canary_does_not_use_a_synthetic_fixture():
+    """ja_words.wav has no reference transcript and is banned elsewhere here.
+
+    Liveness only needs "did a transcription come back", but pointing at a
+    scratch file invites the same misuse this repo already documented once.
+    """
+    sh = _supervisor()
+    assert "ja_words.wav" not in sh
+    assert "CANARY_WAV" in sh and "README.md" in sh, (
+        "say where the canary clip comes from"
+    )

@@ -23,7 +23,11 @@ TT_METAL_HOME="/data/wt/qwen3asr"
 VENV="/data/wt/qwen3asr/python_env"
 SNAP="/data/qwen3asr_hf/hub/models--neosophie--Qwen3-ASR-1.7B-JA/snapshots/987bda160f2dabfa6757550bcff7cdda2ba0648c"
 MODEL_NAME="Qwen3-ASR-1.7B-JA"
-CANARY_WAV="/data/ja_words.wav"
+# Liveness only asks "did a transcription come back", so any short clip works.
+# Fetch it with the snippet in README.md ("The clip to check with") rather than
+# pointing at a scratch file: the synthetic fixtures that used to sit in /data
+# have no reference transcript and must not be mistaken for an accuracy check.
+CANARY_WAV="${CANARY_WAV:-/data/real_ja.wav}"
 TTSMI="/home/ubuntu/ttsmi-venv/bin/tt-smi"
 LOG="/data/vllm_tt/asr_supervisor.log"
 SERVER_LOG_DIR="${TTIS}/workflow_logs/local_server"
@@ -94,7 +98,7 @@ canary_ok() {
   # lightweight liveness: a bounded transcription must return 200 with text
   local out
   out=$(curl -s -m 45 "http://127.0.0.1:${PORT}/v1/audio/transcriptions" \
-        -F "file=@${CANARY_WAV}" -F "model=Qwen/Qwen3-ASR-1.7B" -F language=ja \
+        -F "file=@${CANARY_WAV}" -F "model=neosophie/${MODEL_NAME}" -F language=ja \
         -w '\n%{http_code}' 2>/dev/null)
   local code="${out##*$'\n'}"
   [ "$code" = "200" ] && echo "$out" | grep -q '"text"'
