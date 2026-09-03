@@ -248,32 +248,32 @@ def test_the_readme_rejects_the_synthetic_fixtures_for_accuracy():
     assert "QWEN3ASR_WARMUP_WAV" in readme, "say what test15s.wav actually is"
 
 
-def test_the_readme_documents_the_unpushed_branch_path():
-    """The recipe must not imply the forks already carry the pinned commits.
+def test_the_readme_clones_from_the_forks_only():
+    """The branches are pushed, so the recipe must be reproducible as written.
 
-    While the bring-up branch is local-only the build cannot clone from GitHub,
-    so the actual images were built against a git daemon on the docker host. A
-    README that only shows the fork URLs hides that, and the next reader gets a
-    clone failure with no idea why.
+    While they were local-only the images were built against a git daemon on
+    the docker host, and the README documented that detour. An image built from
+    a daemon on one machine is not reproducible by anyone else, so the detour
+    had to go the moment the branches were pushed -- otherwise a reader would
+    set up loopback plumbing that is no longer needed, and the recipe would
+    never be exercised in the form it is delivered in.
     """
-    readme = open(
-        os.path.join(os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "README.md")
-    ).read()
-    assert "If a branch is not pushed yet" in readme
-    assert "git daemon" in readme, "the loopback-serving workaround must be spelled out"
-    assert "git://172.17.0.1:9418" in readme, "the URL that was actually used must be shown"
-    # both clones point at forks now, so serving only tt-metal leaves the build
-    # failing on the plugin clone hours in
-    assert "/tmp/ttmetal-src.git" in readme
-    assert "/tmp/vllmttplugin-src.git" in readme, (
-        "the plugin fork needs the same loopback treatment as tt-metal"
-    )
-    assert "git ls-remote" in readme, (
-        "reachability must be checkable before a multi-hour build"
-    )
-    assert "Push the branches and drop this" in readme, (
-        "the workaround must be marked as temporary, not as the delivered recipe"
-    )
+    readme = _readme()
+    for leftover in (
+        "If a branch is not pushed yet",
+        "git daemon",
+        "git://172.17.0.1:9418",
+        "/tmp/ttmetal-src.git",
+        "/tmp/vllmttplugin-src.git",
+    ):
+        assert leftover not in readme, (
+            f"{leftover!r} is loopback plumbing from before the branches were "
+            "pushed; the recipe must clone from the forks"
+        )
+
+    # what must remain: both clones aimed at the pushed forks
+    assert "nyoshifujiTT/tt-metal.git" in readme
+    assert "nyoshifujiTT/vllm-tt-plugin.git" in readme
 
 
 def test_the_current_pin_is_not_itself_listed_as_superseded():
