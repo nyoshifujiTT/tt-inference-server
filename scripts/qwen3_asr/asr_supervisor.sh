@@ -18,19 +18,28 @@
 set -u
 
 PORT="${1:-8101}"
-TTIS="/data/repo/tt-inference-server"
-TT_METAL_HOME="/data/wt/qwen3asr"
-VENV="/data/wt/qwen3asr/python_env"
-SNAP="/data/qwen3asr_hf/hub/models--neosophie--Qwen3-ASR-1.7B-JA/snapshots/987bda160f2dabfa6757550bcff7cdda2ba0648c"
-MODEL_NAME="Qwen3-ASR-1.7B-JA"
+
+# Every path is overridable. The defaults below are for the original bring-up
+# board, which kept everything under /data; that directory does not exist on
+# the delivery host, so hardcoding it made this script a no-op there. Set the
+# variables (or edit the defaults) to match the host this runs on.
+TTIS="${TTIS:-$HOME/tt-inference-server}"
+TT_METAL_HOME="${TT_METAL_HOME:-$HOME/tt-metal}"
+VENV="${VENV:-$TT_METAL_HOME/python_env}"
+SNAP="${SNAP:-$HOME/.cache/huggingface/hub/models--neosophie--Qwen3-ASR-1.7B-JA/snapshots/987bda160f2dabfa6757550bcff7cdda2ba0648c}"
+MODEL_NAME="${MODEL_NAME:-Qwen3-ASR-1.7B-JA}"
 # Liveness only asks "did a transcription come back", so any short clip works.
 # Fetch it with the snippet in README.md ("The clip to check with") rather than
-# pointing at a scratch file: the synthetic fixtures that used to sit in /data
-# have no reference transcript and must not be mistaken for an accuracy check.
-CANARY_WAV="${CANARY_WAV:-/data/real_ja.wav}"
-TTSMI="/home/ubuntu/ttsmi-venv/bin/tt-smi"
-LOG="/data/vllm_tt/asr_supervisor.log"
+# pointing at a scratch file: the synthetic fixtures used during bring-up have
+# no reference transcript and must not be mistaken for an accuracy check.
+CANARY_WAV="${CANARY_WAV:-$HOME/real_ja.wav}"
+TTSMI="${TTSMI:-$HOME/ttsmi-venv/bin/tt-smi}"
+LOG="${LOG:-$HOME/asr_supervisor.log}"
 SERVER_LOG_DIR="${TTIS}/workflow_logs/local_server"
+
+for _p in "$TTIS" "$TT_METAL_HOME" "$VENV" "$SNAP" "$CANARY_WAV"; do
+  [ -e "$_p" ] || { echo "supervisor: missing path: $_p" >&2; exit 1; }
+done
 
 log() { echo "$(date -u +%FT%TZ) [supervisor] $*" | tee -a "$LOG"; }
 

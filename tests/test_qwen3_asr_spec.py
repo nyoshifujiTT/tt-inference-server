@@ -615,3 +615,21 @@ def test_the_supervisor_canary_does_not_use_a_synthetic_fixture():
     assert "CANARY_WAV" in sh and "README.md" in sh, (
         "say where the canary clip comes from"
     )
+
+
+def test_the_supervisor_paths_are_overridable_and_checked():
+    """Hardcoded /data paths made this a no-op on the delivery host.
+
+    Every path pointed at the original bring-up board's /data tree, which does
+    not exist elsewhere, so the supervisor would have launched run.py with a
+    nonexistent TT_METAL_HOME and venv and failed in a way that looks like a
+    model problem rather than a configuration one.
+    """
+    sh = _supervisor()
+    assert "/data/" not in sh, "no path may be pinned to the original board"
+    for var in ("TTIS", "TT_METAL_HOME", "VENV", "SNAP", "CANARY_WAV"):
+        assert f'{var}="${{{var}:-' in sh, f"{var} must be overridable"
+    assert "missing path:" in sh, (
+        "a missing prerequisite must be reported up front, not as a launch "
+        "failure later"
+    )
