@@ -633,3 +633,21 @@ def test_the_supervisor_paths_are_overridable_and_checked():
         "a missing prerequisite must be reported up front, not as a launch "
         "failure later"
     )
+
+
+def test_the_systemd_unit_points_at_the_checked_out_script():
+    """The unit ran a copy under /data, which the supervisor fix just retired.
+
+    Pointing at a copy also lets the deployed script drift from the repo, which
+    is how the stale run.py flags survived unnoticed for so long.
+    """
+    unit = (
+        get_repo_root_path()
+        / "scripts"
+        / "qwen3_asr"
+        / "qwen3asr-supervisor.service"
+    ).read_text()
+    assert "/data/" not in unit
+    assert "scripts/qwen3_asr/asr_supervisor.sh" in unit, (
+        "run the script from the checkout so it cannot drift from the repo"
+    )
