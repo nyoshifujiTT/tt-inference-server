@@ -507,3 +507,16 @@ def test_the_spec_emits_additional_config_not_override_tt_config():
     assert "override_tt_config" not in server_src, (
         "the fold-in step is dead code once the spec emits additional_config"
     )
+
+
+def test_the_runbook_sets_the_dev_catalog_when_serving():
+    """run.py resolves specs through MODEL_SPECS_ENV, which defaults to prod.
+
+    Qwen3-ASR lives only in the dev catalog, so without this the documented
+    command exits saying the model is unknown.
+    """
+    readme = _readme()
+    run_section = readme[readme.index("### 3. Run") :]
+    assert "MODEL_SPECS_ENV=dev python3 run.py" in run_section, (
+        "the serving command must select the dev catalog"
+    )

@@ -243,10 +243,15 @@ it is replaced, so keep at least 60 GB free.
 ### 3. Run
 
 ```
-python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 --workflow server \
-  --docker-server --dev-mode --no-auth --service-port 8110 --host-hf-cache \
+MODEL_SPECS_ENV=dev python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 \
+  --workflow server --docker-server --dev-mode --no-auth --service-port 8110 \
+  --host-hf-cache \
   --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-1395635-50695d8
 ```
+
+`MODEL_SPECS_ENV=dev` is required here for the same reason as in the build: the
+catalog defaults to prod, which has no Qwen3-ASR entry, and `run.py` would exit
+saying the model is unknown.
 
 `/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the
 spec's model name:
