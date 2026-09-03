@@ -572,3 +572,33 @@ def test_trace_mode_travels_in_override_tt_config_not_a_duplicate_flag():
             "the decode-only trace mode must reach vLLM through the generated "
             "additional_config"
         )
+
+
+def _supervisor():
+    return (
+        get_repo_root_path() / "scripts" / "qwen3_asr" / "asr_supervisor.sh"
+    ).read_text()
+
+
+def test_the_supervisor_launches_the_model_the_way_run_py_still_accepts():
+    """The supervisor is the production restart path; a stale flag breaks it.
+
+    It was written before the upstream merge and still used --device (renamed
+    --tt-device), passed --vllm-dir (now reported as deprecated and ignored),
+    and did not select the dev catalog -- so every relaunch would have exited
+    saying the model is unknown, exactly when the service needed to come back.
+    """
+    sh = _supervisor()
+    assert "--tt-device p150" in sh, "--device was renamed --tt-device"
+    # " --device" with the leading space, so --tt-device does not match itself
+    assert " --device " not in sh
+    # the flag must not be *passed*; the comment explaining why may mention it
+    launch = sh[sh.index("launch_server()") : sh.index("wait_healthy()")]
+    passed_args = [ln for ln in launch.splitlines() if not ln.strip().startswith("#")]
+    assert not any("--vllm-dir" in ln for ln in passed_args), (
+        "run.py reports --vllm-dir as deprecated and ignored since the plugin "
+        "switch"
+    )
+    assert "MODEL_SPECS_ENV=dev" in sh, (
+        "the spec lives only in the dev catalog; run.py defaults to prod"
+    )

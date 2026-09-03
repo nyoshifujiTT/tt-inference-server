@@ -20,9 +20,9 @@ set -u
 PORT="${1:-8101}"
 TTIS="/data/repo/tt-inference-server"
 TT_METAL_HOME="/data/wt/qwen3asr"
-VLLM_DIR="/data/vllm_tt/vllm"
 VENV="/data/wt/qwen3asr/python_env"
 SNAP="/data/qwen3asr_hf/hub/models--neosophie--Qwen3-ASR-1.7B-JA/snapshots/987bda160f2dabfa6757550bcff7cdda2ba0648c"
+MODEL_NAME="Qwen3-ASR-1.7B-JA"
 CANARY_WAV="/data/ja_words.wav"
 TTSMI="/home/ubuntu/ttsmi-venv/bin/tt-smi"
 LOG="/data/vllm_tt/asr_supervisor.log"
@@ -58,13 +58,18 @@ launch_server() {
   sleep 3
   sudo chmod 666 /dev/tenstorrent/* 2>/dev/null
   log "launching run.py --local-server on port $PORT"
+  # MODEL_SPECS_ENV=dev: the spec lives only in the dev catalog (prod entries are
+  # release artifacts written by promote_dev_spec_to_prod.py), and run.py defaults
+  # to prod, where this model does not exist.
+  # No --vllm-dir: run.py reports it as deprecated and ignored -- vLLM is an
+  # ordinary package in the tt-metal venv and the TT platform comes from
+  # vllm-tt-plugin.
   ( cd "$TTIS" && \
-    HF_TOKEN="${HF_TOKEN:-}" MODEL_WEIGHTS_DIR="$SNAP" \
+    MODEL_SPECS_ENV=dev HF_TOKEN="${HF_TOKEN:-}" MODEL_WEIGHTS_DIR="$SNAP" \
     nohup "$VENV/bin/python" run.py \
-      --model Qwen3-ASR-1.7B --device p150 --workflow server --local-server \
+      --model "$MODEL_NAME" --tt-device p150 --workflow server --local-server \
       --tt-metal-home "$TT_METAL_HOME" \
       --tt-metal-python-venv-dir "$VENV" \
-      --vllm-dir "$VLLM_DIR" \
       --service-port "$PORT" --no-auth --skip-system-sw-validation --dev-mode \
       > /tmp/asr_supervisor_run.log 2>&1 & )
 }
