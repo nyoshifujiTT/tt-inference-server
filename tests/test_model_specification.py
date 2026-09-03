@@ -1174,9 +1174,14 @@ class TestModelSpecsStructure:
             # unusable 0-size trace region) is gone so the decode trace can be
             # captured.
             assert "TT_METAL_TRACE_REGION_SIZE" not in env
-            add_cfg = dms.vllm_args.get("additional-config", "")
+            # TT settings reach vLLM through the generated additional_config,
+            # which the base spec builds from override_tt_config. A raw
+            # "additional-config" vllm_arg would not replace it (the keys differ
+            # by a hyphen) and both would be passed.
+            add_cfg = dms.vllm_args.get("additional_config", "")
             assert '"trace_mode": "decode_only"' in add_cfg
             assert "none" not in add_cfg
+            assert "additional-config" not in dms.vllm_args
 
 
 class TestRequiredTargetTiers:

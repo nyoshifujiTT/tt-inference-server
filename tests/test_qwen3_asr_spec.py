@@ -549,3 +549,26 @@ def test_the_runbook_sets_the_dev_catalog_when_serving():
     assert "MODEL_SPECS_ENV=dev python3 run.py" in run_section, (
         "the serving command must select the dev catalog"
     )
+
+
+def test_trace_mode_travels_in_override_tt_config_not_a_duplicate_flag():
+    """TT plugin settings belong in override_tt_config, not a raw vllm_arg.
+
+    The base spec always emits additional_config from override_tt_config.
+    Setting "additional-config" directly in vllm_args does not replace that --
+    the two keys differ by a hyphen -- so the server was launched with both
+    --additional_config '{"tt": {}}' and --additional-config '{"tt":
+    {"trace_mode": "decode_only"}}'. vLLM happened to honour the later one, so
+    the trace mode was right by luck rather than by construction.
+    """
+    specs = _dev_specs()
+    for spec_id in ASR_SPEC_IDS:
+        args = specs[spec_id].device_model_spec.vllm_args
+        assert "additional-config" not in args, (
+            "hyphenated additional-config duplicates the generated "
+            "additional_config; put TT settings in override_tt_config"
+        )
+        assert '"trace_mode": "decode_only"' in args["additional_config"], (
+            "the decode-only trace mode must reach vLLM through the generated "
+            "additional_config"
+        )

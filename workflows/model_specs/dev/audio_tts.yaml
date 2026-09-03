@@ -187,6 +187,6 @@ templates:
       # wedged the service within ~9-26 requests, which is why this used to pin
       # trace_mode=none; that hang was board-specific -- on the delivery p150
       # decode trace ON sustained conc=4 soaks of 900 requests with zero wedges.
-      vllm_args:
-        additional-config: '{"tt": {"trace_mode": "decode_only"}}'
+      override_tt_config:
+        trace_mode: decode_only
   status: EXPERIMENTAL
