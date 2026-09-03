@@ -323,7 +323,10 @@ templates:
       override_tt_config:
         fabric_config: FABRIC_1D
         l1_small_size: 24576
-        trace_region_size: 402653184  # Extend text-only's 256MB to fit the extra vision-tower trace
+        # Same as the text spec in dev/llm.yaml. On-device sampling needs 427MB of trace
+        # buffers here, so the earlier 402MB aborts warmup with a trace-region TT_FATAL.
+        trace_region_size: 1073741824
+        sample_on_device_mode: decode_only
   status: EXPERIMENTAL
   has_builtin_warmup: true
   supported_modalities:
@@ -370,7 +373,10 @@ templates:
       override_tt_config:
         fabric_config: FABRIC_1D
         l1_small_size: 24576
-        trace_region_size: 402653184  # Extend text-only's 256MB to fit the extra vision-tower trace
+        # Same as the text spec in dev/llm.yaml. On-device sampling needs 427MB of trace
+        # buffers here, so the earlier 402MB aborts warmup with a trace-region TT_FATAL.
+        trace_region_size: 1073741824
+        sample_on_device_mode: decode_only
   status: EXPERIMENTAL
   has_builtin_warmup: true
   supported_modalities:
