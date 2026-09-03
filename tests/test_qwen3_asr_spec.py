@@ -509,6 +509,35 @@ def test_the_spec_emits_additional_config_not_override_tt_config():
     )
 
 
+def test_the_readme_documents_how_to_measure():
+    """A serving runbook that cannot be verified is half a runbook.
+
+    Accuracy and throughput were the acceptance criteria for this bring-up, so
+    the commands that produce them have to be written down -- otherwise the
+    numbers quoted elsewhere in this file cannot be reproduced by the reader.
+    """
+    readme = _readme()
+    assert "### 4. Eval and benchmark" in readme
+    assert "asr_ja_eval.py" in readme, "the corpus CER harness must be named"
+    assert "asr_openai_benchmark.py" in readme, "the throughput harness must be named"
+    # the measured results, so a rerun can be compared against something
+    assert "0.1002" in readme and "0.1668" in readme
+
+
+def test_the_readme_says_why_the_upstream_audio_harness_is_not_used():
+    """Otherwise the next reader re-discovers the 400 the hard way.
+
+    test_module's generic audio path POSTs a JSON body and drops the /v1
+    prefix, because it targets tt-media-server. vLLM's OpenAI-compatible
+    endpoint wants multipart, and rejects that shape.
+    """
+    readme = _readme()
+    section = readme[readme.index("### 4. Eval and benchmark") :]
+    assert "_is_whisper" in section, "name the branch that excludes this model"
+    assert "multipart" in section, "state what the endpoint actually accepts"
+    assert "400" in section, "record the observed failure, not just the theory"
+
+
 def test_the_runbook_sets_the_dev_catalog_when_serving():
     """run.py resolves specs through MODEL_SPECS_ENV, which defaults to prod.
 
@@ -516,7 +545,7 @@ def test_the_runbook_sets_the_dev_catalog_when_serving():
     command exits saying the model is unknown.
     """
     readme = _readme()
-    run_section = readme[readme.index("### 3. Run") :]
+    run_section = readme[readme.index("### 3. Run") : readme.index("### 4. Eval")]
     assert "MODEL_SPECS_ENV=dev python3 run.py" in run_section, (
         "the serving command must select the dev catalog"
     )

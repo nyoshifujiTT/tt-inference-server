@@ -347,6 +347,54 @@ self-recovers rather than taking the service down:
 auto-starts on boot — including after a power-cycle recovery — making the
 recovery loop fully self-sustaining.
 
+### 4. Eval and benchmark
+
+The upstream audio harnesses do not fit this model. `run_audio_eval` /
+`run_audio_benchmark` in `test_module/` branch on `_is_whisper(ctx)`; everything
+else falls to a generic path that POSTs a JSON body
+(`{"file": "<base64>", ...}`) and, per `llm_module/eval_command.py`, omits the
+`/v1` prefix because "audio models use tt-media-server". Sending that shape to
+this server returns HTTP 400:
+
+```
+{"error":{"message":"1 validation error:
+  {'type':'missing','loc':('body','file'),'msg':'Field required', ...}}}
+```
+
+vLLM's OpenAI-compatible `/v1/audio/transcriptions` takes multipart/form-data.
+Making the upstream harness speak it is a feature addition to that harness, not
+part of this bring-up, so accuracy and throughput are measured with the two
+scripts carried here instead.
+
+Corpus accuracy (character error rate) — TED and MagicHub manifests, `conc=4`:
+
+```
+python3 asr_ja_eval.py --host http://127.0.0.1:8110 \
+  --model neosophie/Qwen3-ASR-1.7B-JA \
+  --manifest <corpus>/manifest.jsonl --concurrency 4 --output ted.json
+```
+
+Throughput (LibriSpeech, downloaded by the script):
+
+```
+python3 reference_config/benchmarking/asr_openai_benchmark.py \
+  --host http://127.0.0.1:8110 --model neosophie/Qwen3-ASR-1.7B-JA \
+  --samples 32 --num-requests 128 --concurrency 4 --output bench.json
+```
+
+Measured on the delivery p150 with the image above, reproduced across three
+independent builds (loopback, fork clone, and fork clone with the base rebuilt
+from the Bake step):
+
+| | value |
+|---|---|
+| TED 509 clips | CER 0.1002, 494 ok / 15 download artifacts |
+| MagicHub 600 clips | CER 0.1668, 600 ok |
+| LibriSpeech 128 req | 128 ok, rtfx ~12.5, p50 ~2.1 s |
+
+CER matched to four decimal places on all three builds; the ~1 % spread in rtfx
+is session-to-session drift on this board.
+
 ## Install
 ```
 sudo cp qwen3asr-supervisor.service /etc/systemd/system/
