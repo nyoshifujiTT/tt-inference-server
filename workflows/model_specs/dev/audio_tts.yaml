@@ -8,6 +8,7 @@ templates:
 - weights:
     - openai/whisper-large-v3
     - distil-whisper/distil-large-v3
+  model_display_name: whisper-large-v3
   impl: whisper
   min_disk_gb: 15
   min_ram_gb: 6
@@ -35,6 +36,7 @@ templates:
 - weights:
     - openai/whisper-large-v3
     - distil-whisper/distil-large-v3
+  model_display_name: whisper-large-v3
   impl: whisper
   min_disk_gb: 15
   min_ram_gb: 6
@@ -56,6 +58,7 @@ templates:
 - weights:
     - openai/whisper-large-v3
     - distil-whisper/distil-large-v3
+  model_display_name: whisper-large-v3
   impl: whisper
   min_disk_gb: 15
   min_ram_gb: 6
@@ -130,4 +133,60 @@ templates:
       default_impl: true
       env_vars:
         TT_MESH_GRAPH_DESC_PATH: "../../tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto"
+  status: EXPERIMENTAL
+
+# Qwen3-ASR served through the TT vLLM backend: the standard OpenAI
+# /v1/audio/transcriptions path, NOT the media server. The TT model adapter
+# (TTQwen3ASRForConditionalGeneration) is registered by the standalone
+# vllm-tt-plugin's built-in model map (register_tt_models); the ttnn
+# implementation is models/demos/audio/qwen3_asr in tt-metal.
+- weights:
+    - Qwen/Qwen3-ASR-1.7B
+    - neosophie/Qwen3-ASR-1.7B-JA
+  impl: tt_vllm_plugin
+  min_disk_gb: 15
+  min_ram_gb: 6
+  model_type: AUDIO
+  inference_engine: VLLM
+  # Multi-weight templates must pin a display name, or it would be derived from
+  # whichever weight happens to be first and shift if that order changes.
+  model_display_name: Qwen3-ASR-1.7B
+  # The TT adapter warms up (and captures the decode trace) itself while the
+  # engine starts -- see warmup_model_decode in the startup log. The generic
+  # background trace capture must therefore stay off: it drives /v1/completions
+  # with synthetic *text* prompts, which for a transcription-only model runs
+  # while a trace is already active ("Allocating device buffers is unsafe due to
+  # the existence of an active trace") and wedges the first real request.
+  has_builtin_warmup: true
+  device_model_specs:
+    - device: P150
+      # max_concurrency == vLLM max_num_seqs (server-side batch width). =4 is
+      # the measured sweet spot for Qwen3-ASR on a single p150: throughput
+      # scales ~linearly 1->2->4 (2.56 -> 4.59 -> 7.60 audio-s/s, ~3x over
+      # batch-1) with all requests healthy and per-request RTF<1 (~0.72). seq=8
+      # regresses (prefill is run one user at a time in the adapter, so it
+      # becomes the bottleneck: 3.06 audio-s/s, RTF 2.68).
+      max_concurrency: 4
+      max_context: 2048
+      default_impl: true
+      env_vars:
+        MESH_DEVICE: "P150"
+        # HF_MODEL is set by the entrypoint to the served Qwen3-ASR snapshot;
+        # the adapter auto-extracts the Qwen3 text decoder from it (no
+        # pre-extracted checkpoint needed) and reuses the served snapshot for
+        # the audio tower (QWEN3ASR_AUDIO_SNAPSHOT falls back to HF_MODEL). The
+        # adapter arch comes from the plugin built-in map, so no
+        # EXTRA_MODELS_DIR bundle is required.
+        HF_HUB_OFFLINE: "1"
+        TRANSFORMERS_OFFLINE: "1"
+      # Serve the fast decode path: decode_only tracing (prefill stays untraced
+      # -- every request runs the audio encoder, whose dynamic device
+      # allocations cannot be captured). The adapter also defaults
+      # QWEN3ASR_DECODE_TRACE=1, so the decode trace is captured up front at
+      # warmup. On the original board (10.160.20.103) a reused decode trace
+      # wedged the service within ~9-26 requests, which is why this used to pin
+      # trace_mode=none; that hang was board-specific -- on the delivery p150
+      # decode trace ON sustained conc=4 soaks of 900 requests with zero wedges.
+      vllm_args:
+        additional-config: '{"tt": {"trace_mode": "decode_only"}}'
   status: EXPERIMENTAL

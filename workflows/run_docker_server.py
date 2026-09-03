@@ -551,8 +551,14 @@ def generate_docker_run_command(
             "--mount", f"type=bind,src={repo_root_path}/utils,dst={user_home_path}/app/utils",
             "--mount", f"type=bind,src={repo_root_path}/tests,dst={user_home_path}/app/tests",
         ]
-        if (
-            model_spec.model_type in (
+        # Which source tree to bind mount is decided by the serving stack, not by
+        # the modality: media-server models get tt-media-server, vLLM-served
+        # models get vllm-tt-metal/src. Selecting on model_type alone sent every
+        # AUDIO model down the media-server branch, so a vLLM-served ASR model
+        # (Qwen3-ASR) never got its entrypoint/src mounted in --dev-mode.
+        if model_spec.inference_engine != InferenceEngine.VLLM.value and (
+            model_spec.model_type
+            in (
                 ModelType.CNN,
                 ModelType.IMAGE,
                 ModelType.EMBEDDING,
