@@ -394,6 +394,42 @@ python3 reference_config/evals/asr_ja_eval.py --host http://127.0.0.1:8110 \
   --manifest <corpus>/manifest.jsonl --concurrency 4 --output ted.json
 ```
 
+#### Where the two manifests come from
+
+Neither corpus can be redistributed, so the manifests are built locally. A
+manifest is JSON Lines, one clip per line, absolute wav path plus reference
+text:
+
+```
+{"id": "-6K2nN9aWsg-00002686-00002940",
+ "wav": "/path/ted_eval/clips/-6K2nN9aWsg-00002686-00002940.wav",
+ "ref": "今大学教員をやってるんですけど"}
+```
+
+- **TED — 509 clips, monologue.** TEDxJP-10K (laboroai) ships no audio; it is
+  reconstructed from YouTube with the project's own `compose_tedxjp10k.py`
+  (v1.1, `utt_id_table.csv` + `diffs`), which emits Kaldi `text` and
+  `segments`. Cut each segment out of the 16 kHz mono source (`sox`) and pair
+  it with its `text` line. 14 talks yield 509 clips (mean 3.24 s, max 9.92 s
+  measured over the manifest actually used).
+  Note the download needs an IP YouTube will serve; the reconstruction itself
+  is offline. 15 of the 509 fail to decode and are reported as `fail`, which is
+  why the accepted figure reads "494 ok".
+- **MagicHub — 600 clips, spontaneous conversation.**
+  `MagicHub/Japanese_Spontaneous_Conversation_Training_Dataset` (ungated on the
+  Hub) records each speaker on their own microphone, with `TXT/` giving
+  `[start,end] speaker gender transcript`. Take each speaker's own turns from
+  their own channel — no diarization involved — 30 turns per channel over 20
+  channels, sampled with seed 42 from the 5920 candidates, keeping 0.4–30 s
+  turns and dropping any turn carrying `[*]`, `[PII]` or `[NPS]`. The resulting
+  600 clips run 0.42–14.98 s, mean 3.21 s.
+
+A conversational corpus recorded as one mixed track is not usable here: CABank
+Sakura was tried and its per-clip CER came out at 2.0, because a single
+speaker's time window still contains the others' overlapping speech while the
+reference holds only that speaker's line. That is a property of the corpus, not
+of the model.
+
 Throughput (LibriSpeech, downloaded by the script):
 
 ```

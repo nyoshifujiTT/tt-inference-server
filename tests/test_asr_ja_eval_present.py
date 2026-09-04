@@ -77,3 +77,35 @@ def test_the_eval_reports_the_metrics_the_runbook_quotes():
     src = _read(EVAL)
     for key in ("corpus_cer", "rtf_sum_lat_over_audio", "throughput_audio_per_s"):
         assert key in src
+
+
+def test_the_runbook_says_how_to_build_the_two_manifests():
+    """--manifest <corpus>/manifest.jsonl is unusable without a recipe.
+
+    Neither TED nor MagicHub can be redistributed, so the manifests have to be
+    rebuilt by the reader. The runbook quoted the resulting CERs and printed a
+    command taking a manifest, but said nothing about how either corpus is
+    assembled -- which of the two headline numbers is reproducible was then a
+    matter of guesswork.
+    """
+    readme = _read(README)
+    assert "Where the two manifests come from" in readme
+    # the record format, or the reader cannot write one
+    assert '"wav"' in readme and '"ref"' in readme
+    # TED is reconstructed, not downloaded
+    assert "compose_tedxjp10k.py" in readme
+    assert "segments" in readme
+    # MagicHub: which dataset, and the sampling that fixes 600
+    assert "MagicHub/Japanese_Spontaneous_Conversation_Training_Dataset" in readme
+    assert "seed 42" in readme
+
+
+def test_the_runbook_records_why_a_mixed_track_corpus_is_excluded():
+    """Otherwise the next reader repeats the CABank Sakura attempt.
+
+    Its per-clip CER measured 2.0 -- not a model result but an artefact of one
+    mixed track holding every speaker while the reference holds one line.
+    """
+    readme = _read(README)
+    assert "CABank" in readme
+    assert "mixed track" in readme
