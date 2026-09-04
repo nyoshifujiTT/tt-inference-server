@@ -40,7 +40,16 @@ def test_the_non_streaming_probe_reads_the_server_counters():
     stopped doing that it would be silently reporting client-side wall time.
     """
     src = _read(PROBE)
-    assert "/metrics" in src
+    # the endpoint must actually be requested. A bare '"/metrics" in src' was
+    # satisfied by the file's own header comment, so pointing the request at
+    # another endpoint left this green.
+    assert 'HOST+"/metrics"' in src.replace(" ", ""), (
+        "the probe must fetch HOST + /metrics, not merely mention it"
+    )
+    # and it has to be sampled twice, or there is no delta to report
+    assert src.count("=metrics()") >= 2, (
+        "counters must be read before and after the workload"
+    )
     for counter in (
         "time_to_first_token_seconds",
         "request_prefill_time_seconds",
