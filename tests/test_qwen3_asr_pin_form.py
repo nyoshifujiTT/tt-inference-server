@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""tt_metal_commit has to be a full SHA while the branch lives on a fork.
+
+build_docker_images.resolve_commit_to_full_sha expands the pin with
+
+    git ls-remote https://github.com/tenstorrent/tt-metal.git | grep <pin>
+
+and takes the first hit. That is a substring match against UPSTREAM, which does
+not carry this branch. A short pin therefore resolves to whatever upstream
+object happens to contain those characters: "e7929dc" matched
+7e7929dcd898... (refs/pull/9507/head) and the build failed cloning a commit the
+fork does not have. A full 40-char SHA survives the grep as itself.
+"""
+
+import os
+import re
+
+HERE = os.path.dirname(__file__)
+README = os.path.join(HERE, "..", "scripts", "qwen3_asr", "README.md")
+
+
+def _readme():
+    with open(README) as fh:
+        return fh.read()
+
+
+def _patch_block(readme):
+    start = readme.index("git apply <<'PATCH'")
+    return readme[start : readme.index("\nPATCH\n")]
+
+
+def test_tt_metal_commit_is_a_full_sha():
+    match = re.search(r'^\+  tt_metal_commit: "([0-9a-f]+)"', _readme(), re.M)
+    assert match, "the runbook patch must set tt_metal_commit"
+    pin = match.group(1)
+    assert len(pin) == 40, (
+        f"tt_metal_commit is {len(pin)} chars; it must be the full 40-char SHA, "
+        "or ls-remote|grep against upstream can resolve it to another object"
+    )
+
+
+def test_build_metal_commit_matches_the_pin_exactly():
+    """list_image_combinations filters with ==, not a prefix match."""
+    readme = _readme()
+    pin = re.search(r'^\+  tt_metal_commit: "([0-9a-f]+)"', readme, re.M).group(1)
+    flag = re.search(r"--build-metal-commit (\S+)", readme)
+    assert flag, "the build command must be documented"
+    assert flag.group(1) == pin, (
+        "--build-metal-commit is an exact-equality filter over catalog entries; "
+        f"it says {flag.group(1)!r} but the pin is {pin!r}"
+    )
+
+
+def test_the_image_tags_carry_the_same_pin():
+    """get_image_tags interpolates the pin verbatim into both tags."""
+    readme = _readme()
+    pin = re.search(r'^\+  tt_metal_commit: "([0-9a-f]+)"', readme, re.M).group(1)
+
+    base = re.search(r"ci-build\.tags=local/tt-metal/tt-metalium/\S+?:(\S+?)\s", readme)
+    assert base, "the bake command must tag the base image"
+    assert base.group(1) == pin, (
+        f"base image tag is {base.group(1)!r}, the pin is {pin!r}; "
+        "the dev build looks the base image up by this exact tag"
+    )
+
+    dev = re.search(r"vllm-tt-metal-src-dev-\S+?:(\S+)", readme)
+    assert dev, "the run command must name the dev image"
+    assert pin in dev.group(1), (
+        f"dev image tag {dev.group(1)!r} does not carry the pin {pin!r}"
+    )
+
+
+def test_the_readme_explains_why_a_short_pin_breaks():
+    """Otherwise the next reader shortens it again for readability."""
+    readme = _readme()
+    assert "full 40-character SHA" in readme
+    assert "ls-remote" in readme
+    assert "refs/pull/9507/head" in readme, "keep the observed collision on record"

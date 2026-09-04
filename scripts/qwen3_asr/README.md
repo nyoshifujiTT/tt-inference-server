@@ -17,7 +17,7 @@ build the base with Bake first and tag it the way the script expects:
 ```
 cd $TT_METAL_HOME
 docker buildx bake -f dockerfile/docker-bake.hcl \
-  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:e7929dc \
+  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:e7929dcf5dcf2ad8f8f98dc945d012f61ad075cb \
   --set ci-build.output=type=docker \
   ci-build
 ```
@@ -43,6 +43,26 @@ before release needs a prod entry to exist temporarily. That is the second half
 of the manual patch below: applied, built from, and reverted -- never committed.
 
 ### Why the pin may lag the branch head
+
+#### `tt_metal_commit` must be the full 40-character SHA
+
+`build_docker_images.py` expands whatever is written here by running
+`git ls-remote https://github.com/tenstorrent/tt-metal.git | grep <pin>` and
+taking the first hit. That is a substring match against **upstream**, which
+does not have this branch, so a short pin can silently resolve to an unrelated
+object. `e7929dc` matched upstream's `7e7929dcd898...` (`refs/pull/9507/head`)
+and the build died cloning a commit that does not exist on the fork:
+
+```
+Resolved e7929dc to full SHA via ls-remote (first match): 7e7929dcd898a0c655f56b77fb147742829fc26f
+... returned non-zero exit status 1
+```
+
+A full SHA passes through that grep as itself, so it is the only safe form
+while the branch lives on a fork. `vllm_commit` is not resolved this way and
+may stay short. Note the pin is also the image tag, so the tag carries the full
+SHA too, and `--build-metal-commit` must be given the identical string -- it is
+an exact-equality filter over catalog entries.
 
 `tt_metal_commit` and `vllm_commit` name the trees the image is BUILT from, so
 they only have to move when a commit changes something the served code path
@@ -144,7 +164,7 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +- weights:
 +    - neosophie/Qwen3-ASR-1.7B-JA
 +  version: "0.1.0"
-+  tt_metal_commit: "e7929dc"
++  tt_metal_commit: "e7929dcf5dcf2ad8f8f98dc945d012f61ad075cb"
 +  vllm_commit: "c0c4842"
 +  impl: tt_vllm_plugin
 +  min_disk_gb: 15
@@ -167,7 +187,7 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +  status: EXPERIMENTAL
 PATCH
 
-python3 scripts/build_docker_images.py --build-metal-commit e7929dc --single-threaded
+python3 scripts/build_docker_images.py --build-metal-commit e7929dcf5dcf2ad8f8f98dc945d012f61ad075cb --single-threaded
 
 git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile \
              workflows/model_specs/prod/audio_tts.yaml
@@ -266,7 +286,7 @@ it is replaced, so keep at least 60 GB free.
 MODEL_SPECS_ENV=dev python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 \
   --workflow server --docker-server --dev-mode --no-auth --service-port 8110 \
   --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-e7929dc-c0c4842
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-e7929dcf5dcf2ad8f8f98dc945d012f61ad075cb-c0c4842
 ```
 
 `MODEL_SPECS_ENV=dev` is required here for the same reason as in the build: the
