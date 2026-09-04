@@ -651,3 +651,22 @@ def test_the_systemd_unit_points_at_the_checked_out_script():
     assert "scripts/qwen3_asr/asr_supervisor.sh" in unit, (
         "run the script from the checkout so it cannot drift from the repo"
     )
+
+
+def test_the_supervisor_kills_the_engine_process_too():
+    """pkill on run.py leaves the engine holding the device.
+
+    vLLM runs its engine as a separate "VLLM::EngineCore" process. Killing only
+    the run.py parent orphans it, and it keeps /dev/tenstorrent/* open -- every
+    later launch then hangs in "Starting devices in cluster", and tt-smi -r does
+    not help because the orphan reacquires the device after the reset. This was
+    observed for real: a 10h-old orphan blocked three consecutive restarts.
+    """
+    sh = _supervisor()
+    assert "VLLM::EngineCore" in sh, (
+        "the engine process must be killed, not just its run.py parent"
+    )
+    assert "lsof -t /dev/tenstorrent" in sh, (
+        "verify the device is actually free before relaunching"
+    )
+    assert "kill -9" in sh, "escalate for anything that still holds the device"

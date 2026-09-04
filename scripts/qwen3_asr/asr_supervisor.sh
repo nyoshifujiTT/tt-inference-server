@@ -65,10 +65,33 @@ recover_device() {
   sudo chmod 666 /dev/tenstorrent/* 2>/dev/null
 }
 
-launch_server() {
-  pkill -f "run_vllm_api_server.py" 2>/dev/null
+# Kill a previous run and make sure nothing still holds the device.
+#
+# pkill on the run.py pattern only matches the parent: vLLM's engine runs as a
+# separate "VLLM::EngineCore" process, which survives and keeps
+# /dev/tenstorrent/* open. A later launch then hangs forever in "Starting
+# devices in cluster", and tt-smi -r does not help because the orphan
+# reacquires the device right after the reset.
+stop_server() {
   pkill -f "run.py --model Qwen3-ASR" 2>/dev/null
+  pkill -f "run_vllm_api_server.py" 2>/dev/null
+  pkill -f "VLLM::EngineCore" 2>/dev/null
   sleep 3
+  # escalate only for whatever still holds the device
+  local holders
+  holders=$(sudo lsof -t /dev/tenstorrent/* 2>/dev/null | sort -u)
+  if [ -n "$holders" ]; then
+    log "device still held by: $holders -- sending SIGKILL"
+    # shellcheck disable=SC2086
+    kill -9 $holders 2>/dev/null
+    sleep 3
+  fi
+  holders=$(sudo lsof -t /dev/tenstorrent/* 2>/dev/null | sort -u)
+  [ -z "$holders" ] || log "WARNING: device still held by: $holders"
+}
+
+launch_server() {
+  stop_server
   sudo chmod 666 /dev/tenstorrent/* 2>/dev/null
   log "launching run.py --local-server on port $PORT"
   # MODEL_SPECS_ENV=dev: the spec lives only in the dev catalog (prod entries are
