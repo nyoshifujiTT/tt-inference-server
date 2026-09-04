@@ -389,7 +389,7 @@ scripts carried here instead.
 Corpus accuracy (character error rate) — TED and MagicHub manifests, `conc=4`:
 
 ```
-python3 asr_ja_eval.py --host http://127.0.0.1:8110 \
+python3 reference_config/evals/asr_ja_eval.py --host http://127.0.0.1:8110 \
   --model neosophie/Qwen3-ASR-1.7B-JA \
   --manifest <corpus>/manifest.jsonl --concurrency 4 --output ted.json
 ```
