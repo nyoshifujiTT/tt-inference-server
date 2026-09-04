@@ -739,3 +739,23 @@ def test_the_supervisor_waits_long_enough_for_startup():
         "the startup budget must exceed the measured 7-12 minute startup"
     )
     assert "seq 1 60" not in body, "the 5-minute loop must be gone"
+
+
+def test_the_readme_scopes_the_supervisor_verification_claim():
+    """"Verified" must not cover code that was later found broken.
+
+    The end-to-end recovery demo ran on the original board, before the upstream
+    merge. Auditing the script afterwards found five defects that would each
+    have broken it on the delivery host, so presenting that demo as blanket
+    verification would tell a reader the recovery path is proven here when only
+    its parts have been exercised.
+    """
+    readme = _readme()
+    assert "What has and has not been verified" in readme
+    assert "not** re-verified" in readme, (
+        "say plainly that the full wedge->power-cycle loop was not re-run here"
+    )
+    # the parts that *were* exercised must be listed, or the section is just a
+    # disclaimer with nothing behind it
+    for probe in ("device_ok", "in_container", "canary_ok", "TTSMI"):
+        assert probe in readme, f"{probe} was exercised; say so"

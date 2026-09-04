@@ -402,10 +402,28 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now qwen3asr-supervisor.service
 ```
 
-Verified: injecting sustained variable-length load wedged the board; the
-supervisor detected it, power-cycled, systemd restarted the supervisor on boot,
-the server came back healthy, and `POST /v1/audio/transcriptions` returned the
-correct transcript again — with no human intervention. (This wedge was induced
-on the original board; the delivery p150 has not reproduced it across the
-900-request decode-trace-on soaks above, but the supervisor is kept as a safety
-net for the residual platform hang.)
+### What has and has not been verified
+
+An end-to-end recovery was demonstrated once on the **original** board: induced
+load wedged it, the supervisor power-cycled, systemd restarted it on boot, and
+transcription came back without human intervention.
+
+That run predates the upstream merge, and auditing the script afterwards found
+five defects that would each have broken it on the delivery host — stale run.py
+flags, `/data`-only paths, a `tt-smi` path that does not exist here, a wedge
+test grepping for a string this `tt-smi` never prints, and a startup budget
+shorter than the 7–12 minute startup. They are fixed, and each piece is
+exercised against the live host:
+
+| checked | result |
+|---|---|
+| `run.py` invocation | resolves `Qwen3-ASR-1.7B-JA`, no argument errors |
+| `TTSMI` resolution | `/home/ubuntu/ttvenv/bin/tt-smi`, executable |
+| `device_ok` | reports the healthy board |
+| `in_container` | spares the engine of a running `--docker-server` |
+| `canary_ok` | 200 + text against the live server |
+
+What is **not** re-verified is the full wedge → power-cycle → reboot → recover
+loop on this host, because that needs a wedged board and this one has not
+reproduced the hang across the 900-request decode-trace-on soaks above. Treat
+the recovery path as reviewed and unit-exercised, not as re-demonstrated.
