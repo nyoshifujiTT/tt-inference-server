@@ -72,22 +72,42 @@ recover_device() {
 # /dev/tenstorrent/* open. A later launch then hangs forever in "Starting
 # devices in cluster", and tt-smi -r does not help because the orphan
 # reacquires the device right after the reset.
+# True when the pid belongs to a docker container rather than to a local-server
+# run of ours. A --docker-server deployment's engine looks identical to ours in
+# the process table, so without this check the supervisor would kill an
+# unrelated containerised server.
+in_container() {
+  grep -qE '/docker-|/docker/' "/proc/$1/cgroup" 2>/dev/null
+}
+
 stop_server() {
   pkill -f "run.py --model Qwen3-ASR" 2>/dev/null
   pkill -f "run_vllm_api_server.py" 2>/dev/null
-  pkill -f "VLLM::EngineCore" 2>/dev/null
+  # Not a bare pkill: the same pattern matches a containerised server's engine.
+  for pid in $(pgrep -f "VLLM::EngineCore" 2>/dev/null); do
+    in_container "$pid" || kill "$pid" 2>/dev/null
+  done
   sleep 3
-  # escalate only for whatever still holds the device
-  local holders
+
+  # Whatever still holds the device blocks the next launch: tt-metal then hangs
+  # in "Starting devices in cluster", and tt-smi -r does not help because the
+  # holder reacquires it. Escalate, but again only for processes we own.
+  local holders stubborn
   holders=$(sudo lsof -t /dev/tenstorrent/* 2>/dev/null | sort -u)
-  if [ -n "$holders" ]; then
-    log "device still held by: $holders -- sending SIGKILL"
+  stubborn=""
+  for pid in $holders; do
+    if in_container "$pid"; then
+      log "device held by containerised pid $pid -- leaving it alone"
+    else
+      stubborn="$stubborn $pid"
+    fi
+  done
+  if [ -n "$stubborn" ]; then
+    log "device still held by:$stubborn -- sending SIGKILL"
     # shellcheck disable=SC2086
-    kill -9 $holders 2>/dev/null
+    kill -9 $stubborn 2>/dev/null
     sleep 3
   fi
-  holders=$(sudo lsof -t /dev/tenstorrent/* 2>/dev/null | sort -u)
-  [ -z "$holders" ] || log "WARNING: device still held by: $holders"
 }
 
 launch_server() {

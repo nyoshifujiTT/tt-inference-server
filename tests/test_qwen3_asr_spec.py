@@ -670,3 +670,24 @@ def test_the_supervisor_kills_the_engine_process_too():
         "verify the device is actually free before relaunching"
     )
     assert "kill -9" in sh, "escalate for anything that still holds the device"
+
+
+def test_the_supervisor_spares_containerised_servers():
+    """A --docker-server engine looks identical in the host process table.
+
+    The supervisor manages a --local-server run. A bare
+    `pkill -f "VLLM::EngineCore"` also matches the engine inside a running
+    container -- verified on this host, where the containerised engine appears
+    as a plain "VLLM::EngineCore" pid whose cgroup is
+    /system.slice/docker-<id>.scope. Killing it would take down an unrelated
+    deployment, which is the exact accident this cleanup exists to prevent.
+    """
+    sh = _supervisor()
+    assert "in_container" in sh, (
+        "the cleanup must distinguish our processes from containerised ones"
+    )
+    assert "/docker-" in sh, "identify container processes by cgroup"
+    # the engine kill must go through the filter, not be a bare pkill
+    assert 'pkill -f "VLLM::EngineCore"' not in sh, (
+        "a bare pkill on the engine pattern also kills containerised servers"
+    )
