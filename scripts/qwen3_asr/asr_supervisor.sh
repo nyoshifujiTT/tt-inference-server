@@ -33,7 +33,7 @@ MODEL_NAME="${MODEL_NAME:-Qwen3-ASR-1.7B-JA}"
 # pointing at a scratch file: the synthetic fixtures used during bring-up have
 # no reference transcript and must not be mistaken for an accuracy check.
 CANARY_WAV="${CANARY_WAV:-$HOME/real_ja.wav}"
-TTSMI="${TTSMI:-$HOME/ttsmi-venv/bin/tt-smi}"
+TTSMI="${TTSMI:-$(command -v tt-smi || echo "$HOME/ttvenv/bin/tt-smi")}"
 LOG="${LOG:-$HOME/asr_supervisor.log}"
 SERVER_LOG_DIR="${TTIS}/workflow_logs/local_server"
 
@@ -45,23 +45,37 @@ log() { echo "$(date -u +%FT%TZ) [supervisor] $*" | tee -a "$LOG"; }
 
 [ -f ~/.codex/hf.env ] && set -a && . ~/.codex/hf.env && set +a
 
+# Is the device usable? tt-smi -s prints a JSON snapshot; if the board is wedged
+# the call itself fails or reports no device. The older check grepped for
+# "should be reset", a string this tt-smi build never emits, so the escalation
+# below could never trigger.
+device_ok() {
+  sudo "$TTSMI" -s 2>/dev/null | grep -q "BOARD_ID_HIGH"
+}
+
 recover_device() {
   log "recovering device (tt-smi -r) ..."
   sudo "$TTSMI" -r >/dev/null 2>&1
-  sleep 3
-  if sudo "$TTSMI" -s 2>&1 | grep -q "should be reset"; then
-    log "tt-smi -r insufficient; ipmitool chassis power cycle (host will reboot)"
-    sudo ipmitool chassis power cycle >/dev/null 2>&1
-    # wait for host to come back
-    for i in $(seq 1 40); do
-      sleep 30
-      if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no localhost true >/dev/null 2>&1 || true; then :; fi
-      if [ -e /dev/tenstorrent/2 ] && ! (sudo "$TTSMI" -s 2>&1 | grep -q "should be reset"); then
-        log "device back after power cycle"
-        break
-      fi
-    done
+  sleep 5
+  if device_ok; then
+    log "device recovered by tt-smi -r"
+    sudo chmod 666 /dev/tenstorrent/* 2>/dev/null
+    return 0
   fi
+
+  log "tt-smi -r insufficient; ipmitool chassis power cycle (host will reboot)"
+  sudo ipmitool chassis power cycle >/dev/null 2>&1
+  # The host reboots under us, so this loop only matters if the power cycle was
+  # refused. systemd restarts the supervisor after the reboot (see the unit).
+  for _ in $(seq 1 40); do
+    sleep 30
+    # /dev/tenstorrent/0 is the p150; the old check looked for device 2, which
+    # does not exist on a single-board host and so never became true.
+    if [ -e /dev/tenstorrent/0 ] && device_ok; then
+      log "device back after power cycle"
+      break
+    fi
+  done
   sudo chmod 666 /dev/tenstorrent/* 2>/dev/null
 }
 

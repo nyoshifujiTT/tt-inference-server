@@ -691,3 +691,33 @@ def test_the_supervisor_spares_containerised_servers():
     assert 'pkill -f "VLLM::EngineCore"' not in sh, (
         "a bare pkill on the engine pattern also kills containerised servers"
     )
+
+
+def test_the_supervisor_recovery_checks_can_actually_fire():
+    """The escalation path was unreachable, so recovery stopped at tt-smi -r.
+
+    Three defects, all confirmed on the delivery host:
+      - TTSMI defaulted to ~/ttsmi-venv/bin/tt-smi, which does not exist here
+        (the binary is ~/ttvenv/bin/tt-smi, and also on PATH)
+      - the "needs a power cycle" test grepped for "should be reset", a string
+        this tt-smi build never prints (0 occurrences), so the ipmitool branch
+        could never be taken
+      - the post-reboot wait required /dev/tenstorrent/2, which does not exist
+        on a single-board host, so the loop could never succeed
+    """
+    sh = _supervisor()
+    assert "command -v tt-smi" in sh, (
+        "resolve tt-smi from PATH rather than a venv that may not exist"
+    )
+    # the dead grep must be gone from the code; the comment explaining it may stay
+    code = "\n".join(
+        ln for ln in sh.splitlines() if not ln.strip().startswith("#")
+    )
+    assert "should be reset" not in code, (
+        "that string is never printed by this tt-smi; the check was dead"
+    )
+    assert "device_ok" in sh, "health must be decided by something observable"
+    assert "/dev/tenstorrent/2" not in sh, (
+        "a single-board p150 host only has /dev/tenstorrent/0"
+    )
+    assert "/dev/tenstorrent/0" in sh
