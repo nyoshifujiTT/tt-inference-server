@@ -599,7 +599,13 @@ def test_the_supervisor_launches_the_model_the_way_run_py_still_accepts():
         "run.py reports --vllm-dir as deprecated and ignored since the plugin "
         "switch"
     )
-    assert "MODEL_SPECS_ENV=dev" in sh, (
+    # it must be on the launch line, not only in the comment that explains it:
+    # run.py defaults to prod, where this model does not exist
+    launch = sh[sh.index("launch_server()") : sh.index("wait_healthy()")]
+    launch_code = [
+        ln for ln in launch.splitlines() if not ln.strip().startswith("#")
+    ]
+    assert any("MODEL_SPECS_ENV=dev" in ln for ln in launch_code), (
         "the spec lives only in the dev catalog; run.py defaults to prod"
     )
 
@@ -727,7 +733,15 @@ def test_the_supervisor_recovery_checks_can_actually_fire():
     assert "should be reset" not in code, (
         "that string is never printed by this tt-smi; the check was dead"
     )
-    assert "device_ok" in sh, "health must be decided by something observable"
+    # the definition, not a mention: a call to a missing bash function is falsy,
+    # so renaming it away would silently make every board look wedged
+    assert "\ndevice_ok() {" in sh, (
+        "health must be decided by something observable"
+    )
+    assert sh.count("device_ok") >= 3, (
+        "device_ok must be consulted after tt-smi -r and again after the power "
+        "cycle, not merely defined"
+    )
     assert "/dev/tenstorrent/2" not in sh, (
         "a single-board p150 host only has /dev/tenstorrent/0"
     )
