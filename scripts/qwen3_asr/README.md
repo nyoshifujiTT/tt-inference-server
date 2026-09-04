@@ -438,6 +438,26 @@ python3 reference_config/benchmarking/asr_openai_benchmark.py \
   --samples 32 --num-requests 128 --concurrency 4 --output bench.json
 ```
 
+Serving-level timings — TTFT, prefill, decode TPS and TPS/user — come from two
+more probes, both driving one fixed clip so the token count per request does
+not move between runs. Arguments are positional:
+`<host> <model> <wav> <requests> <concurrency> <max_tokens>`.
+
+```
+# non-streaming: reads vllm:* counters from /metrics before and after
+python3 reference_config/benchmarking/asr_perf_probe.py \
+  http://127.0.0.1:8110 neosophie/Qwen3-ASR-1.7B-JA clip.wav 60 4 100
+
+# streaming: client-side, first SSE chunk = TTFT, inter-chunk gap = TPOT
+python3 reference_config/benchmarking/asr_perf_stream.py \
+  http://127.0.0.1:8110 neosophie/Qwen3-ASR-1.7B-JA clip.wav 60 4 100
+```
+
+The non-streaming probe exists because the customer's client sets
+`stream=false`, so per-token timings are not observable from the client and
+have to be read off the server's own counters. The streaming probe measures the
+same quantities the ordinary way and is the cross-check on them.
+
 Measured on the delivery p150 with the image above, reproduced across three
 independent builds (loopback, fork clone, and fork clone with the base rebuilt
 from the Bake step):
