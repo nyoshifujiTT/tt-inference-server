@@ -601,6 +601,24 @@ def test_trace_mode_travels_in_override_tt_config_not_a_duplicate_flag():
         )
 
 
+def test_the_runbook_patch_carries_the_same_trace_mode_form_as_the_dev_spec():
+    """The prod entry the runbook adds is what a release build actually reads.
+
+    The dev catalog was moved to override_tt_config, but the temporary prod
+    entry inside the runbook's git-apply patch kept the hyphenated
+    "additional-config" vllm_arg. Anyone building from the runbook would then
+    get the duplicated flag the dev spec was fixed to avoid, with the correct
+    value surviving only because vLLM happens to take the later one.
+    """
+    readme = _readme()
+    patch = readme[readme.index("git apply <<'PATCH'") : readme.index("\nPATCH\n")]
+    assert "additional-config" not in patch, (
+        "the runbook's prod entry must not set the hyphenated vllm_arg; it "
+        "duplicates the additional_config the base spec generates"
+    )
+    assert "+      override_tt_config:" in patch
+    assert "+        trace_mode: decode_only" in patch
+
 def _supervisor():
     return (
         get_repo_root_path() / "scripts" / "qwen3_asr" / "asr_supervisor.sh"

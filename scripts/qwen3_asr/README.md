@@ -162,8 +162,8 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +        MESH_DEVICE: "P150"
 +        HF_HUB_OFFLINE: "1"
 +        TRANSFORMERS_OFFLINE: "1"
-+      vllm_args:
-+        additional-config: '{"tt": {"trace_mode": "decode_only"}}'
++      override_tt_config:
++        trace_mode: decode_only
 +  status: EXPERIMENTAL
 PATCH
 
