@@ -173,6 +173,33 @@ def test_the_readme_states_when_the_pin_may_lag_the_head():
     assert "grep -v '/tests/'" in readme
 
 
+def test_the_readme_does_not_claim_tests_are_absent_from_the_image():
+    """Both clones are whole trees, so tests/ IS inside the image.
+
+    The section used to justify a lagging pin with "never copied into the
+    image". Checked on a running container, that is false:
+    tt-metal .../qwen3_asr/tests has 18 files and
+    /home/container_app_user/vllm-tt-plugin/tests has 28 .py files. A reader who
+    believed the old wording would conclude any file present in the image
+    requires a pin bump, which is the wrong rule.
+    """
+    readme = _readme()
+    assert "never copied into the image" not in readme
+    # the real reason is the import graph, and it has to be stated
+    assert "src/vllm_tt_plugin" in readme
+    assert "import graph" in readme
+
+
+def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
+    """vllm_commit can lag too, and its tests live at a different path.
+
+    Only the tt-metal form was documented, so a plugin test-only commit had no
+    stated way to be cleared; the tt-metal filter ('/tests/') does not match the
+    plugin layout ('tests/...' at the repo root).
+    """
+    readme = _readme()
+    assert "grep -v '/tests/'" in readme, "tt-metal form"
+    assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
 BRING_UP_BRANCH = "nyoshifujiTT/qwen3-asr-17b_p150x1"
 
 

@@ -44,20 +44,40 @@ of the manual patch below: applied, built from, and reverted -- never committed.
 
 ### Why the pin may lag the branch head
 
-`tt_metal_commit` names the tree the image is BUILT from, so it only has to move
-when a commit changes something the image contains. Commits that touch only
-`models/demos/audio/qwen3_asr/tests/` (host-only tests, run from a checkout and
-never copied into the image) produce a byte-identical image, so bumping the pin
-for them would force a ~7 h rebuild that cannot change the result.
-
-Before leaving the pin behind the branch head, verify there is no runtime diff:
+`tt_metal_commit` and `vllm_commit` name the trees the image is BUILT from, so
+they only have to move when a commit changes something the served code path
+reads. Both clones are whole working trees, so a `tests/` directory *is* present
+inside the image -- verified on a running container:
 
 ```
+$ docker exec <container> ls /home/container_app_user/tt-metal/models/demos/audio/qwen3_asr/tests | wc -l
+18
+$ docker exec <container> ls /home/container_app_user/vllm-tt-plugin/tests/*.py | wc -l
+28
+```
+
+What makes a test-only commit safe to leave behind the pin is not absence from
+the image but absence from the import graph: nothing the server loads imports
+those modules. `vllm_tt_plugin` resolves to `.../vllm-tt-plugin/src/vllm_tt_plugin`
+(an editable install rooted at `src/`, so `tests/` is outside it), and the
+tt-metal demo package is imported as `models.demos.audio.qwen3_asr.tt.*`.
+A commit that only adds or edits test modules therefore cannot change what the
+server executes, and bumping the pin for it would force a ~7 h rebuild that
+cannot change the result.
+
+Before leaving a pin behind its branch head, verify there is no runtime diff:
+
+```
+# tt-metal
 git diff --name-only <pinned> <head> -- models/demos/audio/qwen3_asr \
   | grep -v '/tests/'      # must print nothing
+
+# vllm-tt-plugin
+git diff --name-only <pinned> <head> \
+  | grep -v '^tests/'      # must print nothing
 ```
 
-If that prints anything, bump the pin and rebuild.
+If either prints anything, bump that pin and rebuild.
 
 ### 2. Dev image (from the bring-up forks)
 
