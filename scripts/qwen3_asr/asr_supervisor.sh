@@ -145,8 +145,13 @@ launch_server() {
 }
 
 wait_healthy() {
-  # up to ~5 min for startup (model load + decode warmup)
-  for i in $(seq 1 60); do
+  # Startup is slow: the adapter loads weights and captures the decode trace
+  # before serving. Measured on the delivery p150 at 7-12 minutes (README quotes
+  # ~12), so the old 5-minute budget expired every time -- the supervisor would
+  # declare the server dead and start power-cycling a board that was merely
+  # still warming up. Allow 20 minutes.
+  local deadline=$(( $(date +%s) + 20 * 60 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 5
     if curl -s -m 5 "http://127.0.0.1:${PORT}/health" -o /dev/null -w '%{http_code}' 2>/dev/null | grep -q 200; then
       # confirm a model is actually served

@@ -721,3 +721,21 @@ def test_the_supervisor_recovery_checks_can_actually_fire():
         "a single-board p150 host only has /dev/tenstorrent/0"
     )
     assert "/dev/tenstorrent/0" in sh
+
+
+def test_the_supervisor_waits_long_enough_for_startup():
+    """A 5-minute budget guaranteed a false wedge on every launch.
+
+    The server takes 7-12 minutes to reach /health 200 (weight load plus decode
+    trace capture; the runbook quotes ~12, and a launch measured here took
+    7m40s). The old wait_healthy gave 60 x 5s = 5 minutes, so it always timed
+    out and the supervisor went straight to recover_device -- power-cycling a
+    board that was merely still warming up, then repeating forever.
+    """
+    sh = _supervisor()
+    start = sh.index("wait_healthy()")
+    body = sh[start : sh.index("\n}", start)]
+    assert "20 * 60" in body, (
+        "the startup budget must exceed the measured 7-12 minute startup"
+    )
+    assert "seq 1 60" not in body, "the 5-minute loop must be gone"
