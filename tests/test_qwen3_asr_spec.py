@@ -683,10 +683,21 @@ def test_the_supervisor_spares_containerised_servers():
     deployment, which is the exact accident this cleanup exists to prevent.
     """
     sh = _supervisor()
-    assert "in_container" in sh, (
-        "the cleanup must distinguish our processes from containerised ones"
+    # Require the definition, not just a mention: renaming the function away
+    # leaves the call sites referencing a name that no longer exists, and a
+    # substring check on "in_container" would still pass while the filter is
+    # silently gone (bash treats the failed call as false, so every engine
+    # would be killed).
+    assert "\nin_container() {" in sh, (
+        "the cleanup must define in_container to distinguish our processes "
+        "from containerised ones"
     )
     assert "/docker-" in sh, "identify container processes by cgroup"
+    # and it must actually be consulted on both paths
+    assert sh.count("in_container ") >= 2, (
+        "in_container must gate both the engine kill and the device-holder "
+        "escalation"
+    )
     # the engine kill must go through the filter, not be a bare pkill
     assert 'pkill -f "VLLM::EngineCore"' not in sh, (
         "a bare pkill on the engine pattern also kills containerised servers"
