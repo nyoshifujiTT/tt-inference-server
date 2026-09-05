@@ -933,3 +933,35 @@ def test_the_readme_warns_that_the_checkout_variable_is_named_differently():
     assert "Not**" in body or "not**" in body, (
         "state it as a warning, not as a passing mention"
     )
+
+
+def test_the_readme_does_not_overstate_what_the_dockerfile_clones():
+    """"clones only vllm-tt-plugin" is false read literally.
+
+    The dev Dockerfile clones three repositories: tt-metal, vllm-tt-plugin and
+    tt-smi. The sentence means "no second vLLM source" -- true and worth
+    saying, since the field is named vllm_commit and used to point at the
+    tenstorrent/vllm fork -- but a reader checking the Dockerfile finds three
+    clones and stops trusting the section.
+    """
+    import re
+
+    dockerfile = (
+        get_repo_root_path() / "vllm-tt-metal" / "vllm.tt-metal.src.dev.Dockerfile"
+    ).read_text()
+    cloned = set(
+        re.findall(r"git clone[^\"]*?github\.com/[^/]+/([a-zA-Z0-9._-]+)\.git", dockerfile)
+    )
+    assert cloned == {"tt-metal", "vllm-tt-plugin", "tt-smi"}, (
+        f"the Dockerfile's clone set changed: {sorted(cloned)}; update the README"
+    )
+
+    readme = _readme()
+    # the vLLM-scoped claim must be qualified, not left as a bare "only"
+    assert "clones only\n`vllm-tt-plugin`" not in readme
+    assert "There is no second vLLM source" in readme or (
+        "no\nsecond vLLM source" in readme or "no second vLLM source" in readme
+    ), "say what 'only' is scoped to"
+    assert "three repositories in" in readme, (
+        "name the real clone count so the claim can be checked"
+    )

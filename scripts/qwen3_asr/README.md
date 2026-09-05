@@ -237,10 +237,12 @@ a fork look as though it came from the committed Dockerfile.
 #### What `vllm_commit` names
 
 A *vllm-tt-plugin* commit, despite the name. The dev Dockerfile clones only
-`tenstorrent/vllm-tt-plugin`, which owns the vLLM version pin and installs it
-via its own `docs/install-vllm-tt.sh` -- the same layout `tt-inference-server`
-main uses. The field keeps its old name from when the image cloned the
-`tenstorrent/vllm` fork.
+`tenstorrent/vllm-tt-plugin` for the vLLM side -- it owns the vLLM version pin
+and installs it via its own `docs/install-vllm-tt.sh`, the same layout
+`tt-inference-server` main uses. (The Dockerfile clones three repositories in
+total: tt-metal, vllm-tt-plugin and tt-smi. "Only" here means there is no
+second vLLM source.) The field keeps its old name from when the image cloned
+the `tenstorrent/vllm` fork.
 
 **That fork is deprecated.** `tenstorrent/vllm`'s README says "This repository
 is deprecated. Do not use it"; TT-specific issues are redirected to
@@ -281,8 +283,8 @@ There is one supported route: upstream vLLM plus `vllm-tt-plugin`.
 This branch has `tt-inference-server` main merged in, so the layout here is the
 upstream one: catalogs are YAML under `workflows/model_specs/{dev,prod}/`, the
 eval and benchmark harnesses live under `reference_config/` and `llm_module/`,
-reporting is in `report_module/`, and the dev Dockerfile clones only
-`vllm-tt-plugin`.
+reporting is in `report_module/`, and the dev Dockerfile takes its vLLM from
+`vllm-tt-plugin` alone -- the `tenstorrent/vllm` clone is gone.
 
 `vllm-tt-plugin` has upstream merged in too, which raises the vLLM it installs
 from 0.24.0 to 0.26.0. Three of the plugin commits this bring-up carried were
