@@ -90,7 +90,7 @@ Before leaving a pin behind its branch head, verify there is no runtime diff:
 ```
 # tt-metal
 git diff --name-only <pinned> <head> -- models/demos/audio/qwen3_asr \
-  | grep -v '/tests/'      # must print nothing
+  | grep -vE '/tests/|^.*/(README\.md|reference/dump_reference\.py|reference/extract_text_decoder\.py|eval/corpus_eval\.py)$'
 
 # vllm-tt-plugin
 git diff --name-only <pinned> <head> \
@@ -98,6 +98,19 @@ git diff --name-only <pinned> <head> \
 ```
 
 If either prints anything, bump that pin and rebuild.
+
+The extra tt-metal exclusions are the same rule, not exceptions to it. Those
+files ship inside the image but nothing the server loads imports them: the
+served path enters at `models.demos.audio.qwen3_asr.tt.*`, while
+`reference/dump_reference.py` and `reference/extract_text_decoder.py` are
+golden-generation scripts run by hand from a separate CPU venv, and
+`eval/corpus_eval.py` is the offline demo-side eval. Confirm the claim rather
+than trusting the list -- a file is only safe to exclude if no module reachable
+from `tt/` imports it:
+
+```
+grep -rn '<basename without .py>' --include='*.py' models/demos/audio/qwen3_asr/tt/
+```
 
 ### 2. Dev image (from the bring-up forks)
 

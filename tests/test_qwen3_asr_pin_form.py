@@ -79,3 +79,38 @@ def test_the_readme_explains_why_a_short_pin_breaks():
     assert "full 40-character SHA" in readme
     assert "ls-remote" in readme
     assert "refs/pull/9507/head" in readme, "keep the observed collision on record"
+
+
+def test_the_no_runtime_diff_check_matches_the_stated_rule():
+    """The command has to implement "not in the import graph", not "not a test".
+
+    The rule the section states is import reachability, but the tt-metal command
+    only filtered '/tests/'. Commits touching reference/dump_reference.py or
+    eval/corpus_eval.py -- golden tooling and the offline eval, neither of which
+    anything under tt/ imports -- therefore appeared as runtime diffs and would
+    have forced a ~7 h rebuild that cannot change the served image.
+    """
+    readme = _readme()
+    body = readme[readme.index("Why the pin may lag the branch head") :]
+
+    assert "absence from the import graph" in body, "the rule must still be stated"
+    for excluded in (
+        "dump_reference",
+        "extract_text_decoder",
+        "corpus_eval",
+    ):
+        assert excluded in body, (
+            f"{excluded}.py is not reachable from tt/, so the check must not "
+            "report it as a runtime diff"
+        )
+
+
+def test_the_readme_says_how_to_confirm_an_exclusion():
+    """A hardcoded exclusion list rots the moment tt/ starts importing one.
+
+    Give the reader the check rather than asking them to trust the list.
+    """
+    body = _readme()
+    body = body[body.index("Why the pin may lag the branch head") :]
+    assert "grep -rn" in body
+    assert "models/demos/audio/qwen3_asr/tt/" in body

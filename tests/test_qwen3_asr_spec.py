@@ -170,7 +170,9 @@ def test_the_readme_states_when_the_pin_may_lag_the_head():
     assert "Why the pin may lag the branch head" in readme
     # the documented check must be the one that proves there is no runtime diff
     assert "git diff --name-only" in readme
-    assert "grep -v '/tests/'" in readme
+    # the tt-metal filter also drops the golden tooling and offline eval, which
+    # ship in the image but are not reachable from tt/ -- see the pin-form tests
+    assert "grep -vE '/tests/|" in readme
 
 
 def test_the_readme_does_not_claim_tests_are_absent_from_the_image():
@@ -198,7 +200,7 @@ def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
     plugin layout ('tests/...' at the repo root).
     """
     readme = _readme()
-    assert "grep -v '/tests/'" in readme, "tt-metal form"
+    assert "grep -vE '/tests/|" in readme, "tt-metal form"
     assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
 BRING_UP_BRANCH = "nyoshifujiTT/qwen3-asr-17b_p150x1"
 
