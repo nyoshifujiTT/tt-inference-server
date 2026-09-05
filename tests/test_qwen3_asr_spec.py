@@ -981,8 +981,13 @@ def test_the_readme_gives_a_cheap_wedge_check():
     assert "num_requests_running" in body, (
         "one counter alone cannot distinguish a stall from an idle server"
     )
-    # the observed figure, so a rerun has something to compare against
-    assert "6675" in body
+    # The observed figure has to appear as the command's output line, not only
+    # in the prose: the number occurs twice, so an "in body" check let the
+    # sample output be blurred to "many" while the prose kept the digits.
+    assert 'vllm:request_success_total{...,finished_reason="stop",...} 6675.0' in body, (
+        "quote the counter line as the server prints it, so a rerun can be "
+        "compared line for line"
+    )
 
 
 def test_the_wedge_check_names_metrics_the_server_actually_exports():
