@@ -193,3 +193,73 @@ def test_the_readme_covers_a_comment_only_change_to_a_served_module():
     # the check has to strip comment-only diff lines, not just look at names
     assert "grep -vE '^[+-]#" in body
     assert "Anything printed is a real code change" in body
+
+
+def _pinned_vllm(readme):
+    """vllm_commit as set by the runbook's own patch block."""
+    match = re.search(r'^\+  vllm_commit: "([0-9a-f]+)"', _patch_block(readme), re.M)
+    assert match, "the runbook patch must set vllm_commit"
+    return match.group(1)
+
+
+def _sibling_checkout(name):
+    """Locate a co-checked-out repo without hardcoding one machine's layout.
+
+    The bring-up host keeps them at ~/<name>; the workstation at ~/repos/<name>.
+    Returning a missing path is fine: _count treats a failed git call as
+    "not available here" and the check skips rather than failing spuriously.
+    """
+    for candidate in (f"~/{name}", f"~/repos/{name}"):
+        if os.path.isdir(os.path.expanduser(os.path.join(candidate, ".git"))):
+            return candidate
+    return f"~/{name}"
+
+
+def test_the_quoted_test_counts_match_the_pinned_trees():
+    """The counts illustrate "tests ship in the image", and they go stale.
+
+    They were captured once and then drifted: the plugin figure said 28 while
+    the image built from the current pin carries 30, because the pin moved from
+    50695d8 to c0c4842 and the merge brought new test files. A reader who runs
+    the quoted command sees a different number and cannot tell whether the
+    image is wrong or the doc is.
+
+    Derive the expected counts from the pinned trees so the doc fails here
+    rather than in front of a reader.
+    """
+    import subprocess
+
+    readme = _readme()
+    counts = re.findall(r"\| wc -l\n([0-9]+)\n", readme)
+    assert len(counts) == 2, f"expected two quoted counts, found {counts}"
+    metal_quoted, plugin_quoted = (int(c) for c in counts)
+
+    def _count(repo, pin, path, pattern):
+        # Non-recursive: the quoted commands are `ls <dir>` and `ls <dir>/*.py`,
+        # neither of which descends. `-r` would fold in tests/tt/ and report 42
+        # where the reader sees 30.
+        out = subprocess.run(
+            ["git", "ls-tree", "--name-only", f"{pin}:{path}"],
+            cwd=os.path.expanduser(repo), capture_output=True, text=True,
+        )
+        if out.returncode != 0:
+            return None  # tree not available in this checkout; skip silently
+        names = [n for n in out.stdout.split() if re.search(pattern, n)]
+        return len(names)
+
+    metal = _count(
+        _sibling_checkout("tt-metal"), _pinned_metal(readme),
+        "models/demos/audio/qwen3_asr/tests", r".",
+    )
+    if metal is not None:
+        assert metal == metal_quoted, (
+            f"the pinned tt-metal tree has {metal} files under qwen3_asr/tests, "
+            f"the README says {metal_quoted}"
+        )
+
+    plugin = _count(_sibling_checkout("vllm-tt-plugin"), _pinned_vllm(readme), "tests", r"\.py$")
+    if plugin is not None:
+        assert plugin == plugin_quoted, (
+            f"the pinned plugin tree has {plugin} .py files under tests/, "
+            f"the README says {plugin_quoted}"
+        )

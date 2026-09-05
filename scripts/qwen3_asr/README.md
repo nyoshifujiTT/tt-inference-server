@@ -87,7 +87,7 @@ inside the image -- verified on a running container:
 $ docker exec <container> ls /home/container_app_user/tt-metal/models/demos/audio/qwen3_asr/tests | wc -l
 18
 $ docker exec <container> ls /home/container_app_user/vllm-tt-plugin/tests/*.py | wc -l
-28
+30
 ```
 
 What makes a test-only commit safe to leave behind the pin is not absence from
