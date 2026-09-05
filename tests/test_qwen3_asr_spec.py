@@ -831,3 +831,31 @@ def test_the_readme_scopes_the_supervisor_verification_claim():
     # disclaimer with nothing behind it
     for probe in ("device_ok", "in_container", "canary_ok", "TTSMI"):
         assert probe in readme, f"{probe} was exercised; say so"
+
+
+def test_the_readme_documents_the_plugin_server_facing_tests():
+    """tests/tt is the only per-request sampling coverage on this deployment.
+
+    It was never mentioned, so nobody ran it: the ASR model answers
+    /v1/completions, which is what those tests drive. Running it found two
+    presence-penalty failures that are a property of this model, not a defect,
+    and that distinction has to be written down or the next reader files a bug.
+    """
+    readme = _readme()
+    assert "tests/tt" in readme
+    assert "--tt-server-url" in readme and "--tt-model-name" in readme
+
+
+def test_the_readme_explains_the_presence_penalty_failures():
+    """presence subtracts at most 2.0 once; this model's top-2 gap is larger.
+
+    frequency scales with occurrence count and repetition divides, so both do
+    reorder the top token -- presence cannot. Keep the measured gap on record.
+    """
+    readme = _readme()
+    assert "presence_penalty" in readme
+    # the evidence: the observed logprob gap the penalty would have to overcome
+    assert "-5.58" in readme or "3.5-5.8" in readme
+    # and the escape hatch for a clean run
+    assert "--deselect" in readme
+    assert "TestPresencePenalty::test_different_presence_penalties" in readme

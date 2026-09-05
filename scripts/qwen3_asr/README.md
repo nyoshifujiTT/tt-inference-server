@@ -400,6 +400,44 @@ self-recovers rather than taking the service down:
 auto-starts on boot — including after a power-cycle recovery — making the
 recovery loop fully self-sustaining.
 
+### The plugin's server-facing tests
+
+`vllm-tt-plugin` ships `tests/tt`, which drive a running server over
+`/v1/completions`. They apply here -- the ASR model answers that endpoint too,
+even though its text output is meaningless -- and they are the only coverage of
+per-request sampling isolation on this deployment:
+
+```
+cd $VLLM_TT_PLUGIN
+pytest tests/tt --tt-server-url=http://127.0.0.1:8110 \
+  --tt-model-name=neosophie/Qwen3-ASR-1.7B-JA
+```
+
+Two presence-penalty cases fail, and it is not a plugin defect. `presence`
+subtracts its value once, capped at 2.0 by the OpenAI schema, while `frequency`
+subtracts value x occurrence count and `repetition` divides. Measured on this
+model, the gap between the top and second token is 3.5-5.8 nats at every step:
+
+```
+step 1 top3: [(' b', -0.08), (' a', -5.58), (' c', -5.83)]
+step 3 top3: [(' a', -0.50), (' ',  -4.00), ('\n', -4.25)]
+```
+
+So -2.0 cannot reorder the top two, and the greedy output is identical for
+presence_penalty 0.0 and 2.0 -- while frequency_penalty 2.0 does change it once
+a token has repeated three times (-6.0 > gap), and repetition_penalty 2.0
+changes it immediately. The tests assert that different presence penalties give
+different text, which needs a flatter logit distribution than this model has.
+
+Run them with `--deselect` on those two if a clean run is wanted:
+
+```
+pytest tests/tt --tt-server-url=http://127.0.0.1:8110 \
+  --tt-model-name=neosophie/Qwen3-ASR-1.7B-JA \
+  --deselect tests/tt/test_tt_penalties.py::TestPresencePenalty::test_different_presence_penalties \
+  --deselect tests/tt/test_tt_penalties.py::TestPresencePenalty::test_presence_penalty_mixed_batch
+```
+
 ### 4. Eval and benchmark
 
 The upstream audio harnesses do not fit this model. `run_audio_eval` /
