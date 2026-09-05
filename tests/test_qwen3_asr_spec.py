@@ -917,8 +917,15 @@ def test_the_readme_documents_every_supervisor_override():
 def test_the_readme_warns_that_the_checkout_variable_is_named_differently():
     """TTIS vs TT_INFERENCE_SERVER is a silent-default trap."""
     readme = _readme()
-    assert "Not** `TT_INFERENCE_SERVER`" in readme or (
-        "TTIS" in readme and "TT_INFERENCE_SERVER" in readme
-    )
     body = readme[readme.index("## Install") :]
     assert "TTIS" in body, "the Install section is where a deployer looks"
+    # Both names appear in the file for unrelated reasons, so an "or" over that
+    # let the warning itself be deleted. Require the contrast to be stated
+    # where the knob is described.
+    assert "TT_INFERENCE_SERVER" in body, (
+        "the runbook's own name for the same tree must be contrasted here, or "
+        "a deployer sets it and silently gets the default"
+    )
+    assert "Not**" in body or "not**" in body, (
+        "state it as a warning, not as a passing mention"
+    )
