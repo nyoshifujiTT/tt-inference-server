@@ -674,7 +674,8 @@ Bake), and produced the same CER.
 
 ## Install
 ```
-sudo cp qwen3asr-supervisor.service /etc/systemd/system/
+sudo cp $TT_INFERENCE_SERVER/scripts/qwen3_asr/qwen3asr-supervisor.service \
+  /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now qwen3asr-supervisor.service
 ```

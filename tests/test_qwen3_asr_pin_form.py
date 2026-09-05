@@ -18,6 +18,8 @@ fork does not have. A full 40-char SHA survives the grep as itself.
 import os
 import re
 
+from workflows.utils import get_repo_root_path
+
 HERE = os.path.dirname(__file__)
 README = os.path.join(HERE, "..", "scripts", "qwen3_asr", "README.md")
 
@@ -263,3 +265,46 @@ def test_the_quoted_test_counts_match_the_pinned_trees():
             f"the pinned plugin tree has {plugin} .py files under tests/, "
             f"the README says {plugin_quoted}"
         )
+
+
+def test_commands_reference_repo_files_by_a_path_that_resolves():
+    """`sudo cp qwen3asr-supervisor.service ...` did not resolve from anywhere.
+
+    The unit file lives in scripts/qwen3_asr/, and no block in this runbook cds
+    there -- they all work from $TT_INFERENCE_SERVER. Following the Install
+    section verbatim gives "No such file or directory".
+
+    Generalised: every repo-relative file a command names must exist at the
+    path given, resolved from the repository root.
+    """
+    import re
+
+    root = get_repo_root_path()
+    readme = _readme()
+
+    # Arguments that look like paths in THIS repo. Deliberately narrow:
+    #  - tests/tt/... belongs to vllm-tt-plugin, which the runbook also drives;
+    #  - the extension must be a full suffix, or "....src.dev.Dockerfile"
+    #    truncates to a name that does not exist.
+    candidates = set(
+        re.findall(
+            r"(?:^|\s)(?:\$TT_INFERENCE_SERVER/)?"
+            r"((?:scripts|workflows|reference_config|evals|vllm-tt-metal)"
+            r"/[A-Za-z0-9_./-]+?\.(?:py|ya?ml|json|sh|service|Dockerfile|md))"
+            r"(?=[\s\\)`]|$)",
+            readme,
+            re.M,
+        )
+    )
+    assert candidates, "the runbook does name in-repo files; keep this meaningful"
+
+    missing = sorted(p for p in candidates if not (root / p).exists())
+    assert not missing, f"named in the runbook but absent from the repo: {missing}"
+
+
+def test_the_unit_file_is_copied_from_where_it_lives():
+    readme = _readme()
+    assert "scripts/qwen3_asr/qwen3asr-supervisor.service" in readme, (
+        "give the path the file is actually at; a bare filename resolves "
+        "nowhere the runbook has cd'd to"
+    )
