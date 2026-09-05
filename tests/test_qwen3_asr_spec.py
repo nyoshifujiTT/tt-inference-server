@@ -1040,5 +1040,11 @@ def test_the_readme_cites_the_issue_that_matches_the_signature():
     body = body[: body.index("Scope note")]
     assert "37543" in body
     assert "SDPA decode" in body
-    # and the differences of the near-matches, so they are not read as identical
-    assert "45052" in body and "deterministic" in body
+    # The near-match must be marked as such. "deterministic" alone is satisfied
+    # by the surrounding "non-deterministic device hang" prose, so name what
+    # makes #45052 different from ours.
+    assert "45052" in body
+    assert "deterministic and P300x2-specific" in body, (
+        "#45052 is deterministic and board-specific; presenting it as the same "
+        "failure overstates how well this hang is understood upstream"
+    )
