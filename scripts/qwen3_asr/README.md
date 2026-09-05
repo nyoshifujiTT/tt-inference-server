@@ -381,13 +381,24 @@ The very first transcription JIT-compiles kernels into the container's cache and
 can take minutes; subsequent ones settle at ~2 s for an 11 s clip. Do not mistake
 that first request for a hang.
 
-The tt-metal decode path has a **non-deterministic device hang** in the same
-SDPA/decode class tracked upstream (tt-metal issues #40592, #45052, #4752, also
-seen for Mistral / gpt-oss / Falcon3). It is a platform-level bug, not specific
-to the Qwen3-ASR adapter: memory is flat (no leak), single-device CCL/fabric is
-short-circuited, and a watchdog (`TT_METAL_OPERATION_TIMEOUT_SECONDS`) shows the
-stall in a decode device op (`device timeout, potential hang detected,
-unrecoverable`).
+The tt-metal decode path has a **non-deterministic device hang** in a class
+tracked upstream. The closest matches by signature, checked rather than
+recalled:
+
+| issue | what it actually is | same class? |
+|---|---|---|
+| [tt-metal#37543](https://github.com/tenstorrent/tt-metal/issues/37543) | "[GPT-OSS] ND hang in SDPA decode" -- hangs after 20-120 min, decode traced, only under vLLM | yes: SDPA decode, ND, trace-related |
+| [tt-metal#36395](https://github.com/tenstorrent/tt-metal/issues/36395) | "[GPT-OSS] ND hangs" -- mostly prefill, some decode | partly |
+| [tt-metal#45052](https://github.com/tenstorrent/tt-metal/issues/45052) | gpt-oss decode hang after `paged_fill_cache`, isl>=1024 | shares the watchdog signature, but that one is deterministic and P300x2-specific |
+
+Two issues quoted here previously do **not** belong: #40592 is a Mistral
+*AllGatherAsync* hang on T3K, and #4752 is a tt-inference-server *eval accuracy*
+issue for Falcon3, not a hang at all. Neither supports the claim.
+
+What is ours, and measured here: it is not specific to the Qwen3-ASR adapter --
+memory is flat (no leak), single-device CCL/fabric is short-circuited, and a
+watchdog (`TT_METAL_OPERATION_TIMEOUT_SECONDS`) puts the stall in a decode
+device op (`device timeout, potential hang detected, unrecoverable`).
 
 Scope note (important): this hang was reproducible on the original board
 (10.160.20.103), where a reused decode trace wedged the service within ~9-26

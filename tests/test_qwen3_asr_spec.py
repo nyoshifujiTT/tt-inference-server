@@ -1005,3 +1005,40 @@ def test_the_wedge_check_names_metrics_the_server_actually_exports():
     readme = _readme()
     for metric in sorted(plugin_metrics):
         assert metric in readme, f"{metric} must be the one the runbook quotes"
+
+
+def test_the_readme_does_not_cite_the_wrong_hang_issues():
+    """Two of the three cited issues were not this failure mode.
+
+    Checked against the tracker rather than recalled:
+      #40592 -- Mistral, intermittent hang in AllGatherAsync on T3K. A CCL
+                hang, not SDPA/decode, and this deployment short-circuits CCL.
+      #4752  -- tt-inference-server, Falcon3-7B eval accuracy vs an L4
+                reference. Not tt-metal, and not a hang.
+    Citing them as "the same SDPA/decode class" sends the next reader to two
+    unrelated threads and inflates the apparent corroboration from one issue to
+    three.
+    """
+    readme = _readme()
+    body = readme[readme.index("non-deterministic device hang") :]
+    body = body[: body.index("Scope note")]
+
+    # they may be named as excluded, but not offered as supporting evidence
+    for wrong in ("#40592", "#4752"):
+        assert f"issues {wrong}" not in body and f", {wrong}," not in body, (
+            f"{wrong} is a different failure mode; do not cite it as this class"
+        )
+    assert "do **not** belong" in body, (
+        "say why they were dropped, or they get re-added from memory"
+    )
+
+
+def test_the_readme_cites_the_issue_that_matches_the_signature():
+    """#37543 is the one that actually describes this: ND, SDPA decode, traced."""
+    readme = _readme()
+    body = readme[readme.index("non-deterministic device hang") :]
+    body = body[: body.index("Scope note")]
+    assert "37543" in body
+    assert "SDPA decode" in body
+    # and the differences of the near-matches, so they are not read as identical
+    assert "45052" in body and "deterministic" in body
