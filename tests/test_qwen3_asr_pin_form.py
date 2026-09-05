@@ -164,3 +164,20 @@ def test_the_readme_does_not_claim_a_fork_clone_build_at_these_pins():
     assert "not been executed as written at these pins" in head, (
         "name the one runbook step still owed once the branches are pushed"
     )
+
+
+def test_the_readme_covers_a_comment_only_change_to_a_served_module():
+    """The filename filter cannot decide this case, and it came up.
+
+    A tt-metal commit fixed a wrong issue number in a comment inside
+    tt/generator_vllm.py -- a module the server does import. The documented
+    check prints the filename, which reads as "bump the pin and rebuild ~7 h",
+    but the stated rule is whether the server executes something different, and
+    a comment does not. Give the check that settles it.
+    """
+    readme = _readme()
+    body = readme[readme.index("Why the pin may lag the branch head") :]
+    assert "changes only comments" in body
+    # the check has to strip comment-only diff lines, not just look at names
+    assert "grep -vE '^[+-]#" in body
+    assert "Anything printed is a real code change" in body

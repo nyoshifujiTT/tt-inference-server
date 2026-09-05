@@ -113,6 +113,18 @@ git diff --name-only <pinned> <head> \
 
 If either prints anything, bump that pin and rebuild.
 
+One exception the filename filter cannot express: a commit that touches a
+served module but changes only comments. The rule is "does the server execute
+something different", and it does not. Confirm it rather than assuming, then
+leave the pin:
+
+```
+git diff <pinned> <head> -- <the file> \
+  | grep -E '^[+-]' | grep -vE '^[+-]#|^(\+\+\+|---)'   # must print nothing
+```
+
+Anything printed is a real code change and the pin has to move.
+
 The extra tt-metal exclusions are the same rule, not exceptions to it. Those
 files ship inside the image but nothing the server loads imports them: the
 served path enters at `models.demos.audio.qwen3_asr.tt.*`, while
