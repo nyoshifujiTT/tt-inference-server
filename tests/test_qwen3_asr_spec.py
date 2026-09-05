@@ -854,8 +854,14 @@ def test_the_readme_explains_the_presence_penalty_failures():
     """
     readme = _readme()
     assert "presence_penalty" in readme
-    # the evidence: the observed logprob gap the penalty would have to overcome
-    assert "-5.58" in readme or "3.5-5.8" in readme
+    # The evidence has to be the measured logprobs, not just a prose range: an
+    # "or" over the two let the sampled numbers be edited without failing.
+    assert "3.5-5.8" in readme, "state the gap the penalty must overcome"
+    for observed in ("-0.08", "-5.58"):
+        assert observed in readme, (
+            f"keep the measured top-2 logprobs ({observed}) on record; the range "
+            "alone cannot be checked against a rerun"
+        )
     # and the escape hatch for a clean run
     assert "--deselect" in readme
     assert "TestPresencePenalty::test_different_presence_penalties" in readme
