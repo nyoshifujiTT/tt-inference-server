@@ -565,6 +565,17 @@ python3 reference_config/benchmarking/asr_openai_benchmark.py \
   --samples 32 --num-requests 128 --concurrency 4 --output bench.json
 ```
 
+It fetches the clips from `datasets-server.huggingface.co` on every run, before
+it touches the server, so a network hiccup shows up as a traceback rather than
+a result:
+
+```
+Fetching HF dataset metadata: https://datasets-server.huggingface.co/rows?...
+TimeoutError: The read operation timed out
+```
+
+That is the download, not the model -- no request reached port 8110. Rerun it.
+
 Serving-level timings — TTFT, prefill, decode TPS and TPS/user — come from two
 more probes, both driving one fixed clip so the token count per request does
 not move between runs. Arguments are positional:

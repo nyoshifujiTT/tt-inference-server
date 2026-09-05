@@ -84,3 +84,32 @@ def test_the_runbook_documents_both_probes():
     assert "<host> <model> <wav> <requests> <concurrency> <max_tokens>" in readme
     # and why there are two of them
     assert "stream=false" in readme
+
+
+def test_the_readme_separates_a_download_failure_from_a_model_failure():
+    """The benchmark downloads before it measures, so it can fail with no result.
+
+    Observed: "Fetching HF dataset metadata: ... TimeoutError: The read
+    operation timed out" -- a traceback and no bench.json, with not one request
+    having reached the server. Without this noted, a rerun looks like flaky
+    inference rather than a flaky fetch.
+    """
+    readme = _read(README)
+    body = readme[readme.index("Throughput (LibriSpeech") :]
+    assert "datasets-server.huggingface.co" in body
+    assert "before\nit touches the server" in body or "before it touches the server" in body
+    assert "Rerun it." in body
+
+
+def test_the_benchmark_really_downloads_before_measuring():
+    """The advice above is only sound while the order is fetch-then-measure."""
+    src = _read(os.path.join(BENCH_DIR, "asr_openai_benchmark.py"))
+    assert "datasets-server.huggingface.co" in src
+    download_at = src.index("def download_samples")
+    # the request loop must come after the downloader in the call flow
+    call_at = src.index("samples = download_samples(")
+    post_at = src.rindex("/v1/audio/transcriptions")
+    assert download_at < post_at and call_at < post_at, (
+        "clips are fetched before any request is posted; if that changes, the "
+        "README's 'no request reached the server' claim stops holding"
+    )
