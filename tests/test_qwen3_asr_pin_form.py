@@ -142,3 +142,25 @@ def test_the_runbook_names_the_branch_for_each_checkout():
     assert "nyoshifujiTT/qwen3-asr-17b_p150x1" in head
     for repo in ("tt-metal", "tt-inference-server", "vllm-tt-plugin"):
         assert repo in head, f"{repo} must be listed among the checkouts"
+
+
+def test_the_readme_does_not_claim_a_fork_clone_build_at_these_pins():
+    """The pinned commits are not on the forks, so that build cannot have run.
+
+    The results table said the numbers were "reproduced across three
+    independent builds (loopback, fork clone, ...)". That was true of earlier
+    pins. At the current ones the fork clone would fail -- the commits are not
+    pushed -- so the current image was built over a local git daemon, and
+    saying otherwise claims a reproduction nobody performed.
+    """
+    readme = _readme()
+    body = readme[readme.index("Measured on the delivery p150") :]
+    head = body[: body.index("## Install")]
+
+    assert "reproduced across three independent builds" not in head, (
+        "do not claim fork-clone reproduction at pins that are not pushed"
+    )
+    assert "git daemon" in head, "say how the current image was actually built"
+    assert "not been executed as written at these pins" in head, (
+        "name the one runbook step still owed once the branches are pushed"
+    )

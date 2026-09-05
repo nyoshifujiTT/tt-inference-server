@@ -278,16 +278,20 @@ def test_the_readme_rejects_the_synthetic_fixtures_for_accuracy():
 
 
 def test_the_readme_clones_from_the_forks_only():
-    """The branches are pushed, so the recipe must be reproducible as written.
+    """The recipe itself must clone from the forks, with no loopback detour.
 
-    While they were local-only the images were built against a git daemon on
-    the docker host, and the README documented that detour. An image built from
-    a daemon on one machine is not reproducible by anyone else, so the detour
-    had to go the moment the branches were pushed -- otherwise a reader would
-    set up loopback plumbing that is no longer needed, and the recipe would
-    never be exercised in the form it is delivered in.
+    While the branches were local-only the images were built against a git
+    daemon on the docker host, and the README documented that detour as part of
+    the recipe. An image built from a daemon on one machine is not reproducible
+    by anyone else, so the plumbing had to leave the instructions: a reader
+    must not be told to set it up.
+
+    The results section may still *state* that the current image was built that
+    way -- that is a fact about what was run, not an instruction -- so this
+    check is scoped to the build recipe rather than the whole file.
     """
     readme = _readme()
+    recipe = readme[: readme.index("Measured on the delivery p150")]
     for leftover in (
         "If a branch is not pushed yet",
         "git daemon",
@@ -295,14 +299,14 @@ def test_the_readme_clones_from_the_forks_only():
         "/tmp/ttmetal-src.git",
         "/tmp/vllmttplugin-src.git",
     ):
-        assert leftover not in readme, (
+        assert leftover not in recipe, (
             f"{leftover!r} is loopback plumbing from before the branches were "
             "pushed; the recipe must clone from the forks"
         )
 
     # what must remain: both clones aimed at the pushed forks
-    assert "nyoshifujiTT/tt-metal.git" in readme
-    assert "nyoshifujiTT/vllm-tt-plugin.git" in readme
+    assert "nyoshifujiTT/tt-metal.git" in recipe
+    assert "nyoshifujiTT/vllm-tt-plugin.git" in recipe
 
 
 def test_the_current_pin_is_not_itself_listed_as_superseded():

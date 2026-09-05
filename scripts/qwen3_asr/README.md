@@ -583,9 +583,7 @@ The non-streaming probe exists because the customer's client sets
 have to be read off the server's own counters. The streaming probe measures the
 same quantities the ordinary way and is the cross-check on them.
 
-Measured on the delivery p150 with the image above, reproduced across three
-independent builds (loopback, fork clone, and fork clone with the base rebuilt
-from the Bake step):
+Measured on the delivery p150 with the image above:
 
 | | value |
 |---|---|
@@ -593,8 +591,20 @@ from the Bake step):
 | MagicHub 600 clips | CER 0.1668, 600 ok |
 | LibriSpeech 128 req | 128 ok, rtfx ~12.5, p50 ~2.1 s |
 
-CER matched to four decimal places on all three builds; the ~1 % spread in rtfx
-is session-to-session drift on this board.
+The same CER, to four decimal places, has come out of every build of this model
+so far -- across the vLLM 0.24->0.26 upgrade, three separate image builds at the
+earlier pins, a device reset, and the current pins. The ~1 % spread in rtfx is
+session-to-session drift on this board.
+
+**How the current image was built.** The pinned commits are not on the forks
+yet, so `git clone https://github.com/nyoshifujiTT/...` cannot reach them. This
+image was built with both clone URLs pointed at a local `git daemon` instead;
+everything else -- the Bake base, the patch, the build command -- is exactly
+what is written above. Once the branches are pushed, the build has to be
+repeated with the fork URLs unchanged, which is the only step of this runbook
+that has not been executed as written at these pins. Earlier pins were
+reproduced that way (fork clone, and fork clone with the base rebuilt from
+Bake), and produced the same CER.
 
 ## Install
 ```
