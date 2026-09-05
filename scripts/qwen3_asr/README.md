@@ -427,6 +427,24 @@ python3 reference_config/evals/asr_ja_eval.py --host http://127.0.0.1:8110 \
   --manifest <corpus>/manifest.jsonl --concurrency 4 --output ted.json
 ```
 
+**Run one measurement at a time against a server.** `--concurrency 4` matches
+`max_num_seqs`, so the queue is already saturated; adding a second client makes
+requests wait behind the first run's and some cross the eval's 120 s timeout.
+That inflates `fail` without changing `corpus_cer`, which is computed over the
+successful clips. Observed on TED: 19 failures when run alongside the
+throughput probes, 15 on its own, with CER 0.1002 either way.
+
+On TED those 15 are expected and are not a model result. They are manifest
+artifacts -- zero-length wavs, which the server rejects:
+
+```
+$ grep -o 'ERROR: [^"]*' samples.jsonl | sort | uniq -c
+     15 ERROR: HTTP Error 400: Bad Request
+# each one: frames 0, dur 0.0
+```
+
+So the accepted TED figure reads "494 ok / 15 download artifacts".
+
 #### Where the two manifests come from
 
 Neither corpus can be redistributed, so the manifests are built locally. A

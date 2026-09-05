@@ -109,3 +109,29 @@ def test_the_runbook_records_why_a_mixed_track_corpus_is_excluded():
     readme = _read(README)
     assert "CABank" in readme
     assert "mixed track" in readme
+
+
+def test_the_runbook_warns_against_running_measurements_concurrently():
+    """Otherwise the fail count looks like a regression when it is queueing.
+
+    --concurrency 4 already saturates max_num_seqs, so a second client pushes
+    requests past the eval's 120 s timeout. TED reported 19 failures when run
+    alongside the throughput probes and 15 on its own, with CER 0.1002 either
+    way -- a reader who saw 19 would reasonably suspect the model.
+    """
+    readme = _read(README)
+    assert "one measurement at a time" in readme
+    assert "120 s timeout" in readme or "120 s" in readme
+    assert "19 failures" in readme and "15 on its own" in readme
+
+
+def test_the_runbook_explains_the_fifteen_expected_ted_failures():
+    """"494 ok / 15 download artifacts" was asserted, never evidenced.
+
+    The 15 are zero-length wavs in the manifest; the server rejects them with
+    HTTP 400. Recording the check keeps the next reader from chasing them.
+    """
+    readme = _read(README)
+    assert "zero-length wavs" in readme
+    assert "HTTP Error 400" in readme
+    assert "frames 0" in readme
