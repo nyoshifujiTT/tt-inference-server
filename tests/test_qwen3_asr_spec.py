@@ -865,3 +865,22 @@ def test_the_readme_explains_the_presence_penalty_failures():
     # and the escape hatch for a clean run
     assert "--deselect" in readme
     assert "TestPresencePenalty::test_different_presence_penalties" in readme
+
+
+def test_the_readme_accounts_for_the_skipped_plugin_test():
+    """An unexplained skip reads as coverage nobody checked.
+
+    tests/tt leaves one skip: test_all_vocab_logprobs asks for top_logprobs=-1
+    and the server answers "Requested sample logprobs of 151936, which is
+    greater than max allowed: 20". That is vLLM's max_logprobs default, left
+    alone on purpose -- whole-vocabulary logprobs cost per token in proportion
+    to the vocabulary and nothing in the transcription path wants them.
+    """
+    readme = _readme()
+    assert "71 passed, 1 skipped, 2 deselected" in readme, (
+        "record the full result, not just the passes"
+    )
+    assert "max_logprobs" in readme
+    assert "greater than max allowed: 20" in readme, (
+        "keep the server's own message, so the skip can be told from a failure"
+    )

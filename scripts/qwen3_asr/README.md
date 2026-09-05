@@ -452,6 +452,18 @@ pytest tests/tt --tt-server-url=http://127.0.0.1:8110 \
   --deselect tests/tt/test_tt_penalties.py::TestPresencePenalty::test_presence_penalty_mixed_batch
 ```
 
+That gives **71 passed, 1 skipped, 2 deselected** (~15 min). The skip is
+`test_all_vocab_logprobs`, which asks for `top_logprobs=-1`; the server answers
+
+```
+Requested sample logprobs of 151936, which is greater than max allowed: 20
+```
+
+`max_logprobs` defaults to 20 in vLLM and the spec does not raise it. That is
+deliberate: whole-vocabulary logprobs are a debugging aid with a per-token cost
+proportional to the vocabulary, and nothing in the transcription path asks for
+them. The test skips itself on exactly this error rather than failing.
+
 ### 4. Eval and benchmark
 
 The upstream audio harnesses do not fit this model. `run_audio_eval` /
