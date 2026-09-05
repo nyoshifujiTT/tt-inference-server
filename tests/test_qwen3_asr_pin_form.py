@@ -308,3 +308,27 @@ def test_the_unit_file_is_copied_from_where_it_lives():
         "give the path the file is actually at; a bare filename resolves "
         "nowhere the runbook has cd'd to"
     )
+
+
+def test_the_patch_targets_files_that_exist():
+    """`git apply` fails on a path that is not in the tree.
+
+    The generic path check cannot catch a typo here: the Dockerfile name
+    appears four times in the patch (diff/---/+++/hunk context), so mutating
+    one leaves three valid and the set-based check still passes. Take the
+    targets from the diff headers, where each one must resolve.
+    """
+    import re
+
+    root = get_repo_root_path()
+    block = _patch_block(_readme())
+
+    targets = set(re.findall(r"^diff --git a/(\S+) b/(\S+)$", block, re.M))
+    assert targets, "the runbook patch must name the files it edits"
+
+    for a, b in sorted(targets):
+        assert a == b, f"the patch renames {a} -> {b}; that is not intended here"
+        assert (root / a).exists(), (
+            f"the patch edits {a}, which is not in the repository; git apply "
+            "would fail before the build starts"
+        )
