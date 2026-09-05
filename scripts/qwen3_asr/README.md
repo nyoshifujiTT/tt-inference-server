@@ -603,6 +603,27 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now qwen3asr-supervisor.service
 ```
 
+### What the supervisor reads from the environment
+
+Every path it uses is overridable, and it checks them before launching -- a
+missing one exits with `supervisor: missing path: <p>` rather than failing
+later inside `run.py`. Defaults are under the service user's home:
+
+| variable | default | note |
+|---|---|---|
+| `TTIS` | `$HOME/tt-inference-server` | this repo. **Not** `TT_INFERENCE_SERVER`: that name is this runbook's, and the script predates it |
+| `TT_METAL_HOME` | `$HOME/tt-metal` | same variable the runbook exports |
+| `VENV` | `$TT_METAL_HOME/python_env` | the interpreter `run.py` is launched with |
+| `SNAP` | the HF hub snapshot of `neosophie/Qwen3-ASR-1.7B-JA` | passed as `MODEL_WEIGHTS_DIR` |
+| `MODEL_NAME` | `Qwen3-ASR-1.7B-JA` | used for both the launch and the canary, so they cannot drift apart |
+| `CANARY_WAV` | `$HOME/real_ja.wav` | the clip from "The clip to check with" above |
+| `TTSMI` | `$(command -v tt-smi)`, else `$HOME/ttvenv/bin/tt-smi` | |
+| `LOG` | `$HOME/asr_supervisor.log` | |
+
+The unit file sets `TTIS` and nothing else, because the rest resolve correctly
+for a service running as `ubuntu` on this host. Override there when they do
+not.
+
 ### What has and has not been verified
 
 An end-to-end recovery was demonstrated once on the **original** board: induced

@@ -884,3 +884,41 @@ def test_the_readme_accounts_for_the_skipped_plugin_test():
     assert "greater than max allowed: 20" in readme, (
         "keep the server's own message, so the skip can be told from a failure"
     )
+
+
+def test_the_readme_documents_every_supervisor_override():
+    """The supervisor's knobs were only discoverable by reading the script.
+
+    Every path it uses is overridable and pre-checked, but none of the variable
+    names appeared in the runbook -- including that the checkout is `TTIS`,
+    while the runbook itself exports `TT_INFERENCE_SERVER` for the same tree.
+    Someone setting the runbook's name and expecting the service to follow gets
+    the default instead.
+
+    The list is derived from the script so a new knob fails until documented.
+    """
+    import re
+
+    supervisor = (
+        get_repo_root_path() / "scripts" / "qwen3_asr" / "asr_supervisor.sh"
+    ).read_text()
+    # assignments of the form VAR="${VAR:-default}" are the overridable ones
+    knobs = set(re.findall(r'^([A-Z_]+)="\$\{\1:-', supervisor, re.M))
+    assert knobs, "the supervisor does use ${VAR:-default}; keep this meaningful"
+
+    readme = _readme()
+    for knob in sorted(knobs):
+        assert knob in readme, (
+            f"{knob} is overridable in asr_supervisor.sh but undocumented; a "
+            "reader cannot know it exists"
+        )
+
+
+def test_the_readme_warns_that_the_checkout_variable_is_named_differently():
+    """TTIS vs TT_INFERENCE_SERVER is a silent-default trap."""
+    readme = _readme()
+    assert "Not** `TT_INFERENCE_SERVER`" in readme or (
+        "TTIS" in readme and "TT_INFERENCE_SERVER" in readme
+    )
+    body = readme[readme.index("## Install") :]
+    assert "TTIS" in body, "the Install section is where a deployer looks"
