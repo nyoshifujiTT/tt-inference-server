@@ -111,18 +111,23 @@ def test_the_runbook_records_why_a_mixed_track_corpus_is_excluded():
     assert "mixed track" in readme
 
 
-def test_the_runbook_warns_against_running_measurements_concurrently():
-    """Otherwise the fail count looks like a regression when it is queueing.
+def test_the_runbook_says_to_discard_the_first_corpus_run():
+    """Otherwise a warm-up artefact reads as a regression.
 
-    --concurrency 4 already saturates max_num_seqs, so a second client pushes
-    requests past the eval's 120 s timeout. TED reported 19 failures when run
-    alongside the throughput probes and 15 on its own, with CER 0.1002 either
-    way -- a reader who saw 19 would reasonably suspect the model.
+    The first TED pass on a freshly healthy server reported 19 failures; the
+    second on the same server reported the steady 15. What moves is p99
+    (16.637 s vs 8.847 s) -- kernel compilation and cache warm-up push the tail
+    past the eval's 120 s timeout. corpus_cer is unaffected (0.1000 vs 0.1002)
+    because it is computed over the clips that returned.
     """
     readme = _read(README)
-    assert "one measurement at a time" in readme
-    assert "120 s timeout" in readme or "120 s" in readme
-    assert "19 failures" in readme and "15 on its own" in readme
+    assert "Discard the first corpus run" in readme
+    # the sentence wraps in the source, so normalise whitespace before matching
+    flat = " ".join(readme.split())
+    assert "run one measurement at a time" in flat
+    # the evidence, so the next reader can tell warm-up from a real regression
+    assert "16.637" in readme and "8.847" in readme, "keep the p99 pair on record"
+    assert "490 / 19" in readme and "494 / 15" in readme
 
 
 def test_the_runbook_explains_the_fifteen_expected_ted_failures():

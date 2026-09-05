@@ -427,12 +427,22 @@ python3 reference_config/evals/asr_ja_eval.py --host http://127.0.0.1:8110 \
   --manifest <corpus>/manifest.jsonl --concurrency 4 --output ted.json
 ```
 
-**Run one measurement at a time against a server.** `--concurrency 4` matches
-`max_num_seqs`, so the queue is already saturated; adding a second client makes
-requests wait behind the first run's and some cross the eval's 120 s timeout.
-That inflates `fail` without changing `corpus_cer`, which is computed over the
-successful clips. Observed on TED: 19 failures when run alongside the
-throughput probes, 15 on its own, with CER 0.1002 either way.
+**Discard the first corpus run after a restart, and run one measurement at a
+time.** `--concurrency 4` matches `max_num_seqs`, so the queue is already
+saturated: a second client makes requests wait, and the first run on a fresh
+server also pays for kernel compilation and cache warm-up on top. Either way
+some clips cross the eval's 120 s timeout, which inflates `fail` without moving
+`corpus_cer` -- that is computed over the clips that did return.
+
+Measured on TED against one server, back to back:
+
+| run | ok / fail | p50 | p99 | CER |
+|---|---|---|---|---|
+| first after `/health` turns 200 | 490 / 19 | 3.363 s | **16.637 s** | 0.1000 |
+| second, same server | 494 / 15 | 3.230 s | 8.847 s | **0.1002** |
+
+The p99 is what moves; the extra 4 failures are its tail crossing the timeout.
+Reaching the steady 15 needs no restart, just a second pass.
 
 On TED those 15 are expected and are not a model result. They are manifest
 artifacts -- zero-length wavs, which the server rejects:
