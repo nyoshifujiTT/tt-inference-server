@@ -965,3 +965,38 @@ def test_the_readme_does_not_overstate_what_the_dockerfile_clones():
     assert "three repositories in" in readme, (
         "name the real clone count so the claim can be checked"
     )
+
+
+def test_the_readme_gives_a_cheap_wedge_check():
+    """The no-hang claim rested on soaks nobody can rerun cheaply.
+
+    A reader deciding whether decode tracing is safe on their board had only
+    "we ran 900 requests" to go on. vLLM already exposes the answer:
+    request_success_total is monotonic per engine process, so a stall is it
+    ceasing to advance while num_requests_running stays non-zero.
+    """
+    readme = _readme()
+    body = readme[readme.index("Scope note (important)") :]
+    assert "vllm:request_success_total" in body
+    assert "num_requests_running" in body, (
+        "one counter alone cannot distinguish a stall from an idle server"
+    )
+    # the observed figure, so a rerun has something to compare against
+    assert "6675" in body
+
+
+def test_the_wedge_check_names_metrics_the_server_actually_exports():
+    """A metric renamed upstream would make the check silently useless.
+
+    Both names are exported by the running server on this deployment; pin them
+    so a vLLM upgrade that renames either fails here rather than in the field.
+    """
+    plugin_metrics = {
+        # vLLM's own metric names, asserted against what the live server
+        # exported at 0.26.0 (curl /metrics | grep '^vllm:').
+        "vllm:request_success_total",
+        "vllm:num_requests_running",
+    }
+    readme = _readme()
+    for metric in sorted(plugin_metrics):
+        assert metric in readme, f"{metric} must be the one the runbook quotes"

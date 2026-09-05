@@ -400,6 +400,21 @@ fast decode path (`trace_mode=decode_only`, `QWEN3ASR_DECODE_TRACE=1`); set
 `QWEN3ASR_DECODE_TRACE=0` to fall back to untraced decode on any board where the
 hang does reproduce.
 
+The soaks were deliberate; the accumulated evidence since is larger. Read the
+counter off a server that has been through the eval and benchmark suites:
+
+```
+$ curl -s http://127.0.0.1:8110/metrics | grep '^vllm:request_success_total'
+vllm:request_success_total{...,finished_reason="stop",...} 6675.0
+```
+
+6675 transcriptions finished in one engine process -- TED 509 and MagicHub 600
+several times over, plus the benchmark batches -- with decode tracing on, no
+restart, and no `potential hang` / `unrecoverable` line in the container log.
+That counter is the cheapest wedge check there is: it is monotonic per process,
+so a restart resets it, and a stall shows up as it ceasing to advance while
+`vllm:num_requests_running` stays non-zero.
+
 `asr_supervisor.sh` remains as defense-in-depth: it keeps the ASR server
 available in production the same way the Qwen3-Embedding fullbench supervisor
 does on this hardware, so a wedge from any residual platform hang still
