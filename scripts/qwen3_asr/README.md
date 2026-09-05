@@ -167,7 +167,22 @@ promotion cannot produce this entry. The entry below is therefore added by the
 patch and reverted straight after, never committed. The same shape was used for
 the pyannote bring-up on this repo.
 
-Apply, build, then restore -- the recipe PR#4837 established:
+Apply, build, then restore. The recipe comes from a review comment on PR #4837
+(`issuecomment-5390617037`), not from that PR's merged diff -- the commit
+itself only adds Qwen3.5/3.6-27B specs. There it rewrote two existing pins:
+
+```
+git apply <<'EOF'
+diff --git a/workflows/model_specs/prod/llm.yaml b/workflows/model_specs/prod/llm.yaml
+@@ -1192,7 +1192,7 @@ templates:
+   tt_metal_commit: "de59f8a"
+-  vllm_commit: "03fa3af"
++  vllm_commit: "b95c0501e62f"
+EOF
+```
+
+A bring-up has no prod entry to rewrite, so the same shape is used to add one
+temporarily -- as the pyannote bring-up on this repo did:
 
 ```
 cd $TT_INFERENCE_SERVER

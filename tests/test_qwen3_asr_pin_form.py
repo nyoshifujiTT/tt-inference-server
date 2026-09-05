@@ -32,10 +32,22 @@ def _patch_block(readme):
     return readme[start : readme.index("\nPATCH\n")]
 
 
-def test_tt_metal_commit_is_a_full_sha():
-    match = re.search(r'^\+  tt_metal_commit: "([0-9a-f]+)"', _readme(), re.M)
+def _pinned_metal(readme):
+    """tt_metal_commit as set by the runbook's own patch block.
+
+    Scoped deliberately: the section above quotes the original PR #4837 recipe,
+    which carries its own "+  ..._commit:" lines. A whole-file search would
+    report whichever came first.
+    """
+    match = re.search(
+        r'^\+  tt_metal_commit: "([0-9a-f]+)"', _patch_block(readme), re.M
+    )
     assert match, "the runbook patch must set tt_metal_commit"
-    pin = match.group(1)
+    return match.group(1)
+
+
+def test_tt_metal_commit_is_a_full_sha():
+    pin = _pinned_metal(_readme())
     assert len(pin) == 40, (
         f"tt_metal_commit is {len(pin)} chars; it must be the full 40-char SHA, "
         "or ls-remote|grep against upstream can resolve it to another object"
@@ -45,7 +57,7 @@ def test_tt_metal_commit_is_a_full_sha():
 def test_build_metal_commit_matches_the_pin_exactly():
     """list_image_combinations filters with ==, not a prefix match."""
     readme = _readme()
-    pin = re.search(r'^\+  tt_metal_commit: "([0-9a-f]+)"', readme, re.M).group(1)
+    pin = _pinned_metal(readme)
     flag = re.search(r"--build-metal-commit (\S+)", readme)
     assert flag, "the build command must be documented"
     assert flag.group(1) == pin, (
@@ -57,7 +69,7 @@ def test_build_metal_commit_matches_the_pin_exactly():
 def test_the_image_tags_carry_the_same_pin():
     """get_image_tags interpolates the pin verbatim into both tags."""
     readme = _readme()
-    pin = re.search(r'^\+  tt_metal_commit: "([0-9a-f]+)"', readme, re.M).group(1)
+    pin = _pinned_metal(readme)
 
     base = re.search(r"ci-build\.tags=local/tt-metal/tt-metalium/\S+?:(\S+?)\s", readme)
     assert base, "the bake command must tag the base image"

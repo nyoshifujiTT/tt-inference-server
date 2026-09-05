@@ -78,8 +78,12 @@ def test_readme_pins_agree_with_the_runbook_tag():
 
 def _patched_pins(readme):
     """Return (tt_metal_commit, vllm_commit) as set by the runbook's patch."""
-    metal = re.search(r'^\+  tt_metal_commit: "([0-9a-f]{7,})"', readme, re.M)
-    vllm = re.search(r'^\+  vllm_commit: "([0-9a-f]{7,})"', readme, re.M)
+    # Scope to the runbook's own patch block. The section above it quotes the
+    # original PR #4837 recipe, which also contains a "+  vllm_commit:" line;
+    # searching the whole file picked that up and reported the wrong pin.
+    block = readme[readme.index("git apply <<'PATCH'") : readme.index("\nPATCH\n")]
+    metal = re.search(r'^\+  tt_metal_commit: "([0-9a-f]{7,})"', block, re.M)
+    vllm = re.search(r'^\+  vllm_commit: "([0-9a-f]{7,})"', block, re.M)
     assert metal and vllm, "the patch must add both release pins"
     return metal.group(1), vllm.group(1)
 
@@ -1048,3 +1052,30 @@ def test_the_readme_cites_the_issue_that_matches_the_signature():
         "#45052 is deterministic and board-specific; presenting it as the same "
         "failure overstates how well this hang is understood upstream"
     )
+
+
+def test_the_readme_attributes_the_patch_recipe_correctly():
+    """"the recipe PR#4837 established" pointed at the wrong artifact.
+
+    PR #4837 (e8da7006d) adds Qwen3.5-27B and Qwen3.6-27B specs -- three files,
+    model_spec.py plus two catalogs -- and contains no `git apply` at all. The
+    recipe came from a review comment on it. A reader who opened the merged
+    diff looking for the procedure would find specs and conclude the runbook
+    was wrong about something more important.
+    """
+    readme = _readme()
+    assert "review comment on PR #4837" in readme
+    assert "issuecomment-" in readme, "point at the comment, not just the PR"
+    assert "not from that PR's merged diff" in readme
+
+
+def test_the_readme_shows_how_the_original_recipe_differed():
+    """It rewrote existing pins; a bring-up has none, so it adds an entry.
+
+    Without that contrast the reader cannot tell whether deviating from the
+    quoted original is a mistake or the point.
+    """
+    readme = _readme()
+    assert "no prod entry to rewrite" in readme
+    # the original's shape, so the difference is visible rather than asserted
+    assert 'vllm_commit: "03fa3af"' in readme
