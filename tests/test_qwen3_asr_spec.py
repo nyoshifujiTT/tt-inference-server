@@ -1078,4 +1078,11 @@ def test_the_readme_shows_how_the_original_recipe_differed():
     readme = _readme()
     assert "no prod entry to rewrite" in readme
     # the original's shape, so the difference is visible rather than asserted
-    assert 'vllm_commit: "03fa3af"' in readme
+    quoted = readme[readme.index("review comment on PR #4837") :]
+    quoted = quoted[: quoted.index("A bring-up has no prod entry")]
+    # Real commit ids as the comment carried them. Blurring either to a
+    # placeholder loses the point: the original *rewrote* pins that were
+    # already there, which is exactly what a bring-up cannot do.
+    assert '-  vllm_commit: "03fa3af"' in quoted
+    assert '+  vllm_commit: "b95c0501e62f"' in quoted
+    assert 'tt_metal_commit: "de59f8a"' in quoted
