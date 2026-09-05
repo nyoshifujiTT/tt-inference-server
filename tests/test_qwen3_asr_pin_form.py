@@ -114,3 +114,31 @@ def test_the_readme_says_how_to_confirm_an_exclusion():
     body = body[body.index("Why the pin may lag the branch head") :]
     assert "grep -rn" in body
     assert "models/demos/audio/qwen3_asr/tt/" in body
+
+
+def test_every_shell_variable_the_runbook_cds_into_is_defined():
+    """`cd $VAR` with VAR unset lands in $HOME and the next command runs there.
+
+    The runbook cd'd into $TT_METAL_HOME, $TT_INFERENCE_SERVER and
+    $VLLM_TT_PLUGIN without ever saying what they are. Following it literally
+    runs `docker buildx bake` and `pytest tests/tt` from the wrong directory.
+    """
+    import re
+
+    readme = _readme()
+    used = set(re.findall(r"cd \$([A-Z_]+)", readme))
+    assert used, "the runbook does use cd $VAR; keep this check meaningful"
+
+    for var in sorted(used):
+        assert re.search(rf"^export {var}=", readme, re.M), (
+            f"${var} is used with cd but never exported in the runbook"
+        )
+
+
+def test_the_runbook_names_the_branch_for_each_checkout():
+    """Three trees, one branch name; a reader on the wrong one gets no error."""
+    readme = _readme()
+    head = readme[: readme.index("## Serving with")]
+    assert "nyoshifujiTT/qwen3-asr-17b_p150x1" in head
+    for repo in ("tt-metal", "tt-inference-server", "vllm-tt-plugin"):
+        assert repo in head, f"{repo} must be listed among the checkouts"

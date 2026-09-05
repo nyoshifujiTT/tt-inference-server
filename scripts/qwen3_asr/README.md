@@ -1,5 +1,19 @@
 # Qwen3-ASR TT p150 server supervisor
 
+## Checkouts this runbook refers to
+
+Three trees are used below, always by these names. Export them before following
+anything else -- the commands `cd` into them and will otherwise land wherever
+the variable is empty:
+
+```
+export TT_METAL_HOME=/path/to/tt-metal                  # nyoshifujiTT/tt-metal
+export TT_INFERENCE_SERVER=/path/to/tt-inference-server # this repo
+export VLLM_TT_PLUGIN=/path/to/vllm-tt-plugin           # nyoshifujiTT/vllm-tt-plugin
+```
+
+All three carry the same branch, `nyoshifujiTT/qwen3-asr-17b_p150x1`.
+
 ## Serving with `run.py --docker-server`
 
 `--docker-server` is the standard delivery path, but Qwen3-ASR has no published
