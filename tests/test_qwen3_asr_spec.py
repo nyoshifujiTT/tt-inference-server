@@ -998,7 +998,13 @@ def test_the_readme_does_not_treat_a_printed_filename_as_a_verdict():
     assert "not yet a verdict" in body, (
         "a printed filename only starts the check; say so"
     )
-    assert "both" in body, "state that a file must survive both checks"
+    # The sentence, not the word. `"both" in body` was also satisfied by "both
+    # commits rewrote comment blocks" two paragraphs down, so removing the
+    # statement that the checks are a sequence left this green.
+    flat = " ".join(body.split())
+    assert "Only a file that survives *both* forces the pin to move." in flat, (
+        "state that a file must survive both checks, not just one"
+    )
     # the worked example, named, so the current output is recognisable
     assert "tt/generator_vllm.py" in body, (
         "name the file the check prints today, or its output looks like a fault"
