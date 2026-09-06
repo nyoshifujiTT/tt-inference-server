@@ -25,8 +25,35 @@ locally from the bring-up forks.
 tt-metal's `dockerfile/Dockerfile` declares its tool/venv layers as
 `FROM scratch` stubs that Bake substitutes; a plain `docker build` fails with
 `COPY --from=cmake-layer /install/: lstat /install: no such file or directory`.
-`scripts/build_docker_images.py` issues a plain `docker build` for the base, so
-build the base with Bake first and tag it the way the script expects:
+
+`scripts/build_docker_images.py` knows this -- `build_tt_metal_base_image()`
+runs `docker buildx bake ... ci-build` itself, with the same comment about the
+`FROM scratch` stubs. So the reason to build the base by hand is **not** that
+the script would use a plain `docker build`; it would not.
+
+The reason is where it clones from:
+
+```
+git clone --depth 1 https://github.com/tenstorrent/tt-metal.git
+```
+
+That is **upstream**, which does not carry this bring-up's branch, so the
+subsequent `git checkout <pin>` cannot find the commit and the base build
+fails. (Same root cause as the short-pin trap below -- the resolver also only
+consults upstream.)
+
+Building it by hand sidesteps that, because `build_tt_metal_base_image()`
+returns early when the tag is already present:
+
+```
+if check_image_exists_local(tt_metal_base_tag):
+    logger.info(f"TT-Metal base image already exists: {tt_metal_base_tag}")
+    return True
+```
+
+So build the base with Bake first, from your fork checkout, and tag it exactly
+the way the script expects -- the pre-existing tag is what stops it from trying
+the upstream clone at all:
 
 ```
 cd $TT_METAL_HOME

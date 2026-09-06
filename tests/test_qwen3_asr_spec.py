@@ -329,6 +329,56 @@ def test_the_readme_does_not_present_librispeech_wer_as_runnable():
     )
 
 
+def _build_script():
+    return open(
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "build_docker_images.py")
+    ).read()
+
+
+def test_the_readme_gives_the_real_reason_the_base_is_built_by_hand():
+    """"the script issues a plain docker build" is false, and misleads.
+
+    build_tt_metal_base_image() runs `docker buildx bake ... ci-build` itself,
+    carrying the same FROM-scratch explanation. A reader who checked would find
+    the stated reason contradicted and could reasonably drop the manual step.
+
+    The step is still required, for a different reason: the script clones
+    https://github.com/tenstorrent/tt-metal.git -- upstream, which does not
+    have this branch -- so the checkout of our pin fails. Pre-building the tag
+    makes the function return before it ever clones.
+    """
+    script = _build_script()
+    readme = _readme()
+
+    # the premise: the script really does use bake, and really does clone upstream
+    assert '"bake",' in script, "the script bakes; the old README claim is stale"
+    assert "https://github.com/tenstorrent/tt-metal.git" in script
+    assert "if check_image_exists_local(tt_metal_base_tag):" in script, (
+        "the early return is what makes the manual build effective"
+    )
+
+    body = readme[readme.index("tt-metal's `dockerfile/Dockerfile` declares") :]
+    body = body[: body.index("The script then sees the base locally")]
+    flat = " ".join(body.split())
+
+    assert "issues a plain `docker build` for the base" not in flat, (
+        "the script bakes; do not state the opposite"
+    )
+    # Require it where the baking is asserted, not merely somewhere in the
+    # section: the name recurs in the early-return paragraph, so a section-wide
+    # check still passed with the attribution reduced to "it".
+    bakes = flat[: flat.index("The reason is where it clones from")]
+    assert "`build_tt_metal_base_image()` runs `docker buildx bake" in bakes, (
+        "attribute the bake to the function, so the claim can be checked"
+    )
+    assert "upstream" in flat and "does not carry this bring-up's branch" in flat, (
+        "give the real reason: the clone is from upstream"
+    )
+    assert "check_image_exists_local" in flat, (
+        "explain why a pre-built tag suppresses the clone"
+    )
+
+
 def _unit_file():
     return open(
         os.path.join(
