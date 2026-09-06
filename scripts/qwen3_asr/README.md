@@ -375,8 +375,10 @@ MODEL_SPECS_ENV=dev python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 \
 catalog defaults to prod, which has no Qwen3-ASR entry, and `run.py` would exit
 saying the model is unknown.
 
-`/health` turns 200 after ~12 minutes. Requests use the HF repo id, not the
-spec's model name:
+`/health` turns 200 in roughly 8-12 minutes; timed at 460 s (7.7 min) on the
+delivery p150, and the supervisor's startup budget is sized for the upper end
+of that range rather than for the figure you happen to measure. Requests use
+the HF repo id, not the spec's model name:
 
 ```
 curl -X POST http://127.0.0.1:8110/v1/audio/transcriptions \

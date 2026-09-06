@@ -169,10 +169,10 @@ launch_server() {
 
 wait_healthy() {
   # Startup is slow: the adapter loads weights and captures the decode trace
-  # before serving. Measured on the delivery p150 at 7-12 minutes (README quotes
-  # ~12), so the old 5-minute budget expired every time -- the supervisor would
-  # declare the server dead and start power-cycling a board that was merely
-  # still warming up. Allow 20 minutes.
+  # before serving. Measured on the delivery p150 at 7-12 minutes (460 s on one
+  # timed restart), so the old 5-minute budget expired every time -- the
+  # supervisor would declare the server dead and start power-cycling a board
+  # that was merely still warming up. Allow 20 minutes.
   local deadline=$(( $(date +%s) + 20 * 60 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 5

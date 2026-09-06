@@ -208,6 +208,36 @@ def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
     assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
 
 
+def test_the_readme_and_supervisor_agree_on_the_startup_time():
+    """The README said "~12 minutes"; the script said 7-12 and sized for 20.
+
+    Timed on the delivery p150, /health turned 200 at 460 s -- 7.7 min. A
+    single "~12" figure is wrong in both directions: it overstates a normal
+    start, and it reads as a ceiling when the supervisor deliberately allows 20
+    minutes because the observed range has an upper end it must not trip over.
+
+    Pin the range and the measured point in both places, so a future timing
+    that lands at one end does not get written up as the new single truth.
+    """
+    readme = _readme()
+    supervisor = _supervisor()
+
+    flat = " ".join(readme.split())
+    assert "8-12 minutes" in flat or "7-12 minutes" in flat, (
+        "quote startup as a range; a single figure is wrong at both ends"
+    )
+    assert "460 s" in flat, "record the timed measurement behind the range"
+
+    # the script's own budget must stay above the range, and say why
+    assert "7-12 minutes" in supervisor
+    assert "20 * 60" in supervisor, (
+        "the budget has to exceed the range's upper end, not match a lucky run"
+    )
+    assert "460 s" in supervisor, (
+        "carry the same measurement, so the two cannot drift apart silently"
+    )
+
+
 def test_the_readme_does_not_treat_a_printed_filename_as_a_verdict():
     """"If either prints anything, bump that pin" contradicts the next check.
 
