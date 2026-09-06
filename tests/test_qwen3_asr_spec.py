@@ -252,6 +252,54 @@ def test_the_readme_tells_you_to_look_for_work_a_merge_dropped():
     )
 
 
+def test_the_dropped_work_scan_is_usable_in_every_repo():
+    """`tests/` is not the test root everywhere, and a wrong root finds nothing.
+
+    tt-metal keeps this bring-up's tests under
+    models/demos/audio/qwen3_asr/tests, so a scan hardcoded to `tests/` there
+    matches no files and prints nothing -- indistinguishable from a clean
+    result. The scan is only trustworthy if the root is set on purpose.
+    """
+    body = _dropped_work_section()
+
+    # Both roots, as assignments: naming only tt-metal's leaves the reader to
+    # guess what the other two repos use, and a bare "TESTS=" is satisfied by
+    # either line alone.
+    assert "TESTS=tests" in body, "give the root the other two repos use"
+    assert "TESTS=models/demos/audio/qwen3_asr/tests" in body, (
+        "give tt-metal's root, which is the one that differs"
+    )
+    assert "silently finds nothing if it is wrong" in body, (
+        "warn that a wrong root looks like success"
+    )
+    # the scan must use the variable rather than the literal
+    assert 'grep -rq "def $fn" "$TESTS/"' in body, (
+        "the grep has to honour TESTS, or parameterising the filter is pointless"
+    )
+    # and the tt-metal-specific range, since its full log is unusable
+    assert "yito/qwen3_asr_pr" in body, (
+        "say how to bound the history on tt-metal"
+    )
+    # resolved by ref, not by a hardcoded remote name: the branch is under
+    # upstream/ in one checkout and origin/ in another, and the wrong one
+    # aborts the scan with "fatal: ambiguous argument" rather than skipping
+    assert "git rev-parse --verify -q" in body, (
+        "resolve the base defensively; a bad revision aborts the scan"
+    )
+    # Both spellings must appear in the prose that explains why, not only
+    # inside the snippet: the explanation is what stops someone "simplifying"
+    # the rev-parse fallback back to a single hardcoded ref.
+    reason = body[body.index("Resolve the") :]
+    reason = reason[: reason.index("```")]
+    for ref in ("upstream/yito/qwen3_asr_pr", "origin/yito/qwen3_asr_pr"):
+        assert ref in reason, f"say that {ref} is one of the spellings seen"
+    assert "fatal: ambiguous" in reason, (
+        "name the failure a wrong ref produces, which is an abort not a skip"
+    )
+    # results from all three repos, so 'clean' is a claim about the whole set
+    assert "2 in tt-metal" in body and "0 in the plugin" in body
+
+
 def test_the_readme_records_the_compilation_cost_on_the_pinned_image():
     """209 s of the startup window goes into an unused compiled graph.
 
