@@ -192,8 +192,11 @@ def test_the_readme_covers_a_comment_only_change_to_a_served_module():
     readme = _readme()
     body = readme[readme.index("Why the pin may lag the branch head") :]
     assert "changes only comments" in body
-    # the check has to strip comment-only diff lines, not just look at names
-    assert "grep -vE '^[+-]#" in body
+    # The check has to strip comment-only diff lines, not just look at names.
+    # Requiring the whitespace class rather than a bare '^[+-]#': the anchored
+    # form only matched column 0, so indented comments -- i.e. every comment
+    # inside a function -- were reported as real code changes.
+    assert "grep -vE '^[+-][[:space:]]*(#|$)'" in body
     assert "Anything printed is a real code change" in body
 
 
