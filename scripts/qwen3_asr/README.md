@@ -1096,11 +1096,27 @@ below). These come from the image at the previous pin,
 `0.21.0-e7929dcf5dcf...-c0c4842`, which differs only in the served decoder's
 weight-dtype plumbing and produces the same defaults:
 
-| | value |
-|---|---|
-| TED 509 clips | CER 0.1002, 494 ok / 15 download artifacts |
-| MagicHub 600 clips | CER 0.1668, 600 ok |
-| LibriSpeech 128 req | 128 ok, rtfx ~12.5, p50 ~2.1 s |
+| | accuracy | speed |
+|---|---|---|
+| TED 509 clips | CER 0.1002, 494 ok / 15 download artifacts | 1649.4 audio-s in 416.5 s wall = **3.96 audio-s/s**, p50 2.38 s |
+| MagicHub 600 clips | CER 0.1668, 600 ok | 1927.7 audio-s in 368.5 s wall = **5.23 audio-s/s**, p50 1.80 s |
+| LibriSpeech 128 req | 128 ok | rtfx **12.58**, p50 1.99 s |
+
+The corpus rows quote `throughput_audio_per_s` from `asr_ja_eval.py`; the
+LibriSpeech row quotes `rtfx` from `asr_openai_benchmark.py`. They are the same
+quantity under two names -- audio seconds transcribed per wall second -- and all
+three now divide by the duration measured from the submitted files. They used to
+divide by the server's `usage.seconds`, which is whole seconds and so rounds
+every clip up: TED read 1892.0 audio-s instead of 1649.4 and MagicHub 2212.0
+instead of 1927.7, inflating both corpus rows by ~15 %. Anything quoted from a
+run before that fix is high by that factor; the CERs are unaffected, because the
+duration never entered them.
+
+The three figures are not comparable to each other. LibriSpeech is 128 requests
+drawn from 32 short clips, so it re-sends the same audio and stays in cache; the
+corpora are one pass over 509 and 600 distinct clips whose lengths vary, and TED
+is the slowest because its clips are the longest. Compare a rerun against the
+same row, never across rows.
 
 And the serving-level timings the two probes report, 60 requests at
 `concurrency 4` on the FLEURS clip, so the cross-check can be judged:

@@ -14,6 +14,7 @@ under reference_config/; this one belongs next to it.
 
 import ast
 import os
+import re
 
 HERE = os.path.dirname(__file__)
 EVAL = os.path.join(HERE, "..", "reference_config", "evals", "asr_ja_eval.py")
@@ -73,10 +74,84 @@ def test_the_eval_sends_the_customer_request_parameters():
 
 
 def test_the_eval_reports_the_metrics_the_runbook_quotes():
-    """corpus_cer is the figure the acceptance table cites."""
+    """The eval must emit every figure the acceptance table cites."""
     src = _read(EVAL)
     for key in ("corpus_cer", "rtf_sum_lat_over_audio", "throughput_audio_per_s"):
         assert key in src
+
+
+def test_the_results_table_records_corpus_speed_not_only_accuracy():
+    """The corpora were accepted on CER alone; their speed went unrecorded.
+
+    asr_ja_eval.py reports throughput_audio_per_s for every run and the table
+    kept only corpus_cer, so a rerun that transcribed correctly at half the
+    speed matched the runbook exactly. The one speed figure that was recorded --
+    LibriSpeech rtfx -- comes from a different harness on a different workload,
+    so it cannot stand in for the corpora.
+    """
+    readme = _read(README)
+    row_ted = [ln for ln in readme.splitlines() if ln.startswith("| TED 509 clips")]
+    row_magic = [ln for ln in readme.splitlines() if ln.startswith("| MagicHub 600 clips")]
+    assert row_ted and row_magic, "both corpus rows must be in the results table"
+    for row in (row_ted[0], row_magic[0]):
+        assert "audio-s/s" in row, f"record the throughput for this corpus: {row}"
+        assert "p50" in row, f"and a latency percentile: {row}"
+
+
+def test_the_recorded_corpus_throughput_is_consistent_with_its_own_inputs():
+    """audio-s / wall-s must equal the quoted rate, or one of them is stale."""
+    readme = _read(README)
+    for name in ("TED 509 clips", "MagicHub 600 clips"):
+        row = next(ln for ln in readme.splitlines() if ln.startswith(f"| {name}"))
+        got = re.search(
+            r"([\d.]+) audio-s in ([\d.]+) s wall = \*\*([\d.]+) audio-s/s\*\*", row
+        )
+        assert got, f"quote the inputs alongside the rate: {row}"
+        audio, wall, rate = (float(g) for g in got.groups())
+        assert abs(audio / wall - rate) < 0.01, (
+            f"{name}: {audio}/{wall} = {audio / wall:.3f}, table says {rate}"
+        )
+
+
+def test_the_table_says_the_three_speed_figures_are_not_comparable():
+    """They differ in harness and in workload, so a reader will compare them.
+
+    LibriSpeech re-sends 32 downloaded clips to fill 128 requests
+    (``samples[idx % len(samples)]``), while the corpora make one pass over 509
+    and 600 distinct clips. Putting 3.96 next to 12.58 without that note reads
+    as a threefold regression.
+    """
+    readme = _read(README)
+    body = readme[readme.index("| TED 509 clips") :]
+    body = body[: body.index("And the serving-level timings")]
+    flat = " ".join(body.split())
+    assert "not comparable to each other" in flat, "say the three rows are not one series"
+    assert "re-sends the same audio" in flat, "name why the LibriSpeech row is higher"
+    assert "Compare a rerun against the same row" in flat, "and what to do instead"
+
+
+def test_the_benchmark_really_reuses_its_downloaded_clips():
+    """The note above is only true while the benchmark cycles its samples."""
+    src = _read(
+        os.path.join(HERE, "..", "reference_config", "benchmarking", "asr_openai_benchmark.py")
+    )
+    assert "samples[idx % len(samples)]" in src, (
+        "the runbook explains the LibriSpeech row by this reuse; if it stops "
+        "cycling, the explanation stops holding"
+    )
+
+
+def test_the_table_warns_that_pre_fix_speed_figures_are_high():
+    """Older runs are quoted in worklogs and will be compared against these."""
+    readme = _read(README)
+    body = readme[readme.index("| TED 509 clips") :]
+    body = body[: body.index("And the serving-level timings")]
+    flat = " ".join(body.split())
+    assert "1892.0" in flat and "2212.0" in flat, "name the superseded totals"
+    assert "1649.4" in flat and "1927.7" in flat, "and the measured ones"
+    assert "CERs are unaffected" in flat, (
+        "say the accuracy conclusions did not move, or the fix reads as invalidating them"
+    )
 
 
 def test_the_runbook_says_how_to_build_the_two_manifests():
