@@ -731,8 +731,10 @@ stage works as written; on this one, a wedge that survives `tt-smi -r` needs a
 human.
 
 `qwen3asr-supervisor.service` runs the supervisor under systemd so it
-auto-starts on boot — including after a power-cycle recovery — making the
-recovery loop fully self-sustaining.
+auto-starts on boot — including after a power-cycle recovery, on a host where
+that stage can run. Given the missing BMC above, on this host the loop is
+self-sustaining for anything `tt-smi -r` clears, and for a reboot performed by
+hand; it is not self-sustaining for a wedge that needs a hardware reset.
 
 ### The plugin's server-facing tests
 

@@ -329,6 +329,27 @@ def test_the_readme_does_not_present_librispeech_wer_as_runnable():
     )
 
 
+def test_the_readme_does_not_call_the_recovery_loop_fully_self_sustaining():
+    """It contradicted the BMC finding two paragraphs above it.
+
+    "making the recovery loop fully self-sustaining" was written before the
+    power-cycle stage was known to be unavailable here. Left in place, the
+    reader gets both claims and no way to tell which is current.
+    """
+    readme = _readme()
+    assert "fully self-sustaining" not in readme, (
+        "the power-cycle stage cannot run on this host; scope the claim"
+    )
+    body = readme[readme.index("`qwen3asr-supervisor.service` runs the supervisor") :]
+    body = body[: body.index("\n### ")]
+    flat = " ".join(body.split())
+    assert "not self-sustaining for a wedge that needs a hardware reset" in flat, (
+        "say which case is not covered"
+    )
+    # and what it does still cover, so this is not read as 'no recovery at all'
+    assert "self-sustaining for anything `tt-smi -r` clears" in flat
+
+
 def test_the_readme_says_the_power_cycle_fallback_is_unavailable_here():
     """Step 4's second stage cannot run on the delivery host.
 
