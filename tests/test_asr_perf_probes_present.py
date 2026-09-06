@@ -186,6 +186,43 @@ def test_the_runbook_documents_both_probes():
     assert "stream=false" in readme
 
 
+def test_the_runbook_does_not_explain_the_gap_with_the_disproved_reason():
+    """"the final chunk carries no new token" was a guess, and it was wrong.
+
+    The streaming column's 23.0 "tokens per request" was a frame tally, not a
+    token count, so the one-token gap against the non-streaming 24.0 had no
+    mechanism behind it -- the two quantities were simply different units that
+    happened to land close together. Leaving that sentence in place would let a
+    reader treat the columns as calibrated when they were not.
+    """
+    readme = _read(README)
+    flat = " ".join(readme.split())
+    # The phrase may survive only as a quotation of the retracted claim, which
+    # is how the correction names what it is correcting. It must not stand as
+    # the runbook's own explanation.
+    assert flat.count("final chunk carries no new token") <= 1, (
+        "the retracted explanation must appear at most once, as a quotation"
+    )
+    if "final chunk carries no new token" in flat:
+        i = flat.index("final chunk carries no new token")
+        assert "described a coincidence" in flat[i : i + 200], (
+            "the phrase may only appear where it is being retracted"
+        )
+
+
+def test_the_runbook_marks_the_stale_streaming_column():
+    """Numbers taken with the frame-counting probe must not read as current."""
+    readme = _read(README)
+    body = readme[readme.index("| decode TPS aggregate | 41.45") :]
+    assert "predates the token-count fix" in body, (
+        "say that the streaming throughput rows were measured in frames"
+    )
+    assert "A frame is not a token" in body
+    assert "re-measure the streaming column" in body, (
+        "and say what to do before comparing against them"
+    )
+
+
 def _defaults(src):
     """The literal each positional argument falls back to, keyed by variable."""
     out = {}

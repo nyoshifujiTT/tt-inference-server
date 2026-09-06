@@ -1034,13 +1034,28 @@ And the serving-level timings the two probes report, 60 requests at
 | decode TPS aggregate | 41.45 | 39.52 |
 | tokens per request | 24.0 | 23.0 |
 
-The two agree to within a few percent, which is the point of running both: the
-streaming column is measured the ordinary way and corroborates counters the
-customer's `stream=false` client cannot observe. It reads slightly slower
-because the client sees SSE framing and scheduling delay on top of what the
-counters attribute to decode, and it counts one fewer token per request (the
-final chunk carries no new token). Treat a gap of tens of percent, or the two
-columns moving in opposite directions, as a regression worth chasing.
+**The streaming column above predates the token-count fix and its three
+throughput rows are in the wrong unit.** It was produced by an
+`asr_perf_stream.py` that counted SSE frames and reported the tally as tokens.
+A frame is not a token: vLLM's stream generator
+(`vllm/entrypoints/speech_to_text/base/serving.py`) emits one frame per
+non-empty post-processed delta, which may carry more than one token, and with
+`stream_include_usage` it appends a usage-only frame carrying `choices=[]`.
+The `23.0` was therefore a frame count that happened to land near the token
+count, and the explanation once given for the gap -- "it counts one fewer token
+per request, the final chunk carries no new token" -- described a coincidence,
+not a mechanism. The probe now takes `completion_tokens` off the usage frame,
+which is the same quantity `vllm:generation_tokens_total` gives the
+non-streaming column, and scales the frame-gap TPOT by the measured
+tokens-per-frame so per-user TPS is in tokens.
+
+Running both is still the point: the streaming column is measured the ordinary
+way and corroborates counters the customer's `stream=false` client cannot
+observe. It reads slightly slower because the client sees SSE framing and
+scheduling delay on top of what the counters attribute to decode. Treat a gap
+of tens of percent, or the two columns moving in opposite directions, as a
+regression worth chasing -- and re-measure the streaming column with the fixed
+probe before comparing against the numbers above.
 
 The same CER, to four decimal places, has come out of every build of this model
 so far -- across the vLLM 0.24->0.26 upgrade, three separate image builds at the
