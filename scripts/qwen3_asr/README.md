@@ -985,7 +985,11 @@ The non-streaming probe exists because the customer's client sets
 have to be read off the server's own counters. The streaming probe measures the
 same quantities the ordinary way and is the cross-check on them.
 
-Measured on the delivery p150 with the image above:
+Measured on the delivery p150. **Not with the image the pins above name** --
+that one has not been built yet (see "No image exists at these pins yet"
+below). These come from the image at the previous pin,
+`0.21.0-e7929dcf5dcf...-c0c4842`, which differs only in the served decoder's
+weight-dtype plumbing and produces the same defaults:
 
 | | value |
 |---|---|

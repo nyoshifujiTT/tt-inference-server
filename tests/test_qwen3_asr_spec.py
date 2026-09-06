@@ -2295,6 +2295,32 @@ def test_the_readme_warns_against_exporting_arch_name_globally():
     assert "do not" in lowered and "global" in lowered, (
         "say plainly not to export it globally, or the note reads as an invitation"
     )
+def test_the_results_table_does_not_credit_the_unbuilt_image():
+    """"Measured ... with the image above" became false when the pin moved.
+
+    The pins above now name 60166e19d45, and no image has been built from it
+    (verified on the host: nothing in `docker images` carries that tag, and the
+    serving container runs 0.21.0-e7929dcf5dcf...-c0c4842). Attributing the
+    numbers to "the image above" credits an artifact that does not exist.
+
+    The figures are still good -- the difference is the served decoder's
+    weight-dtype plumbing, which does not move any default -- but the table has
+    to say which image produced them.
+    """
+    readme = _readme()
+    body = readme[readme.index("Measured on the delivery p150") :]
+    body = body[: body.index("| TED 509 clips")]
+    flat = " ".join(body.split())
+
+    assert "with the image above" not in flat or "Not with the image" in flat, (
+        "the pins above name an image that has not been built"
+    )
+    assert "e7929dcf5dcf" in flat, "name the image the numbers came from"
+    assert "same defaults" in flat, (
+        "say why the figures still stand, or this reads as invalidating them"
+    )
+
+
 def test_the_readme_admits_no_image_exists_at_the_current_pins():
     """The pin moved for a code change; the measurements predate it.
 
