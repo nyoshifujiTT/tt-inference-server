@@ -296,6 +296,92 @@ def test_the_dropped_work_scan_is_usable_in_every_repo():
     assert "fatal: ambiguous" in reason, (
         "name the failure a wrong ref produces, which is an abort not a skip"
     )
+
+
+def test_the_readme_does_not_present_librispeech_wer_as_runnable():
+    """WER 6.7288 came from a config upstream deleted.
+
+    Our lmms-eval entry lived in evals/eval_config.py, which went with the v1
+    workflows (#4678 / #4630). The successor catalog carries whisper entries
+    but no Qwen3-ASR one, and evals/lmms_eval_models/qwen3_asr_openai.py is now
+    an orphan -- nothing outside that directory references it.
+
+    Quoting the number without that context invites someone to try to
+    reproduce it and conclude the tree is broken.
+    """
+    readme = _readme()
+    body = readme[readme.index("An older run also had LibriSpeech WER") :]
+    body = body[: body.index("This table is a record")]
+    flat = " ".join(body.split())
+
+    assert "not reproducible on this tree" in flat, (
+        "say the figure cannot be re-measured here"
+    )
+    assert "evals/eval_config.py" in flat and "reference_config/evals/eval_config.py" in flat, (
+        "name both the deleted config and its successor"
+    )
+    assert "qwen3_asr_openai" in flat, "name the adapter that is now orphaned"
+    # and what running it again would take, so the note is actionable
+    assert "separate piece of work" in flat
+
+
+def test_the_librispeech_adapter_really_is_orphaned():
+    """Check the tree, not the prose -- and fail here if it gets rehomed.
+
+    If someone wires the adapter back into the successor catalog, the README's
+    "not reproducible" note becomes wrong and must be retired. Asserting the
+    orphan state makes that a test failure rather than stale documentation.
+    """
+    root = os.path.join(os.path.dirname(__file__), "..")
+
+    adapter = os.path.join(root, "evals", "lmms_eval_models", "qwen3_asr_openai.py")
+    if not os.path.isfile(adapter):
+        pytest.skip("the adapter has been moved or removed; revisit the README note")
+
+    successor = os.path.join(root, "reference_config", "evals", "eval_config.py")
+    catalog = open(successor).read()
+    assert "qwen3_asr_openai" not in catalog, (
+        "the adapter is referenced by the successor catalog now; the README's "
+        "'not reproducible' note is stale"
+    )
+
+
+def test_the_scan_covers_the_implementation_side_too():
+    """Scanning tests alone misses a file of ours deleted upstream.
+
+    The plugin's loss happened to take its test with it, so a test scan found
+    it. The reverse is possible and did occur here: upstream deleted
+    workflows/run_reports.py in #4630, taking our eval-only ttft fix with it,
+    and nothing failed because the v1 tests went too.
+
+    That one turned out to be obsoleted rather than lost -- functional_ttft is
+    gone from the repo entirely and the v2 audio path holds ttft as
+    Optional[float] behind an `is not None` filter instead of a dict subscript
+    -- but the scan had to exist to reach that conclusion at all.
+    """
+    body = _dropped_work_section()
+
+    flat = " ".join(body.split())
+
+    assert "The test scan alone is not enough" in flat, (
+        "say why a second scan is needed"
+    )
+    # the implementation scan, and it must exclude the test root it already covered
+    assert "FILE GONE" in body
+    assert 'grep -vE "^$TESTS/"' in body, (
+        "the implementation scan must skip what the test scan already did"
+    )
+    assert "[ -e \"$f\" ]" in body, "give the existence check, not a description"
+
+    # the worked example, with the verdict and the evidence behind it
+    assert "workflows/run_reports.py" in body
+    assert "functional_ttft" in body and "Optional[float]" in body, (
+        "record what was checked before writing the file off"
+    )
+    assert "obsoleted by the rewrite, not lost" in flat
+    assert "Do not restore the file" in flat, (
+        "state the action, or the next reader re-adds a file upstream deleted"
+    )
     # results from all three repos, so 'clean' is a claim about the whole set
     assert "2 in tt-metal" in body and "0 in the plugin" in body
 
@@ -729,12 +815,39 @@ def test_the_readme_backs_the_vllm_upgrade_with_measurements():
 
 
 def test_the_readme_does_not_claim_the_old_layout():
-    """Directories the merge removed must not be presented as current."""
+    """Directories the merge removed must not be presented as current.
+
+    Checked against the tree rather than from memory, because the original
+    list was wrong on all three counts:
+
+      evals/                  still exists -- reduced to lmms_eval_models/,
+                              which holds our orphaned qwen3_asr_openai
+                              adapter. Naming it is required, not forbidden.
+      benchmarking/           only a stale __pycache__ remains; no source.
+      workflows/model_spec.py still exists and is imported by
+                              reference_config/evals/eval_config.py and
+                              workflow_module/model_catalog.py.
+
+    So the rule cannot be "these strings must be absent". What matters is that
+    the README does not present the *old eval/benchmark layout* as the place
+    to run things, which the paths below cover.
+    """
     readme = _readme()
-    for gone in ("`evals/`", "`benchmarking/`", "workflows/model_spec.py`"):
-        assert gone not in readme, (
-            f"{gone} no longer exists after the upstream merge"
-        )
+    root = os.path.join(os.path.dirname(__file__), "..")
+
+    # Paths with no source left: mentioning them as somewhere to run is stale.
+    for gone in ("`benchmarking/asr_openai_benchmark.py`", "`evals/run_evals.py`"):
+        assert gone not in readme, f"{gone} has no source in the tree"
+        assert not os.path.exists(
+            os.path.join(root, gone.strip("`"))
+        ), f"{gone} exists again; this assertion is now wrong"
+
+    # The current homes must be the ones quoted.
+    assert "reference_config/evals/asr_ja_eval.py" in readme
+    assert "reference_config/benchmarking/asr_openai_benchmark.py" in readme
+
+    # And model_spec.py is current, so requiring its absence was simply false.
+    assert os.path.isfile(os.path.join(root, "workflows", "model_spec.py"))
 
 
 def test_the_readme_says_the_fork_is_deprecated():
