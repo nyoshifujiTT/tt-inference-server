@@ -503,6 +503,21 @@ vllm:request_success_total{...,finished_reason="stop",...} 6675.0
 6675 transcriptions finished in one engine process -- TED 509 and MagicHub 600
 several times over, plus the benchmark batches -- with decode tracing on, no
 restart, and no `potential hang` / `unrecoverable` line in the container log.
+
+**That figure is a high-water mark from one engine process, not a value to
+match.** The counter resets when the engine restarts, so a fresh server
+legitimately reads far lower; a later session measured 3064 after one pass of
+each suite. What carries over between sessions is the shape, not the number:
+
+- `error` and `abort` stay at `0.0` (they have on every run recorded here),
+- `stop` advances by exactly the requests you issued, and
+- no `potential hang` / `unrecoverable` appears in the container log
+  (`docker logs <container> | grep -cE 'potential hang|unrecoverable'` -> `0`).
+
+Checking the arithmetic is what makes it evidence rather than a big number:
+one pass of TED 509 + MagicHub 600 + benchmark 128, minus the 15 empty-wav
+failures, plus one golden clip, is +1223 -- which is what the delta was.
+
 That counter is the cheapest wedge check there is: it is monotonic per process,
 so a restart resets it, and a stall shows up as it ceasing to advance while
 `vllm:num_requests_running` stays non-zero.

@@ -1134,6 +1134,50 @@ def test_the_readme_gives_a_cheap_wedge_check():
     )
 
 
+def test_the_readme_does_not_present_the_counter_as_a_number_to_match():
+    """"compared line for line" is wrong for a per-process counter.
+
+    6675 was a high-water mark on one long-lived engine. The counter resets
+    with the process, so a healthy fresh server reads far lower -- 3064 after
+    one pass of each suite, measured. Presenting 6675 as the reference invites
+    reading a correct server as a regression.
+
+    What is actually reproducible is the shape: error/abort at 0.0, stop
+    advancing by exactly the requests issued, and no hang line in the log.
+    """
+    readme = _readme()
+    body = readme[readme.index("Scope note (important)") :]
+    assert "not a value to" in body, (
+        "say the figure is not a target, or a lower reading looks like a fault"
+    )
+    assert "resets" in body
+    # a second, much lower, healthy reading -- so "far lower" is concrete
+    assert "3064" in body, "give a measured low reading, not just the caveat"
+
+
+def test_the_readme_gives_the_arithmetic_that_makes_the_delta_evidence():
+    """A delta only proves nothing was dropped if it is predicted.
+
+    TED 509 + MagicHub 600 + bench 128 - 15 empty-wav failures + 1 golden
+    clip = 1223, which is what the counter advanced by. Without the sum, the
+    delta is just another number and a silently dropped request would not
+    show up.
+    """
+    readme = _readme()
+    body = readme[readme.index("Scope note (important)") :]
+    assert "1223" in body
+    # Assert the summed expression, not the bare digits: every one of these
+    # numbers also occurs elsewhere in the section, so a digit check still
+    # passed with the sum reduced to "one pass of each corpus".
+    collapsed = " ".join(body.split())
+    assert (
+        "TED 509 + MagicHub 600 + benchmark 128, minus the 15 empty-wav" in collapsed
+    ), "spell out the terms being summed, or the delta cannot be recomputed"
+    assert "error` and `abort` stay at `0.0`" in body, (
+        "the zero counters are the other half of the check"
+    )
+
+
 def test_the_wedge_check_names_metrics_the_server_actually_exports():
     """A metric renamed upstream would make the check silently useless.
 
