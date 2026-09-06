@@ -918,6 +918,15 @@ def test_the_readme_warns_that_the_snapshot_default_is_a_literal_sha():
     assert "override `SNAP`" in row, (
         "say what to do when the revision moves, not just that it can"
     )
+    # ...and that naming it is not by itself what makes it be used. The row
+    # said only "passed as MODEL_WEIGHTS_DIR", which was true and insufficient:
+    # that variable is read on the local-source branch alone.
+    assert "MODEL_SOURCE=local" in row and "--host-weights-dir" in row, (
+        "name every part the pin needs; MODEL_WEIGHTS_DIR alone did nothing"
+    )
+    assert "defaults to `huggingface`" in row, (
+        "say why the other two are required, or they look redundant"
+    )
 
 
 def test_the_readme_ties_the_canary_clip_to_the_documented_one():
