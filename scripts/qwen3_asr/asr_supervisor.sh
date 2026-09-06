@@ -26,6 +26,16 @@ PORT="${1:-8101}"
 TTIS="${TTIS:-$HOME/tt-inference-server}"
 TT_METAL_HOME="${TT_METAL_HOME:-$HOME/tt-metal}"
 VENV="${VENV:-$TT_METAL_HOME/python_env}"
+# Where the weights are. This is passed as --host-weights-dir with
+# MODEL_SOURCE=local, which is what makes run.py actually use THIS directory.
+#
+# Setting MODEL_WEIGHTS_DIR alone did nothing: setup_host.py only reads it on
+# the `model_source == local` branch, and model_source defaults to
+# `huggingface` (setup_host.py: os.getenv("MODEL_SOURCE", HUGGINGFACE)). With
+# neither MODEL_SOURCE nor --host-weights-dir/--host-hf-cache passed, the
+# revision pinned in this path was never the one that got served -- run.py
+# resolved the repo through the HF cache and would happily start on a different
+# snapshot.
 SNAP="${SNAP:-$HOME/.cache/huggingface/hub/models--neosophie--Qwen3-ASR-1.7B-JA/snapshots/987bda160f2dabfa6757550bcff7cdda2ba0648c}"
 MODEL_NAME="${MODEL_NAME:-Qwen3-ASR-1.7B-JA}"
 # Liveness only asks "did a transcription come back", so any short clip works.
@@ -158,11 +168,13 @@ launch_server() {
   # ordinary package in the tt-metal venv and the TT platform comes from
   # vllm-tt-plugin.
   ( cd "$TTIS" && \
-    MODEL_SPECS_ENV=dev HF_TOKEN="${HF_TOKEN:-}" MODEL_WEIGHTS_DIR="$SNAP" \
+    MODEL_SPECS_ENV=dev HF_TOKEN="${HF_TOKEN:-}" \
+    MODEL_SOURCE=local MODEL_WEIGHTS_DIR="$SNAP" \
     nohup "$VENV/bin/python" run.py \
       --model "$MODEL_NAME" --tt-device p150 --workflow server --local-server \
       --tt-metal-home "$TT_METAL_HOME" \
       --tt-metal-python-venv-dir "$VENV" \
+      --host-weights-dir "$SNAP" \
       --service-port "$PORT" --no-auth --skip-system-sw-validation --dev-mode \
       > /tmp/asr_supervisor_run.log 2>&1 & )
 }

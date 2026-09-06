@@ -1721,6 +1721,53 @@ def test_the_supervisor_launches_the_model_the_way_run_py_still_accepts():
     )
 
 
+def test_the_supervisor_actually_pins_the_snapshot_it_names():
+    """MODEL_WEIGHTS_DIR alone is read on one branch the supervisor never took.
+
+    SNAP names a revision (.../snapshots/987bda16...), so the launch reads as
+    "start on this revision". It was not: setup_host.py reads MODEL_WEIGHTS_DIR
+    only under `model_source == local`, and model_source defaults to
+    `huggingface` (os.getenv("MODEL_SOURCE", HUGGINGFACE)). The supervisor set
+    neither MODEL_SOURCE nor --host-weights-dir/--host-hf-cache, so run.py
+    resolved the repo through the HF cache and the pinned revision was
+    decorative -- the existence check on SNAP passed while a different snapshot
+    could be served.
+    """
+    sh = _supervisor()
+    launch = sh[sh.index("launch_server()") : sh.index("wait_healthy()")]
+    code = [ln for ln in launch.splitlines() if not ln.strip().startswith("#")]
+
+    assert any("MODEL_WEIGHTS_DIR=" in ln for ln in code), "the weights dir must be passed"
+    assert any("MODEL_SOURCE=local" in ln for ln in code), (
+        "MODEL_WEIGHTS_DIR is only read on the local branch; select it"
+    )
+    assert any("--host-weights-dir" in ln for ln in code), (
+        "and run.py has to be told the directory too, or it re-resolves the repo"
+    )
+
+
+def test_the_local_source_branch_is_the_one_that_reads_the_weights_dir():
+    """Check the premise against the real code, not against this docstring.
+
+    If setup_host.py ever reads MODEL_WEIGHTS_DIR unconditionally, the
+    MODEL_SOURCE=local above becomes unnecessary rather than wrong -- but until
+    then it is load-bearing, and this is what says so.
+    """
+    setup = (get_repo_root_path() / "workflows" / "setup_host.py").read_text()
+    # the default really is huggingface
+    assert 'os.getenv(\n        "MODEL_SOURCE", ModelSource.HUGGINGFACE.value\n    )' in setup or (
+        '"MODEL_SOURCE", ModelSource.HUGGINGFACE.value' in setup
+    ), "model_source no longer defaults to huggingface; re-check the supervisor"
+    # and every read of MODEL_WEIGHTS_DIR sits under a LOCAL branch
+    for idx, line in enumerate(setup.splitlines()):
+        if 'getenv("MODEL_WEIGHTS_DIR")' in line:
+            before = "\n".join(setup.splitlines()[max(0, idx - 25) : idx])
+            assert "ModelSource.LOCAL.value" in before, (
+                f"line {idx + 1} reads MODEL_WEIGHTS_DIR outside a local-source "
+                f"branch; the supervisor's MODEL_SOURCE=local may be redundant"
+            )
+
+
 def test_the_supervisor_canary_does_not_use_a_synthetic_fixture():
     """ja_words.wav has no reference transcript and is banned elsewhere here.
 
