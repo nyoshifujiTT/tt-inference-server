@@ -1173,10 +1173,54 @@ class TestModelSpecsStructure:
             # which the base spec builds from override_tt_config. A raw
             # "additional-config" vllm_arg would not replace it (the keys differ
             # by a hyphen) and both would be passed.
+            #
+            # Parse it rather than matching substrings. The earlier form paired
+            # a literal '"trace_mode": "decode_only"' with `"none" not in
+            # add_cfg`, which is a check on the whole JSON string: it rejected a
+            # correct config that merely contained the letters (a key or value
+            # such as "nonentity") and accepted "NONE", which disables tracing.
+            # trace_mode sets the shipped performance default, so the assertion
+            # has to be about the value.
             add_cfg = dms.vllm_args.get("additional_config", "")
-            assert '"trace_mode": "decode_only"' in add_cfg
-            assert "none" not in add_cfg
+            tt_cfg = json.loads(add_cfg)["tt"]
+            assert tt_cfg["trace_mode"] == "decode_only", tt_cfg
             assert "additional-config" not in dms.vllm_args
+
+    @pytest.mark.parametrize(
+        "trace_mode,should_pass",
+        [
+            ("decode_only", True),
+            ("none", False),
+            ("NONE", False),
+            ("all", False),
+        ],
+    )
+    def test_the_trace_mode_check_reads_the_value_not_the_json_text(
+        self, trace_mode, should_pass
+    ):
+        """Guard the assertion above against the substring form it replaced.
+
+        `"none" not in add_cfg` looked like "trace_mode is not none" and was
+        neither: it rejected a correct config that happened to contain the
+        letters anywhere in the JSON, and accepted "NONE", which disables
+        tracing just as effectively as "none". This exercises the parse on the
+        cases that separate the two readings.
+        """
+        add_cfg = json.dumps({"tt": {"trace_mode": trace_mode}})
+        assert (json.loads(add_cfg)["tt"]["trace_mode"] == "decode_only") is should_pass
+
+    def test_a_config_containing_the_letters_none_is_not_rejected(self):
+        """The false positive the substring check produced.
+
+        A future key or value spelled with those letters -- "nonemptyprompt",
+        "nonentity" -- would have failed the spec test while the trace mode was
+        exactly right.
+        """
+        add_cfg = json.dumps(
+            {"tt": {"trace_mode": "decode_only", "note": "nonentity"}}
+        )
+        assert "none" in add_cfg, "the substring form would have rejected this"
+        assert json.loads(add_cfg)["tt"]["trace_mode"] == "decode_only"
 
 
 class TestRequiredTargetTiers:
