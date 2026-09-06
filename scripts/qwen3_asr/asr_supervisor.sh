@@ -94,6 +94,27 @@ in_container() {
   grep -qE '/docker-|/docker/' "/proc/$1/cgroup" 2>/dev/null
 }
 
+# Pids holding a Tenstorrent device, found by walking /proc/*/fd rather than by
+# asking lsof for a path.
+#
+# `lsof -t /dev/tenstorrent/*` matches on the host's device node, and a
+# container gets its own node for the same chip. Measured on this host with a
+# --docker-server engine running: the host node is dev=5 inode=666, the fd
+# inside the container resolves to dev=67 inode=13, and
+# `lsof -t /dev/tenstorrent/*` prints nothing at all while
+# `/proc/<pid>/fd/17 -> /dev/tenstorrent/0` is plainly open. So the path form
+# reports "device free" for exactly the holder that will make the next launch
+# hang in "Starting devices in cluster".
+device_holders() {
+  local fd pid
+  for fd in /proc/[0-9]*/fd; do
+    pid="${fd#/proc/}"; pid="${pid%/fd}"
+    if sudo readlink "$fd"/* 2>/dev/null | grep -q '^/dev/tenstorrent/'; then
+      echo "$pid"
+    fi
+  done | sort -un
+}
+
 stop_server() {
   pkill -f "run.py --model Qwen3-ASR" 2>/dev/null
   pkill -f "run_vllm_api_server.py" 2>/dev/null
@@ -107,11 +128,13 @@ stop_server() {
   # in "Starting devices in cluster", and tt-smi -r does not help because the
   # holder reacquires it. Escalate, but again only for processes we own.
   local holders stubborn
-  holders=$(sudo lsof -t /dev/tenstorrent/* 2>/dev/null | sort -u)
+  holders=$(device_holders)
   stubborn=""
   for pid in $holders; do
     if in_container "$pid"; then
-      log "device held by containerised pid $pid -- leaving it alone"
+      # Not ours to kill, but the launch below cannot succeed while it holds
+      # the chip, so say so instead of hanging without explanation.
+      log "device held by containerised pid $pid -- leaving it alone; a local launch will not get the device"
     else
       stubborn="$stubborn $pid"
     fi

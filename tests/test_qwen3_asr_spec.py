@@ -727,10 +727,46 @@ def test_the_supervisor_kills_the_engine_process_too():
     assert "VLLM::EngineCore" in sh, (
         "the engine process must be killed, not just its run.py parent"
     )
-    assert "lsof -t /dev/tenstorrent" in sh, (
+    assert "device_holders" in sh, (
         "verify the device is actually free before relaunching"
     )
     assert "kill -9" in sh, "escalate for anything that still holds the device"
+
+
+def test_the_supervisor_finds_holders_that_lsof_cannot_see():
+    """`lsof -t /dev/tenstorrent/*` misses a containerised holder entirely.
+
+    Measured on this host while a --docker-server engine was serving: the host
+    node is dev=5 inode=666 while the engine's fd resolves to dev=67 inode=13
+    (the container's own node for the same chip), so
+
+        sudo lsof -t /dev/tenstorrent/*   -> prints nothing, exit 1
+        /proc/<pid>/fd/17                 -> /dev/tenstorrent/0
+
+    The path form therefore reports the device free for precisely the holder
+    that makes the next launch hang in "Starting devices in cluster", and the
+    in_container filter downstream never gets the pid to spare.
+    """
+    sh = _supervisor()
+    assert "\ndevice_holders() {" in sh, (
+        "holder discovery must be a defined function, not an inline lsof"
+    )
+    # /proc walking is what sees a container's fd; lsof by path does not.
+    assert "/proc/[0-9]*/fd" in sh, "walk /proc to see holders inside containers"
+    assert "readlink" in sh, "resolve each fd to its target"
+    # Ban the path form in *code*. The comment above device_holders quotes it
+    # to explain why it was dropped, so a plain substring check on the whole
+    # file would fail on the explanation rather than on a regression.
+    code = "\n".join(
+        line for line in sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "lsof -t /dev/tenstorrent" not in code, (
+        "the path form silently reports containerised holders as absent"
+    )
+    # the measurement, so the next reader does not "simplify" it back to lsof
+    assert "dev=67" in sh and "dev=5" in sh, (
+        "record the two device nodes, or this looks like a stylistic choice"
+    )
 
 
 def test_the_supervisor_spares_containerised_servers():
