@@ -329,6 +329,66 @@ def test_the_readme_does_not_present_librispeech_wer_as_runnable():
     )
 
 
+def test_the_readme_says_the_power_cycle_fallback_is_unavailable_here():
+    """Step 4's second stage cannot run on the delivery host.
+
+    Measured: ipmitool is installed, but there is no BMC --
+
+        $ sudo ipmitool mc info
+        Could not open device at /dev/ipmi0 or ...: No such file or directory
+        $ ls /dev/ipmi*
+        ls: cannot access '/dev/ipmi*'
+
+    Presenting a hardware reset as part of the recovery loop overstates what
+    self-recovers. It does degrade safely -- the branch falls through to a wait
+    loop and relaunches regardless -- but a wedge that survives tt-smi -r needs
+    a human here, and that is the operationally important part.
+    """
+    readme = _readme()
+    body = readme[readme.index("The power-cycle fallback does not work") :]
+    body = body[: body.index("`qwen3asr-supervisor.service` runs")]
+    flat = " ".join(body.split())
+
+    assert "no BMC device" in flat or "no BMC" in flat, (
+        "say why it cannot run, not just that it does not"
+    )
+    assert "/dev/ipmi" in flat, "quote the device that is absent"
+    # The safe-degradation, so this does not read as "recovery is broken".
+    # Require both halves: what the script does instead, and that the wedge is
+    # still retried. An either-or check passed with the retry claim deleted.
+    assert "relaunches anyway" in flat, (
+        "say what the script does when the power cycle is refused"
+    )
+    assert "retried rather than abandoned" in flat, (
+        "say the wedge is still retried, or this reads as recovery giving up"
+    )
+    # and the honest limit
+    assert "needs a human" in flat, (
+        "state that an unrecoverable wedge is not self-healing on this host"
+    )
+
+
+def test_the_supervisor_relaunches_even_when_the_power_cycle_is_refused():
+    """The README's "degrades safely" claim has to be true of the script.
+
+    recover_device must not exit or return non-zero on the power-cycle path,
+    or the main loop would stop instead of retrying. Checked structurally: the
+    branch ends in the chmod and falls out of the function.
+    """
+    sh = _supervisor()
+    start = sh.index('log "tt-smi -r insufficient')
+    branch = sh[start : sh.index("}", start)]
+
+    assert "ipmitool chassis power cycle" in branch
+    assert "exit" not in branch, (
+        "the power-cycle path must fall through to a relaunch, not exit"
+    )
+    # a bounded wait, so a refused power cycle does not hang the supervisor
+    assert "seq 1 40" in branch and "sleep 30" in branch, (
+        "keep the wait bounded; 40 x 30 s = 20 min matches the startup budget"
+    )
+
+
 def test_the_readme_names_what_actually_blocks_the_librispeech_eval():
     """"rehome the adapter" was too vague, and wrong about the mechanism.
 

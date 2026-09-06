@@ -713,6 +713,23 @@ self-recovers rather than taking the service down:
    (`tt-smi -r`, then `ipmitool chassis power cycle` if that is insufficient)
    and relaunch.
 
+**The power-cycle fallback does not work on the delivery host.** `ipmitool` is
+installed, but there is no BMC device to talk to:
+
+```
+$ sudo ipmitool mc info
+Could not open device at /dev/ipmi0 or /dev/ipmi/0 or /dev/ipmidev/0: No such file or directory
+$ ls /dev/ipmi*
+ls: cannot access '/dev/ipmi*': No such file or directory
+```
+
+So step 4 degrades to `tt-smi -r` plus relaunch. The script already handles the
+refusal -- the power-cycle branch falls through to a 20-minute wait loop and
+then relaunches anyway -- so a wedge is retried rather than abandoned, but do
+not count on a hardware reset here. On a host that does have a BMC the second
+stage works as written; on this one, a wedge that survives `tt-smi -r` needs a
+human.
+
 `qwen3asr-supervisor.service` runs the supervisor under systemd so it
 auto-starts on boot — including after a power-cycle recovery — making the
 recovery loop fully self-sustaining.
