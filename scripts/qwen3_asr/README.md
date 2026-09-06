@@ -334,8 +334,19 @@ show the migration is output-preserving:
 
 Accuracy matches to four decimal places on both corpora. The throughput gap is
 session drift on this board, not a route difference: a later plugin-route run
-measured 12.86 audio-s/s at p50 2.03 s. An older run also had LibriSpeech WER
-6.7288 on both.
+measured 12.86 audio-s/s at p50 2.03 s.
+
+An older run also had LibriSpeech WER 6.7288 on both routes. **That figure is
+not reproducible on this tree** and is kept only as a historical
+cross-check: it came from an lmms-eval config in `evals/eval_config.py`, and
+upstream deleted that file (#4678 / #4630) when the v1 workflows went. The
+successor catalog `reference_config/evals/eval_config.py` carries whisper
+entries but no Qwen3-ASR one, and our `qwen3_asr_openai` model adapter still
+sits under `evals/lmms_eval_models/` with **nothing referencing it** -- that
+directory is all that is left of `evals/`. Re-enabling it means adding an
+entry to the successor catalog and rehoming the adapter, which is a separate
+piece of work. Accuracy on this tree is measured with the corpus evals (TED,
+MagicHub), which do run.
 
 This table is a record of the migration, not an invitation to run the fork.
 There is one supported route: upstream vLLM plus `vllm-tt-plugin`.
