@@ -208,6 +208,50 @@ def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
     assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
 
 
+def _dropped_work_section():
+    readme = _readme()
+    start = readme.index("#### After any upstream merge, check for silently dropped work")
+    return readme[start : readme.index("\nDisk:", start)]
+
+
+def test_the_readme_tells_you_to_look_for_work_a_merge_dropped():
+    """A green suite cannot detect a change and its test leaving together.
+
+    Concrete case: vllm-tt-plugin's first upstream merge kept
+    enforce_eager = True, dropped the compilation_config pin that has to
+    accompany it, and dropped the covering test in the same commit. Nothing
+    failed, and the branch spent ~209 s per start compiling a graph the ttnn
+    path never uses until it was found by hand.
+
+    So the runbook has to name the check, not just the risk -- and has to say
+    that a long output is expected, or the next reader dismisses 33 lines as
+    noise.
+    """
+    body = _dropped_work_section()
+
+    # the mechanism, so the check is understood rather than copied blindly
+    assert "the assertion left with the code" in body, (
+        "say why a passing suite proves nothing here"
+    )
+    # the worked example, with its cost and its fix
+    assert "enforce_eager" in body and "compilation_config" in body
+    assert "209 s" in body, "quantify what the omission cost"
+    assert "acae5aa" in body, "name the commit that restored it"
+
+    # the check itself, runnable
+    assert "git log --format='%h %an'" in body and "def $fn" in body, (
+        "give the command, not a description of it"
+    )
+    # and the discipline it needs to be worth anything
+    assert "Every line has to be accounted for" in body
+    for category in ("renamed", "replaced", "withdrawn"):
+        assert category in body, f"name the '{category}' disposition"
+    assert "33" in body, (
+        "record that this repo's output was long and still clean, or a long "
+        "list looks like a failure of the check"
+    )
+
+
 def test_the_readme_records_the_compilation_cost_on_the_pinned_image():
     """209 s of the startup window goes into an unused compiled graph.
 

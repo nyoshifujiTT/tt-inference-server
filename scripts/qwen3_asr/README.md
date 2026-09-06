@@ -368,6 +368,34 @@ One thing is deliberately *not* followed:
   rebasing onto main ahead of that PR would put this bring-up in conflict with
   it. Once the PR lands, the pin becomes an ordinary main commit.
 
+#### After any upstream merge, check for silently dropped work
+
+A merge can take a change of ours *and* the test that covered it, and then
+nothing fails. That happened in `vllm-tt-plugin`: the first merge kept
+`enforce_eager = True` but dropped the `compilation_config` pin that must
+accompany it, and dropped `test_check_and_update_config_forces_eager` in the
+same commit. The branch ran for weeks on half the change, spending ~209 s per
+start building a graph the ttnn path never uses (restored in `acae5aa`).
+
+A green suite does not detect this, because the assertion left with the code.
+Run this in each repo after merging:
+
+```
+git log --format='%h %an' HEAD | grep -i codex | cut -d' ' -f1 | while read c; do
+  for t in $(git show $c --name-only --format= | grep -E '^tests/.*\.py$'); do
+    for fn in $(git show $c -- "$t" | grep -oP '^\+\s*def \Ktest_\w+' | sort -u); do
+      grep -rq "def $fn" tests/ || echo "LOST: $fn <- $c $t"
+    done
+  done
+done | sort -u
+```
+
+Every line has to be accounted for as one of: renamed, replaced by a later
+commit of ours, deliberately withdrawn (say where that is written down), or a
+real loss to restore. Do not treat a long list as noise -- this repo produced
+33 lines and all 33 resolved to the first three categories, which is only
+meaningful because each was checked.
+
 Disk: the dev image is ~21 GB and a rebuild keeps the previous generation until
 it is replaced, so keep at least 60 GB free.
 
