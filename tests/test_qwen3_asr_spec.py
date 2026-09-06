@@ -1427,23 +1427,34 @@ def test_the_readme_reports_what_the_perf_probes_measured():
 def test_the_readme_explains_the_gap_between_the_two_probes():
     """Two columns that differ with no stated reason read as a contradiction.
 
-    The streaming column is consistently the slower one, and one token lighter
-    per request. Both are expected -- SSE framing and scheduling land on the
-    client's clock but not on the decode counters, and the terminal chunk
-    carries no new token -- but unexplained they look like one probe being
-    wrong.
+    The streaming column is consistently the slower one on latency, which is
+    expected: SSE framing and scheduling land on the client's clock but not on
+    the decode counters.
+
+    This test used to also REQUIRE the sentence "the final chunk carries no new
+    token" as the explanation for the one-token gap in tokens-per-request. That
+    was a false claim being held in place by its own test: the streaming
+    figure was a count of SSE frames, not tokens, so there was no off-by-one to
+    explain -- just two different units. Requiring the explanation is what kept
+    the unit bug invisible, which is exactly the failure mode a test is
+    supposed to prevent.
     """
     readme = _readme()
     section = readme[readme.index("Serving-level timings") :]
     section = section[: section.index("**No image exists at these pins yet.**")]
     assert "SSE framing" in section, "say why the client-side number is higher"
-    assert "final chunk carries no new token" in section, (
-        "explain the off-by-one in tokens per request"
-    )
     # and a threshold, so "agrees" is not left to taste
     assert "tens of percent" in section, (
         "state how large a gap stops being framing overhead"
     )
+    # the retracted explanation may only survive as the quotation inside its
+    # own correction
+    flat = " ".join(section.split())
+    if "final chunk carries no new token" in flat:
+        i = flat.index("final chunk carries no new token")
+        assert "described a coincidence" in flat[i : i + 200], (
+            "that sentence is retracted; it may only appear where it is retracted"
+        )
 
 
 def test_the_readme_says_why_the_upstream_audio_harness_is_not_used():
