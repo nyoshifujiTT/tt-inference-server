@@ -395,7 +395,27 @@ on the kernel cache, not on the machine:
 So a fast start is normal on a machine that has served before, and a slow one
 is normal after `docker volume rm` or on a new host. The supervisor's budget is
 sized for the slow end (20 min) rather than for whichever figure you happen to
-measure. Requests use the HF repo id, not the spec's model name:
+measure.
+
+A second, separate cost sits inside that window on the image pinned above:
+
+```
+init engine (profile, create kv cache, warmup model) took 214.11 s (compilation: 208.97 s)
+compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, ...}
+```
+
+The plugin sets `enforce_eager=True`, but `VllmConfig.__post_init__` derives
+the compilation mode *before* the platform hook runs, so on this pin the mode
+stays `VLLM_COMPILE` and ~209 s goes into a compiled graph the ttnn hot path
+never uses. `vllm-tt-plugin` `acae5aa` restores the pin that forces
+`CompilationMode.NONE`; a rebuild past it should drop most of that 209 s.
+
+This does **not** invalidate the throughput and accuracy numbers below.
+Upstream's own later check (`Enforce eager set, disabling torch.compile and
+CUDAGraphs`) still lands, and `cudagraph_mode` is already `NONE`, so execution
+was eager either way -- the loss is startup time, not steady-state speed.
+
+Requests use the HF repo id, not the spec's model name:
 
 ```
 curl -X POST http://127.0.0.1:8110/v1/audio/transcriptions \

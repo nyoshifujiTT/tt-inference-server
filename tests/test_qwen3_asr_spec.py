@@ -208,6 +208,40 @@ def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
     assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
 
 
+def test_the_readme_records_the_compilation_cost_on_the_pinned_image():
+    """209 s of the startup window goes into an unused compiled graph.
+
+    Read off the serving container's own log at the pinned plugin commit:
+
+      init engine ... took 214.11 s (compilation: 208.97 s)
+      compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, ...}
+
+    enforce_eager is set, but VllmConfig.__post_init__ derives the compilation
+    mode before the platform hook runs, so the mode survives as VLLM_COMPILE.
+    The plugin fix (acae5aa) pins it to NONE.
+
+    Worth documenting precisely because the obvious reading is wrong twice: it
+    is not part of the kernel-cache story above (a warm cache does not avoid
+    it), and it does not call the throughput numbers into question (upstream's
+    later check still disables torch.compile, and cudagraph_mode is already
+    NONE, so execution was eager regardless).
+    """
+    readme = _readme()
+    body = readme[readme.index("A second, separate cost sits inside that window") :]
+    body = body[: body.index("Requests use the HF repo id")]
+    flat = " ".join(body.split())
+
+    assert "208.97 s" in flat, "quote the measured compilation time"
+    assert "CompilationMode.VLLM_COMPILE" in flat, (
+        "show the mode that survived, or the cause is not identifiable"
+    )
+    assert "__post_init__" in flat, "name why enforce_eager alone is not enough"
+    assert "acae5aa" in flat, "point at the fix, so the note can be retired"
+    # and the scope limit, so this is not read as invalidating the benchmarks
+    assert "does **not** invalidate" in body
+    assert "startup time, not steady-state" in flat
+
+
 def _comment_only_filter():
     """The comment-only grep the README tells you to run, as a Python predicate.
 
