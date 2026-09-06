@@ -357,6 +357,29 @@ curl -X POST http://127.0.0.1:8110/v1/audio/transcriptions \
   -F file=@clip.wav -F model=neosophie/Qwen3-ASR-1.7B-JA -F language=ja
 ```
 
+#### `ARCH_NAME` is absent from the engine, and that is fine
+
+Checking the spec's `env_vars` per process rather than by reading the startup
+log, `ARCH_NAME` is the one that does not reach the worker:
+
+| variable | pid 1 (entrypoint) | APIServer | EngineCore |
+|---|---|---|---|
+| `MESH_DEVICE`, `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | -- | set | set |
+| `ARCH_NAME` | `wormhole_b0` (from the base image) | `blackhole` | **absent** |
+
+The spec is right -- the runtime spec carries `ARCH_NAME: blackhole` and the
+entrypoint logs `overriding with blackhole` -- so this looks like a leak. It is
+not: UMD reads the architecture off PCIe,
+
+```
+UMD | Creating TopologyDiscovery for architecture: blackhole
+```
+
+and `model_spec.py` marks the variable itself as transitional
+(`TODO: Remove once all model specs are uplifted to tt-metal >= 0.60.0`).
+Do not "fix" it by exporting `ARCH_NAME` globally: the base image sets
+`wormhole_b0`, so a global export is how the wrong value would reach a worker.
+
 #### The clip to check with
 
 Use a clip that has a published reference transcript, so the output can actually

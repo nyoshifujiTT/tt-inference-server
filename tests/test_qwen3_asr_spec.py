@@ -1086,3 +1086,87 @@ def test_the_readme_shows_how_the_original_recipe_differed():
     assert '-  vllm_commit: "03fa3af"' in quoted
     assert '+  vllm_commit: "b95c0501e62f"' in quoted
     assert 'tt_metal_commit: "de59f8a"' in quoted
+
+
+def _arch_name_section():
+    readme = _readme()
+    start = readme.index("#### `ARCH_NAME` is absent from the engine")
+    return readme[start : readme.index("\n#### ", start + 1)]
+
+
+def _table_row(body, leading_cell):
+    for line in body.splitlines():
+        if line.startswith(f"| {leading_cell}"):
+            return line
+    raise AssertionError(f"no table row for {leading_cell} in the ARCH_NAME section")
+
+
+def test_the_readme_records_arch_name_missing_from_the_engine():
+    """The startup log says "overriding with blackhole"; the worker disagrees.
+
+    Measured per process rather than from that log line: ARCH_NAME reaches the
+    APIServer but is absent from the EngineCore environ, while MESH_DEVICE and
+    the offline flags reach both. A reader who only sees the entrypoint log
+    concludes the variable is in effect on the worker, and then explains an
+    unrelated failure with it.
+    """
+    body = _arch_name_section()
+    assert "EngineCore" in body and "APIServer" in body, (
+        "name the two processes, or the distinction the measurement makes is lost"
+    )
+
+    # The measurement lives in the table, so assert on the row. "absent"
+    # anywhere in the section is also satisfied by this section's own heading,
+    # which would let the row be flipped to "set" without failing anything.
+    row = _table_row(body, "`ARCH_NAME`")
+    assert "absent" in row, (
+        "the EngineCore cell is the measurement; keep it in the row, not just the prose"
+    )
+    assert "wormhole_b0" in row and "blackhole" in row, (
+        "show both values, or the row does not say what was overridden with what"
+    )
+
+    # the variables that *do* arrive, so "absent" is a contrast and not a
+    # blanket claim that the spec's env_vars do not work
+    arrives = _table_row(body, "`MESH_DEVICE`")
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        assert name in arrives, f"{name} does reach the engine; show it"
+    assert "absent" not in arrives, (
+        "these three were measured present in both processes"
+    )
+
+
+def test_the_readme_explains_why_arch_name_absence_is_harmless():
+    """Otherwise this reads as an open bug and the next reader chases it."""
+    body = _arch_name_section()
+    assert "UMD | Creating TopologyDiscovery for architecture: blackhole" in body, (
+        "quote the UMD line, which is the evidence that arch comes off PCIe"
+    )
+    assert "PCIe" in body
+
+
+def test_the_readme_quotes_the_todo_that_model_spec_actually_carries():
+    """The "transitional" claim has to come from the source, not from memory."""
+    todo = "TODO: Remove once all model specs are uplifted to tt-metal >= 0.60.0"
+    spec_src = open(
+        os.path.join(os.path.dirname(__file__), "..", "workflows", "model_spec.py")
+    ).read()
+    assert todo in spec_src, (
+        "the comment moved or changed; requote it in the README before relying on it"
+    )
+    assert todo in _arch_name_section()
+
+
+def test_the_readme_warns_against_exporting_arch_name_globally():
+    """The obvious "fix" is the one that would put wormhole_b0 on a worker.
+
+    _infer_env_vars derives ARCH_NAME from the device, so a global export in
+    the shell is not how this value is meant to be set, and the base image
+    already carries the wrong one.
+    """
+    body = _arch_name_section()
+    assert "wormhole_b0" in body, "name the wrong value the base image ships"
+    lowered = body.lower()
+    assert "do not" in lowered and "global" in lowered, (
+        "say plainly not to export it globally, or the note reads as an invitation"
+    )
