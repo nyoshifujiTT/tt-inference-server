@@ -59,6 +59,44 @@ def test_the_non_streaming_probe_reads_the_server_counters():
         assert counter in src, f"{counter} must be sampled"
 
 
+def test_every_counter_the_probe_scrapes_is_actually_stored():
+    """A counter that is matched but not assigned is not sampled at all.
+
+    metrics() used to run a loop over six counter names whose result was
+    computed into a local and dropped, then re-parse everything below it. The
+    loop looked like the sampling code and was not: had a later edit deleted
+    the second parse instead, every reported number would have been 0.0 with no
+    error. Require each counter name to appear on a line that writes into the
+    returned dict.
+    """
+    src = _read(PROBE)
+    body = src[src.index("def metrics():") : src.index("body=open(WAV")]
+    stored = [ln for ln in body.splitlines() if 'd["' in ln]
+    for counter in (
+        "time_to_first_token_seconds",
+        "e2e_request_latency_seconds",
+        "request_prefill_time_seconds",
+        "request_decode_time_seconds",
+        "generation_tokens_total",
+        "request_success_total",
+    ):
+        assert any(counter in ln for ln in stored), (
+            f"{counter} is parsed but never stored in the returned dict"
+        )
+    # and nothing may be parsed into a variable that goes nowhere. The shared
+    # helper g() legitimately calls re.search into a local it returns, so the
+    # check is on the counter patterns instead: a vllm: pattern outside the
+    # helper must be on a line that stores into the returned dict.
+    helper = body[body.index("def g(pat):") : body.index('d["ttft_sum"]')]
+    outside = body.replace(helper, "")
+    dropped = [
+        ln.strip()
+        for ln in outside.splitlines()
+        if "vllm:" in ln and 'd["' not in ln and not ln.lstrip().startswith("#")
+    ]
+    assert not dropped, f"these matches are computed and discarded: {dropped}"
+
+
 def test_the_streaming_probe_times_the_sse_stream():
     """First chunk = TTFT, inter-chunk gap = TPOT; it must actually stream."""
     src = _read(STREAM)

@@ -25,12 +25,6 @@ MAXTOK=int(sys.argv[6]) if len(sys.argv)>6 else 100
 def metrics():
     raw=urllib.request.urlopen(HOST+"/metrics",timeout=10).read().decode()
     d={}
-    for key in ["time_to_first_token_seconds","e2e_request_latency_seconds",
-                "request_prefill_time_seconds","request_decode_time_seconds",
-                "generation_tokens_total","request_success_total"]:
-        s=re.search(r'vllm:%s(?:_sum)?\{[^}]*\}\s+([0-9.eE+]+)'%re.escape(key if key.endswith("_total") else key+"_sum"),raw)
-        # sum-based
-    # explicit parse
     def g(pat):
         m=re.search(pat,raw)
         return float(m.group(1)) if m else 0.0
