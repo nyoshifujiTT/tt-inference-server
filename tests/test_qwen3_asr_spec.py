@@ -203,18 +203,37 @@ SUPERSEDED_VLLM_FORK_COMMITS = (
     "e1a3825",  # fork upstream base
     "5e69638",  # fork bring-up branch head
     "2bcb717",  # plugin head before the upstream merge (vLLM 0.24.0)
+    "c0c4842",  # before the compilation_config pin was restored
 )
 
 
 def test_no_superseded_vllm_fork_commit_is_referenced_anywhere():
+    """Same scoping as the tt-metal check: forbid *pinning*, not discussing.
+
+    c0c4842 is now superseded, but the results table names the image it built
+    (0.21.0-e7929dcf5dcf...-c0c4842) as the artifact the current numbers came
+    from. That attribution is the honest part of the table, so a bare substring
+    ban would force deleting it.
+    """
     root = os.path.join(os.path.dirname(__file__), "..")
+
+    def _pin_positions(text):
+        import re
+
+        return re.findall(r'vllm_commit:\s*"([0-9a-f]+)"', text) + re.findall(
+            r"amd64:[0-9.]+-[0-9a-f]+-([0-9a-f]+)", text
+        )
+
     for rel in ("workflows/model_spec.py", "scripts/qwen3_asr/README.md"):
         text = open(os.path.join(root, rel)).read()
+        used = _pin_positions(text)
         for stale in SUPERSEDED_VLLM_FORK_COMMITS:
-            assert stale not in text, (
-                f"{rel} still references the vLLM fork commit {stale}; the "
-                "image no longer clones that repo"
+            hits = [p for p in used if p.startswith(stale)]
+            assert not hits, (
+                f"{rel} still pins the superseded vLLM commit {stale} "
+                f"(found in {hits})"
             )
+
 
 def test_the_readme_states_when_the_pin_may_lag_the_head():
     """The pin names the BUILT tree, so test-only commits need no bump.
