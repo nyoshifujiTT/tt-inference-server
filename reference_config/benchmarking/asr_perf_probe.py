@@ -8,9 +8,16 @@
 import sys, time, json, urllib.request, re
 import concurrent.futures as cf
 
-HOST=sys.argv[1] if len(sys.argv)>1 else "http://127.0.0.1:8101"
+# Defaults match the runbook's worked example. The wav has no default on
+# purpose: the runbook tells you to fetch FLEURS ja_jp test[0] rather than copy
+# a wav out of someone's scratch directory, and a default pointing at a
+# bring-up host's ~/ttwork contradicted that in the one place that runs.
+HOST=sys.argv[1] if len(sys.argv)>1 else "http://127.0.0.1:8110"
 MODEL=sys.argv[2] if len(sys.argv)>2 else "neosophie/Qwen3-ASR-1.7B-JA"
-WAV=sys.argv[3] if len(sys.argv)>3 else "/home/ubuntu/ttwork/real_ja.wav"
+if len(sys.argv)<=3:
+    sys.exit("usage: %s [host] [model] <wav> [requests] [concurrency] [max_tokens]\n"
+             "the clip is required; see the runbook's 'The clip to check with'"%sys.argv[0])
+WAV=sys.argv[3]
 N=int(sys.argv[4]) if len(sys.argv)>4 else 60
 C=int(sys.argv[5]) if len(sys.argv)>5 else 4
 MAXTOK=int(sys.argv[6]) if len(sys.argv)>6 else 100

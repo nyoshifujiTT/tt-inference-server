@@ -20,10 +20,16 @@ import sys, time, json, uuid, statistics
 import urllib.request
 import concurrent.futures as cf
 
-HOST=sys.argv[1] if len(sys.argv)>1 else "http://127.0.0.1:8100"
-MODEL=sys.argv[2] if len(sys.argv)>2 else "Qwen3-ASR-1.7B"
-WAV=sys.argv[3] if len(sys.argv)>3 else "/home/ubuntu/ttwork/real_ja.wav"
-N=int(sys.argv[4]) if len(sys.argv)>4 else 40
+# Same defaults as asr_perf_probe.py -- the two are meant to be run back to back
+# on the same workload, so a different port, a different served name or a
+# different request count between them silently breaks the comparison.
+HOST=sys.argv[1] if len(sys.argv)>1 else "http://127.0.0.1:8110"
+MODEL=sys.argv[2] if len(sys.argv)>2 else "neosophie/Qwen3-ASR-1.7B-JA"
+if len(sys.argv)<=3:
+    sys.exit("usage: %s [host] [model] <wav> [requests] [concurrency] [max_tokens]\n"
+             "the clip is required; see the runbook's 'The clip to check with'"%sys.argv[0])
+WAV=sys.argv[3]
+N=int(sys.argv[4]) if len(sys.argv)>4 else 60
 C=int(sys.argv[5]) if len(sys.argv)>5 else 4
 MAXTOK=int(sys.argv[6]) if len(sys.argv)>6 else 100
 body=open(WAV,"rb").read()

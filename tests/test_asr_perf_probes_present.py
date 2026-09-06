@@ -148,6 +148,68 @@ def test_the_runbook_documents_both_probes():
     assert "stream=false" in readme
 
 
+def _defaults(src):
+    """The literal each positional argument falls back to, keyed by variable."""
+    out = {}
+    for line in src.splitlines():
+        line = line.strip()
+        for name in ("HOST", "MODEL", "N", "C", "MAXTOK"):
+            if line.startswith(f"{name}=") and "sys.argv" in line and "else" in line:
+                out[name] = line.split("else", 1)[1].strip()
+    return out
+
+
+def test_the_two_probes_default_to_the_same_workload():
+    """They are printed as two columns of one comparison, so they must agree.
+
+    The streaming probe defaulted to port 8100 and served name
+    "Qwen3-ASR-1.7B" while the non-streaming one used 8101 and
+    "neosophie/Qwen3-ASR-1.7B-JA", and they defaulted to 40 vs 60 requests. Run
+    without arguments the streaming probe therefore 404s on a name the server
+    does not serve, and even with the name fixed it would have measured a
+    different workload than the column beside it.
+    """
+    probe, stream = _defaults(_read(PROBE)), _defaults(_read(STREAM))
+    for name in ("HOST", "MODEL", "N", "C", "MAXTOK"):
+        assert probe.get(name) == stream.get(name), (
+            f"{name} differs: probe {probe.get(name)!r} vs stream {stream.get(name)!r}"
+        )
+
+
+def test_the_default_port_is_the_one_the_runbook_uses():
+    """Every command in the runbook targets 8110; a probe default must not differ."""
+    for path in (PROBE, STREAM):
+        assert _defaults(_read(path))["HOST"] == '"http://127.0.0.1:8110"', (
+            f"{os.path.basename(path)}: default host must be the runbook's 8110"
+        )
+
+
+def test_the_default_model_is_the_served_name():
+    served = '"neosophie/Qwen3-ASR-1.7B-JA"'
+    for path in (PROBE, STREAM):
+        assert _defaults(_read(path))["MODEL"] == served, (
+            f"{os.path.basename(path)}: default model must be the served name"
+        )
+
+
+def test_neither_probe_defaults_to_a_scratch_directory_wav():
+    """The runbook says to fetch the clip, not to copy one from a scratch dir.
+
+    Both probes defaulted to /home/ubuntu/ttwork/real_ja.wav -- a path on the
+    bring-up host only -- which is exactly what the runbook's "fetch it rather
+    than copying a wav from someone's scratch directory" warns against. On any
+    other machine the default is a FileNotFoundError; the clip has to be named.
+    """
+    for path in (PROBE, STREAM):
+        src = _read(path)
+        # comments may name the path they warn about; only code may not use it
+        code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+        offenders = [ln for ln in code if "ttwork" in ln]
+        assert not offenders, f"{os.path.basename(path)}: no scratch-dir default: {offenders}"
+        assert "WAV=sys.argv[3]\n" in src, "the clip must be a required argument"
+        assert "the clip is required" in src, "and saying so must be the failure mode"
+
+
 def test_the_readme_separates_a_download_failure_from_a_model_failure():
     """The benchmark downloads before it measures, so it can fail with no result.
 
