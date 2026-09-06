@@ -274,10 +274,20 @@ def test_the_readme_and_supervisor_agree_on_the_startup_time():
     supervisor = _supervisor()
 
     flat = " ".join(readme.split())
-    assert "8-12 minutes" in flat or "7-12 minutes" in flat, (
-        "quote startup as a range; a single figure is wrong at both ends"
+    assert "7-12 min" in flat, (
+        "quote the cold-start range; a single figure is wrong at both ends"
     )
     assert "460 s" in flat, "record the timed measurement behind the range"
+
+    # The fast end is not a fluke and must not be presented as the norm
+    # either: it depends on the kernel cache surviving in a docker volume.
+    assert "140 s" in flat, "record the warm-start measurement too"
+    assert "kernel cache" in flat, (
+        "name what decides which end you get, or a 140 s start looks wrong"
+    )
+    assert "volume_id_tt_vllm_plugin" in flat, (
+        "identify the volume, so the cold case can be reproduced on purpose"
+    )
 
     # the script's own budget must stay above the range, and say why
     assert "7-12 minutes" in supervisor

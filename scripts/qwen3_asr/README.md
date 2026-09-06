@@ -375,10 +375,18 @@ MODEL_SPECS_ENV=dev python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 \
 catalog defaults to prod, which has no Qwen3-ASR entry, and `run.py` would exit
 saying the model is unknown.
 
-`/health` turns 200 in roughly 8-12 minutes; timed at 460 s (7.7 min) on the
-delivery p150, and the supervisor's startup budget is sized for the upper end
-of that range rather than for the figure you happen to measure. Requests use
-the HF repo id, not the spec's model name:
+`/health` turns 200 in **140 s to ~12 minutes**, and which end you get depends
+on the kernel cache, not on the machine:
+
+| start | timed | why |
+|---|---|---|
+| cold kernel cache | 7-12 min (**460 s** measured) | tt-metal JIT-compiles kernels |
+| warm kernel cache | **140 s** measured | the cache is a docker volume (`volume_id_tt_vllm_plugin-Qwen3-ASR-1.7B-JA`, ~169 MB at `~/.cache/tt-metal-cache`) and survives container restarts |
+
+So a fast start is normal on a machine that has served before, and a slow one
+is normal after `docker volume rm` or on a new host. The supervisor's budget is
+sized for the slow end (20 min) rather than for whichever figure you happen to
+measure. Requests use the HF repo id, not the spec's model name:
 
 ```
 curl -X POST http://127.0.0.1:8110/v1/audio/transcriptions \
