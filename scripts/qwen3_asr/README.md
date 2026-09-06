@@ -407,13 +407,25 @@ homophones, e.g. `インターネットで適体適環境コースについて�
 That is the expected result; treat a materially different string as a
 regression.
 
-The snippet resamples to 16 kHz because that is what the checkpoint's
-`preprocessor_config.json` declares (`sampling_rate: 16000`, and `n_samples`
-480000 / `nb_max_frames` 3000 x `hop_length` 160 are all consistent with it), so
-16 kHz is what the mel front-end is calibrated for. It is *not* a requirement on
-what you may POST: the server resamples and downmixes for you. Verified against
-the running server -- 44.1 kHz mono, 44.1 kHz stereo and 16 kHz stereo copies of
-this clip all return the same golden transcript.
+The snippet resamples to 16 kHz because that is the rate the mel front-end is
+calibrated for. The two checkpoints say so differently, which is worth knowing
+before quoting either file:
+
+| checkpoint | `sampling_rate` in `preprocessor_config.json` | `feature_extractor.sampling_rate` |
+|---|---|---|
+| `neosophie/Qwen3-ASR-1.7B-JA` (served) | `16000`, declared | 16000 |
+| `Qwen/Qwen3-ASR-1.7B` (reference dumps) | **absent** | 16000, from `WhisperFeatureExtractor`'s default |
+
+So only the JA checkpoint declares the rate; the base one inherits it. Either
+way the geometry in both files agrees with 16 kHz -- `n_samples` 480000 =
+`chunk_length` 30 x 16000, and `nb_max_frames` 3000 x `hop_length` 160 = 480000.
+Prefer that arithmetic over the key if you need to re-derive the rate, because
+it is present in both files.
+
+16 kHz is *not* a requirement on what you may POST: the server resamples and
+downmixes for you. Verified against the running server -- 44.1 kHz mono,
+44.1 kHz stereo and 16 kHz stereo copies of this clip all return the same
+golden transcript.
 
 Writing the file at 16 kHz mono just makes it byte-identical to the clip these
 numbers were measured with (md5 `3d43ec3ac2562231ec7c8c9ce4087ba4`).

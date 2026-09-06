@@ -1087,6 +1087,73 @@ def test_the_readme_shows_how_the_original_recipe_differed():
     assert '+  vllm_commit: "b95c0501e62f"' in quoted
     assert 'tt_metal_commit: "de59f8a"' in quoted
 
+def _sample_rate_section():
+    readme = _readme()
+    start = readme.index("The snippet resamples to 16 kHz")
+    return readme[start : readme.index("\n**Do not use", start)]
+
+
+def test_the_readme_does_not_claim_both_checkpoints_declare_the_rate():
+    """Only the JA checkpoint has `sampling_rate`; the base one omits it.
+
+    The note used to read "that is what the checkpoint's
+    preprocessor_config.json declares (sampling_rate: 16000)" as if it applied
+    to whatever checkpoint you had open. It does not: Qwen/Qwen3-ASR-1.7B --
+    the one the reference dumps come from -- has no such key, and a reader
+    grepping for it there finds nothing and doubts the whole paragraph.
+    """
+    body = _sample_rate_section()
+    assert "absent" in body, (
+        "say that the base checkpoint omits the key, or the claim overreaches"
+    )
+    assert "WhisperFeatureExtractor" in body, (
+        "name where the base checkpoint's 16000 actually comes from"
+    )
+    # The arithmetic, which is the part that holds for both files. Assert the
+    # equations, not the digits: "480000" survives on its own in prose like
+    # "the sample count is ... = 480000", which loses the derivation that makes
+    # the fallback usable.
+    collapsed = " ".join(body.split())
+    for equation in (
+        "`n_samples` 480000 = `chunk_length` 30 x 16000",
+        "`nb_max_frames` 3000 x `hop_length` 160 = 480000",
+    ):
+        assert equation in collapsed, f"spell out {equation}, not just the numbers"
+    assert "present in both files" in body, (
+        "point the reader at the check that works regardless of checkpoint"
+    )
+
+
+@pytest.mark.parametrize(
+    "repo,declares",
+    [("models--neosophie--Qwen3-ASR-1.7B-JA", True), ("models--Qwen--Qwen3-ASR-1.7B", False)],
+)
+def test_the_preprocessor_configs_match_what_the_readme_says(repo, declares):
+    """Check the files, not the prose. Skips where the cache is absent.
+
+    QWEN3ASR_SNAP points at a HF hub cache (the tt-metal tests use the same
+    variable); without it there is nothing to compare against and asserting
+    would only fail on machines that never downloaded the weights.
+    """
+    import glob
+    import json
+
+    cache = os.environ.get("QWEN3ASR_HF_CACHE") or os.path.expanduser(
+        "~/.cache/huggingface/hub"
+    )
+    found = glob.glob(os.path.join(cache, repo, "snapshots", "*", "preprocessor_config.json"))
+    if not found:
+        pytest.skip(f"no cached preprocessor_config.json for {repo}")
+    cfg = json.load(open(found[0]))
+    assert ("sampling_rate" in cfg) is declares, (
+        f"{repo}: sampling_rate presence changed; the README table needs updating"
+    )
+    if declares:
+        assert cfg["sampling_rate"] == 16000
+    # the geometry the README tells you to fall back on
+    assert cfg["n_samples"] == cfg["chunk_length"] * 16000
+    assert cfg["nb_max_frames"] * cfg["hop_length"] == cfg["n_samples"]
+
 
 def _arch_name_section():
     readme = _readme()
