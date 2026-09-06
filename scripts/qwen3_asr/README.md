@@ -130,7 +130,14 @@ git diff --name-only <pinned> <head> \
   | grep -v '^tests/'      # must print nothing
 ```
 
-If either prints anything, bump that pin and rebuild.
+If either prints anything, it is not yet a verdict -- run the comment-only
+check below on each file printed. Only a file that survives *both* forces the
+pin to move.
+
+At the current pins the tt-metal command is not silent: it prints
+`tt/generator_vllm.py`. That is expected and is the worked example of the next
+paragraph -- the commit rewrote the ND-hang issue references in a comment block
+and nothing else, so the pin stays. The plugin command does print nothing.
 
 One exception the filename filter cannot express: a commit that touches a
 served module but changes only comments. The rule is "does the server execute

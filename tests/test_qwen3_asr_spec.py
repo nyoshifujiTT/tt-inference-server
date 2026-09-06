@@ -206,6 +206,36 @@ def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
     readme = _readme()
     assert "grep -vE '/tests/|" in readme, "tt-metal form"
     assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
+
+
+def test_the_readme_does_not_treat_a_printed_filename_as_a_verdict():
+    """"If either prints anything, bump that pin" contradicts the next check.
+
+    Run at the current pins, the tt-metal command is *not* silent -- it prints
+    tt/generator_vllm.py, because a commit rewrote the ND-hang issue references
+    inside a comment block. Read literally, the old sentence orders a ~7 h
+    rebuild that cannot change a single executed byte; the comment-only check
+    immediately below then says the opposite.
+
+    The two are a sequence, not alternatives, and the README has to say so --
+    with the file it actually prints, so the reader recognises the situation
+    instead of assuming they have hit a new problem.
+    """
+    readme = _readme()
+    body = readme[readme.index("Before leaving a pin behind its branch head") :]
+    body = body[: body.index("The extra tt-metal exclusions")]
+
+    assert "not yet a verdict" in body, (
+        "a printed filename only starts the check; say so"
+    )
+    assert "both" in body, "state that a file must survive both checks"
+    # the worked example, named, so the current output is recognisable
+    assert "tt/generator_vllm.py" in body, (
+        "name the file the check prints today, or its output looks like a fault"
+    )
+    assert "the pin stays" in body
+    # and that the plugin side really is silent, which is the contrast
+    assert "plugin command does print nothing" in body
 BRING_UP_BRANCH = "nyoshifujiTT/qwen3-asr-17b_p150x1"
 
 
