@@ -991,6 +991,24 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now qwen3asr-supervisor.service
 ```
 
+**The service serves 8101, not the 8110 used everywhere above.** The port is
+the supervisor's first positional argument (`PORT="${1:-8101}"`), and the unit
+passes `8101`. Every command in this runbook targets 8110 because that is the
+port the `--docker-server` deployment was measured on, so a freshly installed
+service and a copy-pasted `curl` do not meet.
+
+Pick one and be deliberate about it:
+
+- to have the service match this runbook, edit `ExecStart` to pass `8110`
+  before `daemon-reload` (and stop the containerised server first -- two
+  processes cannot both hold the device);
+- to keep `8101`, substitute the port in the verification commands.
+
+They are also not interchangeable at runtime: the supervisor runs
+`run.py --local-server`, while the measurements above come from
+`--docker-server`. Only one of the two can own `/dev/tenstorrent/0`, which is
+why the holder check exists.
+
 ### What the supervisor reads from the environment
 
 Every path it uses is overridable, and it checks them before launching -- a
@@ -999,6 +1017,7 @@ later inside `run.py`. Defaults are under the service user's home:
 
 | variable | default | note |
 |---|---|---|
+| *(positional `$1`)* | `8101` | the serve port. **Not** an environment variable -- it is the script's first argument, and the unit passes `8101`. Everything else in this runbook uses 8110 |
 | `TTIS` | `$HOME/tt-inference-server` | this repo. **Not** `TT_INFERENCE_SERVER`: that name is this runbook's, and the script predates it |
 | `TT_METAL_HOME` | `$HOME/tt-metal` | same variable the runbook exports |
 | `VENV` | `$TT_METAL_HOME/python_env` | the interpreter `run.py` is launched with |

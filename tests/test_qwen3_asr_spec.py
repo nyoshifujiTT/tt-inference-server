@@ -329,6 +329,82 @@ def test_the_readme_does_not_present_librispeech_wer_as_runnable():
     )
 
 
+def _unit_file():
+    return open(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "scripts",
+            "qwen3_asr",
+            "qwen3asr-supervisor.service",
+        )
+    ).read()
+
+
+def test_the_readme_reconciles_the_service_port_with_its_own_commands():
+    """Installing the unit serves 8101; every command here targets 8110.
+
+    PORT="${1:-8101}" in the script, `... asr_supervisor.sh 8101` in the unit,
+    and 8110 in every curl/eval/benchmark invocation in this runbook -- because
+    those were measured against the --docker-server deployment. Someone who
+    follows Install and then pastes a verification command gets connection
+    refused and no hint why.
+    """
+    readme = _readme()
+    supervisor = _supervisor()
+    unit = _unit_file()
+
+    # the mismatch is real, or this note is stale
+    assert 'PORT="${1:-8101}"' in supervisor
+    assert "asr_supervisor.sh 8101" in unit
+    assert "http://127.0.0.1:8110" in readme
+
+    body = readme[readme.index("The service serves 8101") :]
+    body = body[: body.index("### What the supervisor reads")]
+    flat = " ".join(body.split())
+
+    assert "not the 8110 used everywhere above" in flat, (
+        "name both ports, or the reader cannot see the mismatch"
+    )
+    assert 'PORT="${1:-8101}"' in flat, "show where the default comes from"
+    # both ways out, so the reader can pick
+    assert "edit `ExecStart` to pass `8110`" in flat
+    assert "substitute the port in the verification commands" in flat
+
+
+def test_the_readme_says_the_two_serving_modes_cannot_coexist():
+    """--local-server and --docker-server both want /dev/tenstorrent/0.
+
+    Retargeting the unit to 8110 without stopping the container gives a device
+    conflict, not a working service, so the instruction to change the port has
+    to carry that warning.
+    """
+    readme = _readme()
+    body = readme[readme.index("The service serves 8101") :]
+    body = body[: body.index("### What the supervisor reads")]
+    flat = " ".join(body.split())
+
+    assert "--local-server" in flat and "--docker-server" in flat, (
+        "name the two modes; the port is not the only difference"
+    )
+    assert "Only one of the two can own `/dev/tenstorrent/0`" in flat
+
+
+def test_the_port_is_documented_as_positional_not_an_env_var():
+    """The environment table listed every knob except the one that is not one.
+
+    PORT is $1, so exporting PORT= does nothing. Readers scanning the table for
+    how to change the port would find nothing and reasonably assume it is not
+    configurable.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "*(positional `$1`)*")
+    assert "8101" in row
+    assert "Not** an environment variable" in row, (
+        "say it cannot be set through the environment, unlike every other row"
+    )
+
+
 def test_the_readme_does_not_call_the_recovery_loop_fully_self_sustaining():
     """It contradicted the BMC finding two paragraphs above it.
 
