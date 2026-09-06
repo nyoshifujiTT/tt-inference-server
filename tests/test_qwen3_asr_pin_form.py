@@ -175,7 +175,14 @@ def test_the_readme_does_not_claim_a_fork_clone_build_at_these_pins():
         "do not claim fork-clone reproduction at pins that are not pushed"
     )
     assert "git daemon" in head, "say how the current image was actually built"
-    assert "not been executed as written at these pins" in head, (
+    # The wording moved when the pin was bumped for a code change: at these
+    # pins nothing has been built at all, which is a stronger statement than
+    # "one step is still owed". Accept either, so long as the runbook says
+    # plainly that something is outstanding here.
+    assert (
+        "not been executed as written at these pins" in head
+        or "No image exists at these pins yet" in head
+    ), (
         "name the one runbook step still owed once the branches are pushed"
     )
 
