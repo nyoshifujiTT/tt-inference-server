@@ -1477,6 +1477,48 @@ def test_the_readme_says_why_the_upstream_audio_harness_is_not_used():
     assert "400" in section, "record the observed failure, not just the theory"
 
 
+def test_the_readme_says_how_to_restart_the_server():
+    """A second run.py over a live container fails, and /health hides it.
+
+    The documented launch publishes 8110. Run again without stopping the old
+    container and run.py raises "Docker container failed to start." while the
+    previous container keeps answering, so /health stays 200 and the restart
+    looks successful. Observed during a bring-up rerun: the eval suite was then
+    driven against the very container that was being restarted.
+    """
+    readme = _readme()
+    section = readme[readme.index("### 3. Run") :]
+    section = section[: section.index("### 4.")]
+    assert "Docker container failed to start." in section, (
+        "quote the error, or the reader cannot recognise it"
+    )
+    assert "docker stop $(docker ps -q)" in section, "give the command that fixes it"
+    assert "not confirmed by `/health`" in section or "not confirmed\nby `/health`" in section, (
+        "say that /health cannot distinguish a restart from the old container"
+    )
+    assert "docker ps" in section, "and name the check that can"
+
+
+def test_the_restart_note_uses_the_holder_check_that_works():
+    """lsof misses a containerised holder; the runbook must not recommend it.
+
+    asr_supervisor.sh walks /proc for exactly this reason -- a container has
+    its own device node, so `lsof -t /dev/tenstorrent/*` reports the device
+    free while the fd is open. A restart note that told the reader to use lsof
+    would send them to the one check that cannot see the blocker.
+    """
+    readme = _readme()
+    section = readme[readme.index("### 3. Run") : readme.index("### 4.")]
+    assert "/proc/[0-9]*/fd" in section, "the holder check must walk /proc"
+    assert "Starting devices in cluster" in section, (
+        "name the symptom a surviving holder produces"
+    )
+    supervisor = _supervisor()
+    assert "/proc/[0-9]*/fd" in supervisor, (
+        "the supervisor's holder check moved; the runbook points at it"
+    )
+
+
 def test_the_readme_records_both_upstream_audio_failures():
     """The 400 alone suggests the /v1 prefix is the whole problem.
 

@@ -554,6 +554,34 @@ MODEL_SPECS_ENV=dev python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 \
 catalog defaults to prod, which has no Qwen3-ASR entry, and `run.py` would exit
 saying the model is unknown.
 
+**Restarting: stop the old container first.** The command above publishes
+8110, so a second `run.py` while the previous container is up dies with
+
+```
+RuntimeError: Docker container failed to start.
+server bring-up failed after 2 attempt(s)
+```
+
+and the old container keeps serving. `/health` therefore still answers 200,
+which reads exactly like a successful restart -- so a restart is not confirmed
+by `/health`. Check that `docker ps` shows a *new* container instead: an `Up`
+time that keeps climbing means nothing was replaced.
+
+```
+docker stop $(docker ps -q)          # release 8110 and /dev/tenstorrent/0
+for fd in /proc/[0-9]*/fd; do p="${fd#/proc/}"; p="${p%/fd}"; \
+  sudo readlink "$fd"/* 2>/dev/null | grep -q '^/dev/tenstorrent/' && echo "held by $p"; done
+~/ttvenv/bin/tt-smi -r               # only if something was still holding it
+# then the run.py command above
+```
+
+The `/proc` walk is the holder check, not `lsof`: a container gets its own
+device node, so `lsof -t /dev/tenstorrent/*` prints nothing while the fd is
+plainly open (the same reason `asr_supervisor.sh` walks `/proc`). If a holder
+survives the stop, the next launch hangs in `Starting devices in cluster` and
+`tt-smi -r` will not help, because the holder reacquires the chip right after
+the reset.
+
 `/health` turns 200 in **140 s to ~12 minutes**, and which end you get depends
 on the kernel cache, not on the machine:
 
