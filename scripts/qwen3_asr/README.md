@@ -415,6 +415,33 @@ BASE=$(git rev-parse --verify -q upstream/yito/qwen3_asr_pr \
 git log --format='%h %an' "$BASE..HEAD" | grep -i codex | ...
 ```
 
+**The test scan alone is not enough.** The plugin's loss was an
+implementation line, not a test -- the test went with it, so scanning tests
+found it, but the reverse case exists too: a file of ours can be deleted
+upstream while every test still passes because the tests went to the same
+place. Scan the implementation side as well:
+
+```
+git log --format='%h %an' HEAD | grep -i codex | cut -d' ' -f1 | while read c; do
+  for f in $(git show $c --name-only --format= \
+             | grep -vE "^$TESTS/" | grep -E '\.(py|sh|yaml)$'); do
+    [ -e "$f" ] || echo "FILE GONE: $f <- $c"
+  done
+done | sort -u
+```
+
+Here that prints one line: `workflows/run_reports.py`, which upstream deleted
+in #4630 ("route all workflows to v2 and delete dead v1 code"). Our change to
+it made the reports workflow tolerate a missing `functional_ttft` on an
+eval-only audio run. Checked before writing it off: `functional_ttft` no
+longer appears anywhere in the repo, and the v2 audio path carries ttft as
+`Optional[float]` with a `is not None` filter rather than a dict subscript, so
+that `KeyError` cannot recur. Verdict: obsoleted by the rewrite, not lost.
+
+A `FILE GONE` line needs the same treatment as a `LOST` one -- find where the
+behaviour went, and confirm the problem it solved cannot come back. Do not
+restore the file.
+
 Disk: the dev image is ~21 GB and a rebuild keeps the previous generation until
 it is replaced, so keep at least 60 GB free.
 
