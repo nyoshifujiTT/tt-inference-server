@@ -343,10 +343,36 @@ upstream deleted that file (#4678 / #4630) when the v1 workflows went. The
 successor catalog `reference_config/evals/eval_config.py` carries whisper
 entries but no Qwen3-ASR one, and our `qwen3_asr_openai` model adapter still
 sits under `evals/lmms_eval_models/` with **nothing referencing it** -- that
-directory is all that is left of `evals/`. Re-enabling it means adding an
-entry to the successor catalog and rehoming the adapter, which is a separate
-piece of work. Accuracy on this tree is measured with the corpus evals (TED,
-MagicHub), which do run.
+directory is all that is left of `evals/`.
+
+Re-enabling it is not just a catalog entry, because the way lmms-eval models
+are installed changed underneath us. Traced through the tree:
+
+- The successor catalog has a working template -- the `whisper-large-v3` entry
+  at `reference_config/evals/eval_config.py` uses
+  `eval_class="whisper_tt"`, `WorkflowVenvType.EVALS_AUDIO` and
+  `score_task_single_key` on `wer,none`. A Qwen3-ASR entry would be the same
+  shape with `eval_class="qwen3_asr_openai"`.
+- But our adapter reached the venv through `evals/lmms_eval_models/install.py`,
+  which copied it into the venv's `lmms_eval` package and patched its registry.
+  That was driven by `setup_evals_audio()`, and **upstream deleted that hook**
+  (`workflow_venvs.py` now declares `EVALS_AUDIO` with no `setup_function`).
+- Upstream gets `whisper_tt` from a **TT fork of lmms-eval** instead
+  (`requirements/evals-audio.txt` pins
+  `git+https://github.com/bgoelTT/lmms-eval.git@ben/samt/whisper-tt`), so the
+  model lives in the dependency, not in a post-install copy step.
+
+So the work is: get `qwen3_asr_openai` into that fork (or restore a
+`setup_function` for `EVALS_AUDIO`), then add the catalog entry. Leaving the
+adapter where it is and only adding the entry would fail at model resolution.
+
+Note `requirements/evals-audio.txt` still says "Used by: setup_evals_audio()
+in workflows/workflow_venvs.py", which no longer exists anywhere in the repo --
+that comment is upstream's, and it is what sent me looking for a hook that had
+already been removed.
+
+Accuracy on this tree is measured with the corpus evals (TED, MagicHub), which
+do run.
 
 This table is a record of the migration, not an invitation to run the fork.
 There is one supported route: upstream vLLM plus `vllm-tt-plugin`.
