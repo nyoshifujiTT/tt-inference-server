@@ -561,6 +561,31 @@ def test_the_readme_documents_how_to_measure():
     assert "0.1002" in readme and "0.1668" in readme
 
 
+def test_the_readme_gives_a_runnable_check_for_the_import_graph_claim():
+    """"nothing the server loads imports those modules" was only reasoning.
+
+    The pin-lag argument rests entirely on tests/ being outside the import
+    graph, and that was supported by describing where packages resolve. It is
+    directly observable instead: CPython writes __pycache__ only for modules it
+    imports, so on a container that has served the corpus runs, tt/ carries
+    .pyc files and tests/__pycache__ does not exist at all.
+
+    Without the check in the README, the next person deciding whether to spend
+    a ~7 h rebuild has an argument to weigh rather than a command to run.
+    """
+    readme = _readme()
+    section = readme[readme.index("What makes a test-only commit safe") :]
+    section = section[: section.index("\n## ")]
+    assert "__pycache__" in section, (
+        "name the artifact that proves import, not just the resolution rules"
+    )
+    # the contrast is the evidence: one exists, the other does not
+    assert "No such file or directory" in section, (
+        "show that tests/__pycache__ is absent; a listing of tt/ alone proves nothing"
+    )
+    assert "never imported" in section
+
+
 def test_the_readme_reports_what_the_perf_probes_measured():
     """The runbook told you to run them and never said what they returned.
 

@@ -99,6 +99,25 @@ A commit that only adds or edits test modules therefore cannot change what the
 server executes, and bumping the pin for it would force a ~7 h rebuild that
 cannot change the result.
 
+That is checkable on a serving container rather than argued: Python writes
+`__pycache__` only for modules it actually imports, so the directories that
+exist say which ones were loaded.
+
+```
+$ docker exec <container> ls .../qwen3_asr/tt/__pycache__ | head -4
+__init__.cpython-310.pyc
+audio_encoder.cpython-310.pyc
+generator_vllm.cpython-310.pyc
+qwen3_asr_decoder.cpython-310.pyc
+$ docker exec <container> ls .../qwen3_asr/tests/__pycache__
+ls: cannot access '.../qwen3_asr/tests/__pycache__': No such file or directory
+```
+
+So the served `tt/` package is byte-compiled and `tests/` was never imported
+once, on a container that has served every corpus run above. Run this check
+instead of trusting the reasoning if you ever need to defend leaving the pin
+where it is.
+
 Before leaving a pin behind its branch head, verify there is no runtime diff:
 
 ```
