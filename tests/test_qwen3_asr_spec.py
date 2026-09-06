@@ -2314,6 +2314,35 @@ def test_the_readme_warns_against_exporting_arch_name_globally():
     assert "do not" in lowered and "global" in lowered, (
         "say plainly not to export it globally, or the note reads as an invitation"
     )
+def test_the_readme_says_why_completions_answers_on_an_asr_model():
+    """"the ASR model answers that endpoint too" reads as an accident.
+
+    It is a setting: the adapter declares supports_transcription = True and
+    supports_transcription_only = False, and the plugin's get_supported_tasks
+    branches on exactly that -- True alone returns ["transcription"] and drops
+    "generate". Verified live: /v1/completions and /v1/audio/transcriptions
+    both return 200.
+
+    Worth pinning because this suite has no other entry point. Flipping the
+    flag would remove its access to the server, and a reader who thought the
+    behaviour was incidental would not connect the two.
+    """
+    readme = _readme()
+    body = readme[readme.index("### The plugin's server-facing tests") :]
+    body = body[: body.index("```")]
+    flat = " ".join(body.split())
+
+    assert "supports_transcription_only = False" in flat, (
+        "name the flag that keeps /v1/completions available"
+    )
+    assert "would return `[\"transcription\"]`" in flat or 'return `["transcription"]`' in flat, (
+        "say what the other setting does, or the flag looks decorative"
+    )
+    assert "both return 200" in flat, "record that this was checked, not assumed"
+    # the consequence for these tests specifically
+    assert "only entry point" in flat
+
+
 def test_the_readme_covers_a_docstring_only_change():
     """The comment-only grep only knows `#`, so a docstring edit over-reports.
 

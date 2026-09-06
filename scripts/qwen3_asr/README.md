@@ -802,6 +802,17 @@ hand; it is not self-sustaining for a wedge that needs a hardware reset.
 even though its text output is meaningless -- and they are the only coverage of
 per-request sampling isolation on this deployment:
 
+That the endpoint answers at all is a deliberate setting, not an accident:
+the adapter declares `supports_transcription = True` with
+`supports_transcription_only = False`, and the plugin's `get_supported_tasks`
+reads exactly that pair -- `True` alone would return `["transcription"]` and
+drop `generate`. Verified against the running server: `/v1/completions` and
+`/v1/audio/transcriptions` both return 200.
+
+So flipping `supports_transcription_only` to `True` would silently remove this
+suite's only entry point. If a future change does that on purpose, these tests
+need another way in, not a quiet skip.
+
 ```
 cd $VLLM_TT_PLUGIN
 pytest tests/tt --tt-server-url=http://127.0.0.1:8110 \
