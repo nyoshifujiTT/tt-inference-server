@@ -313,6 +313,24 @@ git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile \
 values themselves come from the catalog, which is why the pins have to be in
 the patch rather than on the command line.
 
+`--single-threaded` is not about parallelism here -- the patch adds one prod
+entry, so there is exactly one combination to build either way. It selects a
+different execution path:
+
+```
+if single_threaded:
+    results = [process_sha_combination(t) for t in args_tuples]
+else:
+    results = _run_resource_aware_queue(...)   # ProcessPoolExecutor + gating
+```
+
+The queue path admits a build only when the host clears its reserves
+(`MEMORY_PER_BUILD_GB = 16`, `DISK_PER_BUILD_GB = 40`, plus
+`MEMORY_RESERVE_GB = 16` / `DISK_RESERVE_GB = 20`). Docker's data-root lives on
+`/` on the delivery host, and `/` does not have 40 GB spare, so the gate would
+hold the only build back. `--single-threaded` runs it in-process instead, with
+the build's own logs on the terminal rather than in a pool worker's file.
+
 Without the tt-metal half the image lacks the vLLM adapter and the server dies
 with `ModuleNotFoundError: models.demos.audio.qwen3_asr.tt.generator_vllm`.
 Without the plugin half it lacks the TT adapter registration and the engine

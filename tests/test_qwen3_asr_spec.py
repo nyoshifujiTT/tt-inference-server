@@ -379,6 +379,38 @@ def test_the_readme_gives_the_real_reason_the_base_is_built_by_hand():
     )
 
 
+def test_the_readme_explains_the_single_threaded_flag():
+    """The build command passes it and nothing said why.
+
+    It is not a parallelism knob here: the patch adds one prod entry, so there
+    is one combination either way. What it selects is the execution path --
+    the alternative is a ProcessPoolExecutor gated on host resources, and that
+    gate wants DISK_PER_BUILD_GB (40) free on Docker's data-root, which `/`
+    does not have. Without the note, someone tidying the command line drops the
+    flag and the single build never gets admitted.
+    """
+    script = _build_script()
+    readme = _readme()
+
+    # the premise, from the script
+    assert "if single_threaded:" in script
+    assert "_run_resource_aware_queue" in script
+    assert "DISK_PER_BUILD_GB = 40" in script, (
+        "the reserve changed; requote it in the README"
+    )
+
+    body = readme[readme.index("`--single-threaded` is not about parallelism") :]
+    body = body[: body.index("\nWithout the tt-metal half")]
+    flat = " ".join(body.split())
+
+    assert "one combination" in flat, "say why it is not a parallelism question"
+    assert "_run_resource_aware_queue" in flat, "name the path it avoids"
+    assert "DISK_PER_BUILD_GB = 40" in flat, "give the reserve that blocks it"
+    assert "does not have 40 GB spare" in flat, (
+        "connect the reserve to this host, or the flag looks optional"
+    )
+
+
 def _unit_file():
     return open(
         os.path.join(
