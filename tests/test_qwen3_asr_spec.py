@@ -114,17 +114,72 @@ SUPERSEDED_TT_METAL_COMMITS = (
     "ddb7ace",  # head before the rebase onto upstream/yito/qwen3_asr_pr
     "986aad1",  # pre-rebase branch head
     "3b1b9ad",  # before the eval-side 16 kHz resample fix
+    "e7929dc",  # before the served decoder took its dtype from the shared helper
 )
 
 
 def test_no_superseded_commit_is_referenced_anywhere():
+    """A superseded SHA must not be *used* as a pin -- but may be discussed.
+
+    The rule this enforces is that no build or run resolves to a tree the repo
+    no longer tests. Bare textual absence is a proxy for that, and it broke on
+    the first pin whose own story is worth telling: the short-pin trap section
+    quotes `e7929dc` precisely because it once resolved to an unrelated
+    upstream object. Deleting that example to satisfy a substring check would
+    remove the evidence for the full-SHA rule sitting directly above it.
+
+    So the check is scoped to the load-bearing positions: the patch's
+    `tt_metal_commit:` line, the bake tag, the `--build-metal-commit`
+    argument, and the image tag the runbook starts.
+    """
     root = os.path.join(os.path.dirname(__file__), "..")
+
+    def _pin_positions(text):
+        """Every occurrence that would actually drive a build or a run."""
+        import re
+
+        return (
+            re.findall(r'tt_metal_commit:\s*"([0-9a-f]+)"', text)
+            + re.findall(r"--build-metal-commit\s+([0-9a-f]+)", text)
+            + re.findall(r"ubuntu-22\.04-amd64:([0-9a-f]+)", text)
+            + re.findall(r"amd64:[0-9.]+-([0-9a-f]+)-", text)
+        )
+
     for rel in ("workflows/model_spec.py", "scripts/qwen3_asr/README.md"):
         text = open(os.path.join(root, rel)).read()
+        used = _pin_positions(text)
         for stale in SUPERSEDED_TT_METAL_COMMITS:
-            assert stale not in text, (
-                f"{rel} still references the superseded tt-metal commit {stale}"
+            hits = [p for p in used if p.startswith(stale)]
+            assert not hits, (
+                f"{rel} still pins the superseded tt-metal commit {stale} "
+                f"(found in {hits}); a build from it would use a tree the repo "
+                f"no longer tests"
             )
+
+
+def test_the_pin_check_looks_at_positions_that_drive_a_build():
+    """Guard the guard: it must not degrade back to a bare substring test.
+
+    Scoping it to pin positions is what lets the short-pin trap keep its worked
+    example. If someone re-tightens this to "not in text", that example has to
+    go, and the full-SHA rule loses its evidence.
+    """
+    src = open(os.path.join(os.path.dirname(__file__), "test_qwen3_asr_spec.py")).read()
+    body = src[src.index("def test_no_superseded_commit_is_referenced_anywhere") :]
+    body = body[: body.index("\ndef test_the_pin_check_looks_at_positions")]
+
+    assert "tt_metal_commit:" in body and "--build-metal-commit" in body, (
+        "the check must name the positions that actually pin a commit"
+    )
+    assert "assert stale not in text" not in body, (
+        "a bare substring check forbids discussing a superseded SHA at all"
+    )
+
+    # and the example it exists to protect must still be present
+    readme = _readme()
+    assert "`e7929dc` matched upstream's `7e7929dcd898...`" in readme, (
+        "the short-pin trap's worked example must survive the pin bump"
+    )
 
 
 def test_vllm_commit_pins_a_plugin_commit_not_a_fork_commit():
