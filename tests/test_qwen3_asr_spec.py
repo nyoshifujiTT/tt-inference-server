@@ -1289,6 +1289,46 @@ def test_the_readme_gives_the_arithmetic_that_makes_the_delta_evidence():
     )
 
 
+def test_the_readme_counts_the_probe_warmup_requests():
+    """The sum came out 6 short of the measured delta, and I guessed why.
+
+    Both probes transcribe the clip 3 times before timing anything, and the
+    server counts those. Measured 1844 -> 3193 = 1349 with the probes included,
+    which is 1 + 494 + 600 + 128 + 63 + 63 -- not ... + 60 + 60.
+
+    An earlier worklog entry attributed the same 6 to "golden 1 + 5 spare",
+    which was a guess that happened to reach the right total. Reconciling to a
+    number by inventing terms is how a genuinely dropped request would get
+    explained away, so the real source is now in the README.
+    """
+    readme = _readme()
+    body = readme[readme.index("Scope note (important)") :]
+    collapsed = " ".join(body.split())
+
+    assert "add **6**, not 120" in collapsed, (
+        "say how many extra requests the probes contribute"
+    )
+    # tie it to the code, so the claim is checkable rather than asserted
+    assert "for _ in range(3)" in collapsed, "point at the warm-up loop itself"
+    assert "1 + 494 + 600 + 128 + 63 + 63 = 1349" in collapsed, (
+        "give the full-pass sum with the warm-ups folded in"
+    )
+
+
+@pytest.mark.parametrize(
+    "script", ["asr_perf_probe.py", "asr_perf_stream.py"]
+)
+def test_both_probes_really_warm_up_three_times(script):
+    """If a probe's warm-up count changes, the README's +6 is wrong."""
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "reference_config", "benchmarking", script
+    )
+    src = open(path).read()
+    assert "for _ in range(3)" in src, (
+        f"{script} no longer warms up 3 times; the README's arithmetic needs updating"
+    )
+
+
 def test_the_wedge_check_names_metrics_the_server_actually_exports():
     """A metric renamed upstream would make the check silently useless.
 

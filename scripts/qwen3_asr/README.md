@@ -527,6 +527,14 @@ Checking the arithmetic is what makes it evidence rather than a big number:
 one pass of TED 509 + MagicHub 600 + benchmark 128, minus the 15 empty-wav
 failures, plus one golden clip, is +1223 -- which is what the delta was.
 
+If the two perf probes ran as well, add **6**, not 120: each one transcribes
+the clip 3 times before it starts timing (`for _ in range(3)` in both
+`asr_perf_probe.py` and `asr_perf_stream.py`), and those warm-up requests are
+counted by the server even though they are excluded from the reported figures.
+A full pass of everything above therefore lands on
+`1 + 494 + 600 + 128 + 63 + 63 = 1349`, measured as 1844 -> 3193. Forget the
+warm-ups and the sum comes out 6 short, which looks like six dropped requests.
+
 That counter is the cheapest wedge check there is: it is monotonic per process,
 so a restart resets it, and a stall shows up as it ceasing to advance while
 `vllm:num_requests_running` stays non-zero.
