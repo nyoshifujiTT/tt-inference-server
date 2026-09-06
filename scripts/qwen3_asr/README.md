@@ -187,6 +187,20 @@ code change -- which is what happened to `tt/qwen3_asr_decoder.py`, whose
 comment edit printed until this was fixed. Trailing `|$` drops blank-line
 changes for the same reason.
 
+It still only understands `#` comments, so a **docstring**-only edit prints and
+looks like a code change. That is the safe direction to be wrong in -- it
+over-reports, never under-reports -- but confirm before spending a rebuild:
+
+```
+git diff <pinned> <head> -- <the file> --stat   # which hunks
+git diff <pinned> <head> -- <the file> | grep '^@@'
+```
+
+If every hunk falls inside a docstring, the module's executed code is
+unchanged and the pin can stay. `vllm-tt-plugin` `aec8563` is that case: the
+diff is `@@ -6,8 +6,16 @@`, entirely within `executor.py`'s module docstring
+(lines 1-35), so `vllm_commit` stays at `acae5aa`.
+
 The extra tt-metal exclusions are the same rule, not exceptions to it. Those
 files ship inside the image but nothing the server loads imports them: the
 served path enters at `models.demos.audio.qwen3_asr.tt.*`, while

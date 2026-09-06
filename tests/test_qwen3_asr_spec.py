@@ -2314,6 +2314,39 @@ def test_the_readme_warns_against_exporting_arch_name_globally():
     assert "do not" in lowered and "global" in lowered, (
         "say plainly not to export it globally, or the note reads as an invitation"
     )
+def test_the_readme_covers_a_docstring_only_change():
+    """The comment-only grep only knows `#`, so a docstring edit over-reports.
+
+    That is the safe direction -- it never lets a real change through -- but
+    without guidance the reader spends a ~7 h rebuild on a diff that changed no
+    executed byte. It happened immediately: vllm-tt-plugin aec8563 edits only
+    executor.py's module docstring, and the check prints the file.
+
+    The follow-up is cheap and decisive: if every hunk header falls inside the
+    docstring, the pin stays.
+    """
+    readme = _readme()
+    body = readme[readme.index("It still only understands `#` comments") :]
+    body = body[: body.index("The extra tt-metal exclusions")]
+    flat = " ".join(body.split())
+
+    # Name the case in the sentence that introduces it, not merely somewhere in
+    # the section -- "docstring" recurs in the worked example below, so a
+    # section-wide check passed with the opening reduced to "some edits".
+    assert "a **docstring**-only edit prints and looks like a code change" in flat, (
+        "name the case the grep cannot classify"
+    )
+    assert "over-reports, never under-reports" in flat, (
+        "say which way it errs, or this reads as the check being unsafe"
+    )
+    assert "grep '^@@'" in flat, "give the hunk-header check, not a description"
+    # the worked example, so the current output is recognisable
+    assert "aec8563" in flat and "@@ -6,8 +6,16 @@" in flat
+    assert "`vllm_commit` stays at `acae5aa`" in flat, (
+        "state the verdict, or the reader still does not know whether to bump"
+    )
+
+
 def test_the_results_table_does_not_credit_the_unbuilt_image():
     """"Measured ... with the image above" became false when the pin moved.
 
