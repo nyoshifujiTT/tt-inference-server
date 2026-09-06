@@ -644,6 +644,18 @@ Measured on TED against one server, back to back:
 The p99 is what moves; the extra 4 failures are its tail crossing the timeout.
 Reaching the steady 15 needs no restart, just a second pass.
 
+The first run *can* land on the steady numbers, so do not read 19 as the
+expected first result. On a later restart the first pass came in at 494 / 15,
+CER 0.1002, p99 4.924 s -- because a single golden clip had been transcribed
+first, which is enough to pay the JIT compilation the first corpus run
+otherwise absorbs. So:
+
+- warm the server with one request (any clip) before measuring, or
+- discard the first corpus pass.
+
+Either works; what does not work is trusting the first pass on a server whose
+very first request is a corpus clip.
+
 On TED those 15 are expected and are not a model result. They are manifest
 artifacts -- zero-length wavs, which the server rejects:
 

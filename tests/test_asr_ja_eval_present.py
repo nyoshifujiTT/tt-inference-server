@@ -130,6 +130,31 @@ def test_the_runbook_says_to_discard_the_first_corpus_run():
     assert "490 / 19" in readme and "494 / 15" in readme
 
 
+def test_the_runbook_does_not_promise_the_first_run_will_be_bad():
+    """19 is what the first pass *can* be, not what it will be.
+
+    Measured on a later restart: the first TED pass came in at 494 / 15, CER
+    0.1002, p99 4.924 s -- the steady numbers -- because one golden clip had
+    been transcribed before it, which pays the JIT compilation the first corpus
+    run otherwise absorbs.
+
+    Read as a promise, the 490/19 row makes a correct first pass look wrong,
+    and hides the cheaper option: warm with one request instead of spending a
+    six-minute corpus pass to do it.
+    """
+    readme = _read(README)
+    flat = " ".join(readme.split())
+    assert "The first run *can* land on the steady numbers" in flat, (
+        "say the first pass is not necessarily the bad one"
+    )
+    # the counter-example, with its own measured numbers
+    assert "4.924" in readme, "record the p99 of the good first pass"
+    # and the cheaper alternative to burning a corpus pass
+    assert "warm the server with one request" in flat, (
+        "offer the one-request warm-up, not only 'discard the first pass'"
+    )
+
+
 def test_the_runbook_explains_the_fifteen_expected_ted_failures():
     """"494 ok / 15 download artifacts" was asserted, never evidenced.
 
