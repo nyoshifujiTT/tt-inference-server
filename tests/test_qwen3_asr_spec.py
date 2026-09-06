@@ -561,6 +561,53 @@ def test_the_readme_documents_how_to_measure():
     assert "0.1002" in readme and "0.1668" in readme
 
 
+def test_the_readme_reports_what_the_perf_probes_measured():
+    """The runbook told you to run them and never said what they returned.
+
+    Both probes are documented with their positional arguments, and the
+    section promises "TTFT, prefill, decode TPS and TPS/user" -- but the
+    results table listed only CER and rtfx. With no recorded numbers there is
+    nothing to compare a rerun against, which is the whole reason the probes
+    are committed rather than described.
+
+    Measured, 60 requests at concurrency 4 on the FLEURS clip:
+      non-streaming  TTFT 1.243 s, decode TPS/user 23.91, aggregate 41.45
+      streaming      TTFT 1.338 s, decode TPS/user 22.22, aggregate 39.52
+    """
+    readme = _readme()
+    section = readme[readme.index("Serving-level timings") :]
+    section = section[: section.index("**How the current image was built.**")]
+
+    # both probes' headline numbers, not just one column
+    for value in ("1.243", "1.338", "23.91", "22.22", "41.45", "39.52"):
+        assert value in section, (
+            f"{value} was measured; record it or a rerun has no baseline"
+        )
+    assert "60 / 60" in section, "say how many requests the numbers came from"
+
+
+def test_the_readme_explains_the_gap_between_the_two_probes():
+    """Two columns that differ with no stated reason read as a contradiction.
+
+    The streaming column is consistently the slower one, and one token lighter
+    per request. Both are expected -- SSE framing and scheduling land on the
+    client's clock but not on the decode counters, and the terminal chunk
+    carries no new token -- but unexplained they look like one probe being
+    wrong.
+    """
+    readme = _readme()
+    section = readme[readme.index("Serving-level timings") :]
+    section = section[: section.index("**How the current image was built.**")]
+    assert "SSE framing" in section, "say why the client-side number is higher"
+    assert "final chunk carries no new token" in section, (
+        "explain the off-by-one in tokens per request"
+    )
+    # and a threshold, so "agrees" is not left to taste
+    assert "tens of percent" in section, (
+        "state how large a gap stops being framing overhead"
+    )
+
+
 def test_the_readme_says_why_the_upstream_audio_harness_is_not_used():
     """Otherwise the next reader re-discovers the 400 the hard way.
 

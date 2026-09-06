@@ -704,6 +704,26 @@ Measured on the delivery p150 with the image above:
 | MagicHub 600 clips | CER 0.1668, 600 ok |
 | LibriSpeech 128 req | 128 ok, rtfx ~12.5, p50 ~2.1 s |
 
+And the serving-level timings the two probes report, 60 requests at
+`concurrency 4` on the FLEURS clip, so the cross-check can be judged:
+
+| | non-streaming (`/metrics`) | streaming (client-side) |
+|---|---|---|
+| requests ok | 60 / 60 | 60 / 60 |
+| mean TTFT | 1.243 s | 1.338 s |
+| mean E2E | 2.245 s | 2.326 s |
+| decode TPS/user | 23.91 | 22.22 |
+| decode TPS aggregate | 41.45 | 39.52 |
+| tokens per request | 24.0 | 23.0 |
+
+The two agree to within a few percent, which is the point of running both: the
+streaming column is measured the ordinary way and corroborates counters the
+customer's `stream=false` client cannot observe. It reads slightly slower
+because the client sees SSE framing and scheduling delay on top of what the
+counters attribute to decode, and it counts one fewer token per request (the
+final chunk carries no new token). Treat a gap of tens of percent, or the two
+columns moving in opposite directions, as a regression worth chasing.
+
 The same CER, to four decimal places, has come out of every build of this model
 so far -- across the vLLM 0.24->0.26 upgrade, three separate image builds at the
 earlier pins, a device reset, and the current pins. The ~1 % spread in rtfx is
