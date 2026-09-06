@@ -1408,20 +1408,26 @@ def test_the_readme_reports_what_the_perf_probes_measured():
     nothing to compare a rerun against, which is the whole reason the probes
     are committed rather than described.
 
-    Measured, 60 requests at concurrency 4 on the FLEURS clip:
-      non-streaming  TTFT 1.243 s, decode TPS/user 23.91, aggregate 41.45
-      streaming      TTFT 1.338 s, decode TPS/user 22.22, aggregate 39.52
+    Measured, 60 requests at concurrency 4 on the FLEURS clip, with the
+    streaming probe counting tokens rather than SSE frames:
+      non-streaming  TTFT 1.170 s, decode TPS/user 23.31, aggregate 42.54
+      streaming      TTFT 1.324 s, decode TPS/user 24.24, aggregate 41.50
     """
     readme = _readme()
     section = readme[readme.index("Serving-level timings") :]
     section = section[: section.index("**No image exists at these pins yet.**")]
 
     # both probes' headline numbers, not just one column
-    for value in ("1.243", "1.338", "23.91", "22.22", "41.45", "39.52"):
+    for value in ("1.170", "1.324", "23.31", "24.24", "42.54", "41.50"):
         assert value in section, (
             f"{value} was measured; record it or a rerun has no baseline"
         )
     assert "60 / 60" in section, "say how many requests the numbers came from"
+    # the superseded frame-counted figures must not linger as if current
+    for stale in ("22.22", "39.52"):
+        assert stale not in section, (
+            f"{stale} was measured in SSE frames, not tokens; it is not a baseline"
+        )
 
 
 def test_the_readme_explains_the_gap_between_the_two_probes():

@@ -210,16 +210,36 @@ def test_the_runbook_does_not_explain_the_gap_with_the_disproved_reason():
         )
 
 
-def test_the_runbook_marks_the_stale_streaming_column():
-    """Numbers taken with the frame-counting probe must not read as current."""
+def test_the_two_columns_agree_on_tokens_per_request():
+    """The one row that must match exactly, because it is the same quantity.
+
+    Both columns now count tokens: /metrics differences
+    vllm:generation_tokens_total, the streaming probe reads completion_tokens
+    off the usage frame. Latencies may differ (framing lands on the client's
+    clock) but the token count may not, so a mismatch here means one side has
+    gone back to measuring something else -- the exact failure this row exists
+    to catch.
+    """
     readme = _read(README)
-    body = readme[readme.index("| decode TPS aggregate | 41.45") :]
-    assert "predates the token-count fix" in body, (
-        "say that the streaming throughput rows were measured in frames"
+    section = readme[readme.index("| requests ok |") :]
+    row = [ln for ln in section.splitlines() if ln.startswith("| tokens per request |")]
+    assert row, "the runbook must report tokens per request for both probes"
+    cells = [c.strip() for c in row[0].strip("|").split("|")]
+    assert cells[1] == cells[2] != "", (
+        f"the two probes must report the same tokens per request, got {cells[1:]}"
     )
-    assert "A frame is not a token" in body
-    assert "re-measure the streaming column" in body, (
-        "and say what to do before comparing against them"
+
+
+def test_the_runbook_records_the_frame_count_separately():
+    """Frames are still worth reporting -- as frames, next to the tokens."""
+    readme = _read(README)
+    section = readme[readme.index("| requests ok |") :]
+    assert "| SSE frames per request |" in section, (
+        "report frames as their own row so they cannot be read as tokens"
+    )
+    assert "A frame is not a token" in readme
+    assert "24 tokens arrive in 22 frames" in readme, (
+        "quote the measurement that shows the two are different quantities"
     )
 
 

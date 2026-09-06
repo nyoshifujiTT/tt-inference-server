@@ -1028,34 +1028,33 @@ And the serving-level timings the two probes report, 60 requests at
 | | non-streaming (`/metrics`) | streaming (client-side) |
 |---|---|---|
 | requests ok | 60 / 60 | 60 / 60 |
-| mean TTFT | 1.243 s | 1.338 s |
-| mean E2E | 2.245 s | 2.326 s |
-| decode TPS/user | 23.91 | 22.22 |
-| decode TPS aggregate | 41.45 | 39.52 |
-| tokens per request | 24.0 | 23.0 |
+| mean TTFT | 1.170 s | 1.324 s |
+| mean E2E | 2.195 s | 2.307 s |
+| decode TPS/user | 23.31 | 24.24 |
+| decode TPS aggregate | 42.54 | 41.50 |
+| tokens per request | 24.0 | 24.0 |
+| SSE frames per request | — | 22.0 |
 
-**The streaming column above predates the token-count fix and its three
-throughput rows are in the wrong unit.** It was produced by an
-`asr_perf_stream.py` that counted SSE frames and reported the tally as tokens.
-A frame is not a token: vLLM's stream generator
+**Tokens per request agrees exactly, and that agreement is the check.** The
+streaming probe used to report `23.0` here, which was a count of SSE frames,
+not tokens. A frame is not a token: vLLM's stream generator
 (`vllm/entrypoints/speech_to_text/base/serving.py`) emits one frame per
 non-empty post-processed delta, which may carry more than one token, and with
 `stream_include_usage` it appends a usage-only frame carrying `choices=[]`.
-The `23.0` was therefore a frame count that happened to land near the token
-count, and the explanation once given for the gap -- "it counts one fewer token
-per request, the final chunk carries no new token" -- described a coincidence,
-not a mechanism. The probe now takes `completion_tokens` off the usage frame,
-which is the same quantity `vllm:generation_tokens_total` gives the
-non-streaming column, and scales the frame-gap TPOT by the measured
-tokens-per-frame so per-user TPS is in tokens.
+Measured here, 24 tokens arrive in 22 frames (`tokens_per_frame` 1.091), so the
+old figure was neither the token count nor an off-by-one against it -- and the
+explanation once given for the gap, "it counts one fewer token per request, the
+final chunk carries no new token", described a coincidence, not a mechanism.
+The probe now takes `completion_tokens` off the usage frame, the same quantity
+`vllm:generation_tokens_total` gives the non-streaming column, and scales the
+frame-gap TPOT by the measured tokens-per-frame so per-user TPS is in tokens.
 
 Running both is still the point: the streaming column is measured the ordinary
 way and corroborates counters the customer's `stream=false` client cannot
-observe. It reads slightly slower because the client sees SSE framing and
-scheduling delay on top of what the counters attribute to decode. Treat a gap
-of tens of percent, or the two columns moving in opposite directions, as a
-regression worth chasing -- and re-measure the streaming column with the fixed
-probe before comparing against the numbers above.
+observe. Its latencies read slightly higher because the client sees SSE framing
+and scheduling delay on top of what the counters attribute to decode. Treat a
+gap of tens of percent, a disagreement in tokens per request, or the two
+columns moving in opposite directions, as a regression worth chasing.
 
 The same CER, to four decimal places, has come out of every build of this model
 so far -- across the vLLM 0.24->0.26 upgrade, three separate image builds at the
