@@ -1383,10 +1383,50 @@ def test_the_readme_cites_the_issue_that_matches_the_signature():
     # by the surrounding "non-deterministic device hang" prose, so name what
     # makes #45052 different from ours.
     assert "45052" in body
-    assert "deterministic and P300x2-specific" in body, (
-        "#45052 is deterministic and board-specific; presenting it as the same "
-        "failure overstates how well this hang is understood upstream"
+    # "deterministic" alone is satisfied by the surrounding "non-deterministic
+    # device hang" prose, so require the phrasing that separates #45052 from
+    # ours. Scoped to the report rather than the defect -- see
+    # test_the_readme_does_not_overstate_what_45052_establishes.
+    assert "100% deterministic and reported only on P300x2" in body, (
+        "#45052 is deterministic and was only reported on one board; presenting "
+        "it as the same failure overstates how well this hang is understood "
+        "upstream"
     )
+
+
+def test_the_readme_does_not_overstate_what_45052_establishes():
+    """Two claims about #45052 went further than the tracker does.
+
+    Checked against the issue:
+      - it is 100% deterministic, reproduced over five runs -- fine;
+      - it is *reported* on a Blackhole P300x2 (1,4) mesh, but the underlying
+        sparse-matmul deadlock is called architecture-agnostic in #45943, so
+        "P300x2-specific" describes the report, not the defect;
+      - PR #44118's merge (7eff69a85a0, vs 747215b good) is the first bad
+        tested version; triage says causality is unproven and points at
+        #43682.
+
+    Both overstatements make the upstream picture look better understood than
+    it is, and the second sends a reader to the wrong PR. What actually rules
+    the issue out here is the mechanism: its stuck op is GPT-OSS MoE
+    SparseMatmulDeviceOperation on a 4-device mesh, and this is one p150 with
+    no MoE.
+    """
+    readme = _readme()
+    body = readme[readme.index("non-deterministic device hang") :]
+    body = body[: body.index("Scope note")]
+    flat = " ".join(body.split())
+
+    assert "reported only on P300x2" in flat, (
+        "distinguish the report's scope from the defect's"
+    )
+    assert "45943" in flat, "cite the issue that calls the deadlock arch-agnostic"
+    assert "first bad tested version" in flat and "43682" in flat, (
+        "#44118 is a boundary, not a culprit; name the real bisection target"
+    )
+    assert "not a proven root cause" in flat or "not a proven cause" in flat
+    # the durable reason it does not apply to this deployment
+    assert "MoE" in flat and "SparseMatmul" in flat
 
 
 def test_the_readme_attributes_the_patch_recipe_correctly():

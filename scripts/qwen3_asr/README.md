@@ -479,7 +479,21 @@ recalled:
 |---|---|---|
 | [tt-metal#37543](https://github.com/tenstorrent/tt-metal/issues/37543) | "[GPT-OSS] ND hang in SDPA decode" -- hangs after 20-120 min, decode traced, only under vLLM | yes: SDPA decode, ND, trace-related |
 | [tt-metal#36395](https://github.com/tenstorrent/tt-metal/issues/36395) | "[GPT-OSS] ND hangs" -- mostly prefill, some decode | partly |
-| [tt-metal#45052](https://github.com/tenstorrent/tt-metal/issues/45052) | gpt-oss decode hang after `paged_fill_cache`, isl>=1024 | shares the watchdog signature, but that one is deterministic and P300x2-specific |
+| [tt-metal#45052](https://github.com/tenstorrent/tt-metal/issues/45052) | gpt-oss decode hang after `paged_fill_cache`, isl>=1024 | shares the watchdog signature, but that one is 100% deterministic and reported only on P300x2 |
+
+Two details on that last row, since they were previously stated more strongly
+than the tracker supports:
+
+- The **defect** is not established as P300x2-only. The report is specific to a
+  Blackhole P300x2 `(1,4)` mesh, and the stuck op is GPT-OSS MoE
+  `SparseMatmulDeviceOperation`; a later issue
+  ([#45943](https://github.com/tenstorrent/tt-metal/issues/45943)) describes the
+  same sparse-matmul deadlock as architecture-agnostic. "Reported only on
+  P300x2" is the accurate claim -- this deployment is single-device p150 and
+  runs no MoE, which is why it is still the wrong class for us.
+- PR #44118 is the **first bad tested version** (`7eff69a85a0`, against
+  `747215b` last known good), not a proven root cause; triage names #43682 as
+  the better bisection target. Cite it as a regression boundary, not a culprit.
 
 Two issues quoted here previously do **not** belong: #40592 is a Mistral
 *AllGatherAsync* hang on T3K, and #4752 is a tt-inference-server *eval accuracy*
