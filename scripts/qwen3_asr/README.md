@@ -706,6 +706,34 @@ The very first transcription JIT-compiles kernels into the container's cache and
 can take minutes; subsequent ones settle at ~2 s for an 11 s clip. Do not mistake
 that first request for a hang.
 
+**Budget 7 minutes for it, and do not put a shorter `--max-time` on that
+request.** Measured on this host after a `tt-smi -r`: `real 6m33.591s` for the
+first transcription, then `real 0m1.223s` for the second, same clip, same
+golden text. A `curl --max-time 300` cannot survive that, and once curl gives
+up the request looks like it vanished.
+
+This is a *separate* cost from the startup figures above. A warm kernel cache
+gets `/health` to 200 in ~140 s, and the cache is a docker volume that survives
+container restarts -- but a device reset still leaves the first transcription
+to recompile, so "warm start" does not imply "fast first request".
+
+While it compiles, the container log stops moving and vLLM reports
+`Running: 0 reqs, Waiting: 0 reqs`, because nothing has reached the scheduler
+yet. The last line is usually
+
+```
+Metal | Allocating device buffers is potentially unsafe due to the existence of
+an active trace.
+```
+
+which is a warning, not a stopping point. Sampling the engine's CPU during this
+window shows either a spinning thread or an idle one depending on whether it is
+compiling or waiting on the device, so neither reading distinguishes it from a
+wedge. Tell the two apart by waiting past 7 minutes, not by inspecting the
+process: a genuine wedge is what the canary in `asr_supervisor.sh` catches, and
+it allows 45 s per attempt precisely because it only runs against a server that
+has already served once.
+
 The tt-metal decode path has a **non-deterministic device hang** in a class
 tracked upstream. The closest matches by signature, checked rather than
 recalled:

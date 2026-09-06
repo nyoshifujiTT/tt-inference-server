@@ -1499,6 +1499,62 @@ def test_the_readme_says_how_to_restart_the_server():
     assert "docker ps" in section, "and name the check that can"
 
 
+def test_the_readme_quantifies_the_first_transcription():
+    """"can take minutes" is not enough to size a timeout against.
+
+    Measured after a device reset on this host: 6m33.591s for the first
+    transcription and 1.223s for the second. A curl --max-time 300 -- an
+    entirely reasonable-looking choice against a "minutes" warning -- cannot
+    survive it, and when curl gives up the request looks like it disappeared.
+    That misreading cost three container restarts during this bring-up before
+    the request was simply waited out.
+    """
+    readme = _readme()
+    section = readme[readme.index("The very first transcription JIT-compiles") :]
+    section = section[: section.index("non-deterministic device hang")]
+    assert "6m33" in section, "quote the measured worst case, not just 'minutes'"
+    assert "0m1.223s" in section, "and the second request, so the gap is visible"
+    # The instruction itself, not merely the words somewhere in the section:
+    # both "--max-time" and "7 minutes" also occur further down in the same
+    # block, so a bare containment check survived deleting the instruction.
+    flat = " ".join(section.split())
+    assert "Budget 7 minutes for it, and do not put a shorter `--max-time` on that request." in flat, (
+        "state the budget and the timeout warning as one instruction"
+    )
+    assert "cannot survive that" in flat, (
+        "say what happens when the timeout is shorter -- curl gives up and the "
+        "request looks like it vanished"
+    )
+
+
+def test_the_readme_separates_startup_warmth_from_the_first_request():
+    """A warm cache gets /health up fast and says nothing about the first clip.
+
+    The startup table quotes 140 s for a warm kernel cache, which reads as "the
+    machine is ready". A device reset still leaves the first transcription to
+    recompile, so the two costs have to be stated as separate.
+    """
+    readme = _readme()
+    section = readme[readme.index("The very first transcription JIT-compiles") :]
+    section = section[: section.index("non-deterministic device hang")]
+    assert "separate" in section, "say the two costs are distinct"
+    assert "does not imply" in section, "and that one does not predict the other"
+
+
+def test_the_readme_says_why_the_process_view_cannot_settle_it():
+    """Both the log and the CPU look the same during a compile and a wedge."""
+    readme = _readme()
+    section = readme[readme.index("The very first transcription JIT-compiles") :]
+    section = section[: section.index("non-deterministic device hang")]
+    assert "Running: 0 reqs" in section, "the scheduler shows nothing either way"
+    assert "is a warning, not a stopping point" in section, (
+        "the trace-allocator line is the last thing logged; say it is benign"
+    )
+    assert "neither reading distinguishes it" in section, (
+        "spinning vs idle CPU does not separate the two cases"
+    )
+
+
 def test_the_restart_note_uses_the_holder_check_that_works():
     """lsof misses a containerised holder; the runbook must not recommend it.
 
