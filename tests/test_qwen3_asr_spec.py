@@ -321,8 +321,76 @@ def test_the_readme_does_not_present_librispeech_wer_as_runnable():
         "name both the deleted config and its successor"
     )
     assert "qwen3_asr_openai" in flat, "name the adapter that is now orphaned"
-    # and what running it again would take, so the note is actionable
-    assert "separate piece of work" in flat
+    # and what running it again would take, so the note is actionable. The
+    # detail lives in test_the_readme_names_what_actually_blocks_the_
+    # librispeech_eval; here just require that a route back is described.
+    assert "Re-enabling it" in flat, (
+        "say what re-enablement involves, or the note is a dead end"
+    )
+
+
+def test_the_readme_names_what_actually_blocks_the_librispeech_eval():
+    """"rehome the adapter" was too vague, and wrong about the mechanism.
+
+    Traced through the tree: our adapter reached the venv via
+    evals/lmms_eval_models/install.py, driven by setup_evals_audio(). Upstream
+    deleted that hook -- EVALS_AUDIO now has no setup_function -- and gets
+    whisper_tt from a TT fork of lmms-eval pinned in
+    requirements/evals-audio.txt instead. So adding a catalog entry alone would
+    fail at model resolution, which is the part worth writing down.
+    """
+    readme = _readme()
+    body = readme[readme.index("An older run also had LibriSpeech WER") :]
+    body = body[: body.index("This table is a record")]
+    flat = " ".join(body.split())
+
+    # the template that does work, so the entry can be copied
+    assert "whisper_tt" in flat and "EVALS_AUDIO" in flat
+    # the mechanism that broke, named precisely
+    # Both strings occur again in the closing aside about the stale
+    # requirements comment, so assert on the bullet that explains the
+    # mechanism rather than on the section as a whole.
+    bullet = flat[flat.index("But our adapter reached the venv") :]
+    bullet = bullet[: bullet.index("- Upstream gets")]
+    assert "driven by `setup_evals_audio()`" in bullet, (
+        "name the hook that drove the install, not just the function name"
+    )
+    assert "upstream deleted that hook" in bullet, (
+        "say it was removed upstream, or the reader looks for a local mistake"
+    )
+    assert "no `setup_function`" in bullet, (
+        "say what EVALS_AUDIO looks like now, so the claim is checkable"
+    )
+    assert "bgoelTT/lmms-eval" in flat, (
+        "name where whisper_tt comes from now; that is the pattern to follow"
+    )
+    # and the consequence of doing only half of it
+    assert "fail at model resolution" in flat
+
+
+def test_the_removed_venv_hook_is_really_gone():
+    """Assert against the tree, so this note fails if the hook comes back.
+
+    Also pins the stale comment: requirements/evals-audio.txt still points at
+    setup_evals_audio(). If someone fixes that comment upstream, the README's
+    aside about it should go too.
+    """
+    root = os.path.join(os.path.dirname(__file__), "..")
+
+    venvs = open(os.path.join(root, "workflows", "workflow_venvs.py")).read()
+    assert "setup_evals_audio" not in venvs, (
+        "the hook is back; the README's re-enablement note is stale"
+    )
+    # EVALS_AUDIO must still be declared, or the whole paragraph is moot
+    assert "WorkflowVenvType.EVALS_AUDIO" in venvs
+
+    reqs = open(os.path.join(root, "requirements", "evals-audio.txt")).read()
+    assert "bgoelTT/lmms-eval" in reqs, (
+        "the lmms-eval source moved; the README names this pin"
+    )
+    assert "setup_evals_audio()" in reqs, (
+        "the stale comment was corrected; drop the README aside about it"
+    )
 
 
 def test_the_librispeech_adapter_really_is_orphaned():
@@ -886,7 +954,11 @@ def test_the_readme_keeps_the_migration_evidence():
     only the plugin numbers would leave the claim uncheckable.
     """
     readme = _readme()
-    section = readme[readme.index("Evidence that the move changed no output") :][:2500]
+    # Bound by the next heading rather than by a character count: the fixed
+    # 2500-char window silently excluded the closing sentence as soon as the
+    # LibriSpeech note above it grew.
+    section = readme[readme.index("Evidence that the move changed no output") :]
+    section = section[: section.index("\n#### ")]
     assert "0.1002" in section and "0.1668" in section, (
         "both corpora must be shown, since one alone would not show parity"
     )
