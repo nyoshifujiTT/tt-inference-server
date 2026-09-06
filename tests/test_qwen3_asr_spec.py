@@ -320,9 +320,27 @@ def test_the_readme_tells_you_to_look_for_work_a_merge_dropped():
     assert "Every line has to be accounted for" in body
     for category in ("renamed", "replaced", "withdrawn"):
         assert category in body, f"name the '{category}' disposition"
-    assert "33" in body, (
+    # The counts, as the sentence that reports them. A bare `"33" in body`
+    # also matched `6m33.591s` elsewhere in the runbook, so deleting this
+    # sentence outright left the test green.
+    flat = " ".join(body.split())
+    assert "33 lines here, 2 in tt-metal and 0 in the plugin" in flat, (
         "record that this repo's output was long and still clean, or a long "
         "list looks like a failure of the check"
+    )
+    # and that every line was dispositioned, which is what makes it clean
+    assert "every one of the 35 resolved to the first three" in flat, (
+        "a count without a disposition is just a number"
+    )
+    # The total must be the sum of the per-repo counts the same sentence gives,
+    # read back out of the runbook rather than restated here.
+    per_repo = re.search(
+        r"(\d+) lines here, (\d+) in tt-metal and (\d+) in the plugin", flat
+    )
+    total = re.search(r"every one of the (\d+) resolved", flat)
+    assert sum(int(g) for g in per_repo.groups()) == int(total.group(1)), (
+        f"the per-repo counts {per_repo.groups()} do not add up to "
+        f"{total.group(1)}"
     )
 
 
