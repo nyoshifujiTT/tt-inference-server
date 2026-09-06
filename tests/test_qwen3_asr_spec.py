@@ -575,6 +575,38 @@ def test_the_readme_says_why_the_upstream_audio_harness_is_not_used():
     assert "400" in section, "record the observed failure, not just the theory"
 
 
+def test_the_readme_records_both_upstream_audio_failures():
+    """The 400 alone suggests the /v1 prefix is the whole problem.
+
+    Measured against the running server, the upstream shape fails twice over:
+
+      POST /audio/transcriptions      (as eval_command builds it) -> 404
+      POST /v1/audio/transcriptions   (prefix fixed by hand)      -> 400
+
+    Recording only the 400 invites the next reader to "just add the /v1" and
+    find the route exists but still rejects the body, because vLLM parses
+    `file` as an upload rather than a base64 string. Both numbers, and the
+    order they appear in, are what says the fix is a harness feature and not a
+    one-line URL change.
+    """
+    readme = _readme()
+    section = readme[readme.index("### 4. Eval and benchmark") :]
+    section = section[: section.index("Corpus accuracy")]
+    assert "404" in section, (
+        "the path the harness actually builds 404s; record it, or the 400 reads "
+        "as the only obstacle"
+    )
+    assert "400" in section
+    # tie each code to the path that produces it, not just list both codes
+    prefixless = section[section.index("404") - 200 : section.index("404")]
+    assert "/audio/transcriptions" in prefixless and "no `/v1`" in prefixless, (
+        "say which request 404s"
+    )
+    assert "not enough" in section, (
+        "state that correcting the prefix does not make the harness work"
+    )
+
+
 def test_the_runbook_sets_the_dev_catalog_when_serving():
     """run.py resolves specs through MODEL_SPECS_ENV, which defaults to prod.
 

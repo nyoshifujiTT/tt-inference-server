@@ -560,13 +560,25 @@ The upstream audio harnesses do not fit this model. `run_audio_eval` /
 `run_audio_benchmark` in `test_module/` branch on `_is_whisper(ctx)`; everything
 else falls to a generic path that POSTs a JSON body
 (`{"file": "<base64>", ...}`) and, per `llm_module/eval_command.py`, omits the
-`/v1` prefix because "audio models use tt-media-server". Sending that shape to
-this server returns HTTP 400:
+`/v1` prefix because "audio models use tt-media-server". Both halves of that
+shape fail here, and they fail differently -- measured against the running
+server:
+
+| what the upstream path sends | result |
+|---|---|
+| JSON body to `/audio/transcriptions` (no `/v1`, as `eval_command` builds it) | **HTTP 404** `{"detail":"Not Found"}` |
+| JSON body to `/v1/audio/transcriptions` (path corrected by hand) | **HTTP 400**, `body.file` missing |
 
 ```
 {"error":{"message":"1 validation error:
   {'type':'missing','loc':('body','file'),'msg':'Field required', ...}}}
 ```
+
+So fixing the prefix alone is not enough: the route then exists but rejects the
+body, because vLLM parses `file` as an upload rather than as a base64 string.
+Note the 400's `input` echo lists the transcription defaults (`response_format`,
+`temperature`, ...) with no `file` -- the JSON keys were dropped entirely, not
+mistyped.
 
 vLLM's OpenAI-compatible `/v1/audio/transcriptions` takes multipart/form-data.
 Making the upstream harness speak it is a feature addition to that harness, not
