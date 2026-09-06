@@ -27,7 +27,22 @@ def multipart(fields, fname, fbytes):
         b"Content-Type: audio/wav", b"", fbytes, f"--{b}--".encode(), b""]
     return b"\r\n".join(L), b
 
-def resolve_secs(resp, fb):
+def resolve_secs(resp, measured):
+    """Audio duration to score speed against, in seconds.
+
+    Prefer the duration WE measured from the file we submitted. The server's own
+    figure is a billing quantity, not a measurement: OpenAI's usage.seconds is
+    whole seconds, so it rounds every clip up. Trusting it inflated the TED-509
+    total from the true 1649.4 s to 1892.0 s (+14.7%) and flattered
+    throughput_audio_per_s and rtf_sum_lat_over_audio by the same factor, while
+    the per-clip durations recorded alongside stayed correct -- so the error only
+    showed up in the aggregate. Same rule as
+    reference_config/benchmarking/asr_openai_benchmark.py.
+
+    Fall back to the response only when the local file could not be measured.
+    """
+    if measured is not None:
+        return measured
     d=resp.get("duration")
     if d is not None:
         try: return float(d)
@@ -36,7 +51,7 @@ def resolve_secs(resp, fb):
     if isinstance(u,dict) and u.get("seconds") is not None:
         try: return float(u["seconds"])
         except: pass
-    return fb
+    return None
 
 def transcribe(host, fbytes, model, dur, timeout, resp_fmt):
     # customer gbase-asr preset
@@ -56,7 +71,8 @@ def transcribe(host, fbytes, model, dur, timeout, resp_fmt):
     el=time.perf_counter()-t0
     try: data=json.loads(payload)
     except: return ok,el,None,payload[:200]
-    return ok,el,resolve_secs(data,None),data.get("text","")
+    # dur is what wav_dur() read off this very file; pass it, do not discard it
+    return ok,el,resolve_secs(data,dur),data.get("text","")
 
 # --- Japanese text normalization for CER/WER ---
 def norm_ja(s):

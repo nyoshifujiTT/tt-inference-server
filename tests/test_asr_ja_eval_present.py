@@ -165,3 +165,74 @@ def test_the_runbook_explains_the_fifteen_expected_ted_failures():
     assert "zero-length wavs" in readme
     assert "HTTP Error 400" in readme
     assert "frames 0" in readme
+
+
+def _resolve_secs():
+    """Compile resolve_secs out of the eval, so the real function is exercised."""
+    tree = ast.parse(_read(EVAL))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "resolve_secs":
+            module = ast.Module(body=[node], type_ignores=[])
+            namespace = {}
+            exec(compile(ast.fix_missing_locations(module), EVAL, "exec"), namespace)  # noqa: S102
+            return namespace["resolve_secs"]
+    raise AssertionError("resolve_secs not found")
+
+
+def test_audio_duration_prefers_our_own_measurement():
+    """usage.seconds is billing, in whole seconds, so it rounds every clip up.
+
+    This eval computed wav_dur() for every clip and then threw it away, passing
+    None as the fallback so the server's rounded figure always won. On TED-509
+    that reported 1892.0 s of audio for files that measure 1649.4 s -- a 14.7%
+    overstatement that flattered throughput_audio_per_s and
+    rtf_sum_lat_over_audio by the same factor. corpus_cer is unaffected, and the
+    per-clip durations written to the samples file stayed correct, so only the
+    aggregate was wrong.
+
+    The same defect was fixed in asr_openai_benchmark.py (a61fb3cdf) five days
+    before this script was committed; it arrived carrying the pre-fix form.
+    """
+    resolve = _resolve_secs()
+    # measured wins even when the server answers
+    assert resolve({"usage": {"seconds": 12}}, 11.34) == 11.34
+    assert resolve({"duration": 12.0}, 11.34) == 11.34
+    # and the fallbacks keep their old precedence when we could not measure
+    assert resolve({"duration": 12.0, "usage": {"seconds": 13}}, None) == 12.0
+    assert resolve({"usage": {"seconds": 13}}, None) == 13.0
+    assert resolve({}, None) is None
+
+
+def test_the_measured_duration_is_actually_handed_to_the_resolver():
+    """The fix is in the call site as much as in the function.
+
+    resolve_secs could prefer its argument perfectly and still be useless while
+    transcribe() passes None, which is exactly how this shipped.
+    """
+    src = _read(EVAL)
+    body = src[src.index("def transcribe(") : src.index("# --- Japanese text normalization")]
+    assert "resolve_secs(data,dur)" in body.replace(" ", ""), (
+        "transcribe() must pass the duration wav_dur() already measured"
+    )
+    assert "resolve_secs(data,None)" not in body.replace(" ", ""), (
+        "passing None discards the local measurement"
+    )
+
+
+def test_the_aggregate_uses_that_duration():
+    src = _read(EVAL)
+    lines = [ln.replace(" ", "") for ln in src.splitlines()]
+    assert any("audio+=(asecord)" in ln for ln in lines), (
+        "the corpus total must come from the per-clip duration"
+    )
+
+
+def test_both_harnesses_state_the_same_rule():
+    """One rule, two clients: a divergence here is how this bug survived."""
+    bench = _read(
+        os.path.join(HERE, "..", "reference_config", "benchmarking", "asr_openai_benchmark.py")
+    )
+    eval_src = _read(EVAL)
+    for src, name in ((bench, "asr_openai_benchmark.py"), (eval_src, "asr_ja_eval.py")):
+        assert "billing quantity" in src, f"{name} must say why the server figure is not a measurement"
+        assert "1649.4" in src and "1892.0" in src, f"{name} must cite the measured overstatement"
