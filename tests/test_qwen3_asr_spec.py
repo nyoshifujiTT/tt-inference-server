@@ -208,6 +208,57 @@ def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
     assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
 
 
+def _readme_row(readme, leading_cell):
+    for line in readme.splitlines():
+        if line.startswith(f"| {leading_cell}"):
+            return line
+    raise AssertionError(f"no table row for {leading_cell} in the README")
+
+
+def test_the_readme_warns_that_the_snapshot_default_is_a_literal_sha():
+    """SNAP's default hardcodes a revision, and the guard exits if it moves.
+
+    The script has
+      SNAP="${SNAP:-$HOME/.cache/.../snapshots/987bda16...}"
+    with no glob, and the pre-flight loop requires every path to exist. So a
+    re-download at a newer revision does not fall back to the new snapshot --
+    it makes the supervisor exit with "missing path" before launching, which
+    reads as a broken install rather than a stale default.
+    """
+    readme = _readme()
+    supervisor = _supervisor()
+
+    # the default really is a literal revision, or this warning is stale
+    assert "snapshots/987bda16" in supervisor, (
+        "SNAP's default no longer pins a revision; update the README note"
+    )
+    assert '"$SNAP"' in supervisor, "SNAP must be covered by the missing-path guard"
+
+    row = _readme_row(readme, "`SNAP`")
+    assert "987bda16" in row, "show that the default names one revision"
+    assert "override `SNAP`" in row, (
+        "say what to do when the revision moves, not just that it can"
+    )
+
+
+def test_the_readme_ties_the_canary_clip_to_the_documented_one():
+    """"the clip from above" was not checked to be that clip.
+
+    Measured: $HOME/real_ja.wav and the runbook's clip are the same bytes,
+    md5 3d43ec3ac2562231ec7c8c9ce4087ba4. Worth recording because the canary
+    passes on any 200 with a "text" field, so a swapped file would keep the
+    supervisor green while removing the one place a wrong transcript is
+    visible.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "`CANARY_WAV`")
+    assert "3d43ec3ac2562231ec7c8c9ce4087ba4" in row, (
+        "identify the clip by hash, not by reference to another section"
+    )
+    # and be honest that the check itself does not verify the transcript
+    assert "does not depend on the transcript" in row
+
+
 def test_the_readme_and_supervisor_agree_on_the_startup_time():
     """The README said "~12 minutes"; the script said 7-12 and sized for 20.
 

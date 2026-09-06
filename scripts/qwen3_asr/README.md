@@ -813,9 +813,9 @@ later inside `run.py`. Defaults are under the service user's home:
 | `TTIS` | `$HOME/tt-inference-server` | this repo. **Not** `TT_INFERENCE_SERVER`: that name is this runbook's, and the script predates it |
 | `TT_METAL_HOME` | `$HOME/tt-metal` | same variable the runbook exports |
 | `VENV` | `$TT_METAL_HOME/python_env` | the interpreter `run.py` is launched with |
-| `SNAP` | the HF hub snapshot of `neosophie/Qwen3-ASR-1.7B-JA` | passed as `MODEL_WEIGHTS_DIR` |
+| `SNAP` | the HF hub snapshot of `neosophie/Qwen3-ASR-1.7B-JA`, **by revision SHA** (`987bda16...`) | passed as `MODEL_WEIGHTS_DIR`. The SHA is literal, not globbed, so a re-download at a newer revision makes the path missing and the guard exits before launch -- override `SNAP` then, rather than editing the script |
 | `MODEL_NAME` | `Qwen3-ASR-1.7B-JA` | used for both the launch and the canary, so they cannot drift apart |
-| `CANARY_WAV` | `$HOME/real_ja.wav` | the clip from "The clip to check with" above |
+| `CANARY_WAV` | `$HOME/real_ja.wav` | the clip from "The clip to check with" above -- verified the same file, md5 `3d43ec3ac2562231ec7c8c9ce4087ba4`. The canary only checks for HTTP 200 and a `"text"` field, so it does not depend on the transcript, but keeping it to that clip means a wrong answer is visible by eye in the log |
 | `TTSMI` | `$(command -v tt-smi)`, else `$HOME/ttvenv/bin/tt-smi` | |
 | `LOG` | `$HOME/asr_supervisor.log` | |
 
