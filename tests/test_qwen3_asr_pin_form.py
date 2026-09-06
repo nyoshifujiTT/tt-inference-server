@@ -207,6 +207,57 @@ def test_the_readme_covers_a_comment_only_change_to_a_served_module():
     assert "Anything printed is a real code change" in body
 
 
+def test_the_readme_covers_a_real_code_change_the_server_never_loads():
+    """"real code change" and "the pin must move" are not the same question.
+
+    Two demo scripts and reference/prep_wav.py took real code edits -- env
+    lookups, a shared constant, a new SystemExit. They survive the filename
+    filter and the comment-only check, so by the letter of the documented
+    procedure the pin had to move and the image be rebuilt. It did not: the
+    served path never imports any of them, so the image cannot behave
+    differently.
+
+    Without this the procedure forces a ~7 h rebuild for a change the image
+    cannot observe, and the only alternative on offer is to widen the filename
+    filter -- which would let a future served-path change hide behind a
+    familiar path prefix.
+    """
+    readme = _readme()
+    body = readme[readme.index("Why the pin may lag the branch head") :]
+    body = body[: body.index("### 2. Dev image")]
+
+    flat = " ".join(body.split())
+    assert "does the server load it?" in flat, "state the question being answered"
+    # the census, and the window caveat that makes it trustworthy
+    assert "-name '*.pyc' -path '*qwen3_asr*'" in flat, (
+        "give the command that answers it from the running container"
+    )
+    assert "-newermt" in flat and "stale bound" in flat, (
+        "a window that predates the current image makes the census lie"
+    )
+    assert "A file with no `.pyc` was never imported" in flat, (
+        "say what the absence of a .pyc proves"
+    )
+
+
+def test_the_readme_refuses_to_widen_the_filename_filter():
+    """Padding the filter is the tempting fix and the wrong one."""
+    readme = _readme()
+    body = readme[readme.index("Why the pin may lag the branch head") :]
+    body = body[: body.index("### 2. Dev image")]
+    flat = " ".join(body.split())
+    assert "deliberately **not** in the filter" in flat, (
+        "say the omission is a choice, or someone will 'fix' it"
+    )
+    assert "hide behind a familiar path prefix" in flat, "and why it is a choice"
+    # and the filter itself must still not list them
+    filter_line = [ln for ln in body.splitlines() if "grep -vE '/tests/" in ln]
+    assert filter_line, "the filename filter must still be quoted here"
+    assert "demo/" not in filter_line[0] and "prep_wav" not in filter_line[0], (
+        "demo/ and prep_wav.py must not be excluded by name"
+    )
+
+
 def _pinned_vllm(readme):
     """vllm_commit as set by the runbook's own patch block."""
     match = re.search(r'^\+  vllm_commit: "([0-9a-f]+)"', _patch_block(readme), re.M)

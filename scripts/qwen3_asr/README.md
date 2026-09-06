@@ -214,6 +214,30 @@ from `tt/` imports it:
 grep -rn '<basename without .py>' --include='*.py' models/demos/audio/qwen3_asr/tt/
 ```
 
+`demo/` and `reference/prep_wav.py` belong in that same category and are
+deliberately **not** in the filter above. The filter is a shortcut for files
+known to be inert; it is not the list of everything that can be inert, and
+padding it would let a future served-path change hide behind a familiar path
+prefix. So a real code change under `demo/` or `reference/prep_wav.py` prints,
+and you answer the actual question -- does the server load it? -- with the
+`.pyc` census rather than by reading imports:
+
+```
+docker exec <container> \
+  find / -name '*.pyc' -path '*qwen3_asr*' -newermt '-3 hours' 2>/dev/null
+```
+
+On a container that has served every corpus run, that prints the four `tt/`
+modules plus `reference/audio_encoder_ref.py` (which `tt/` does import) and
+nothing else. A file with no `.pyc` was never imported, so a change to it
+cannot alter what the image does, and the pin stays. This is stronger than the
+`grep` above, which only follows direct imports one level deep -- and it is
+what settled the `demo/demo.py`, `demo/demo_wav.py` and `reference/prep_wav.py`
+changes that survive the filter at the current pin.
+
+Use a window that covers the run, not the container's whole life: `-newermt`
+with a stale bound picks up compilation from an earlier image.
+
 ### 2. Dev image (from the bring-up forks)
 
 The bring-up branch heads live on forks until they land upstream. Every
