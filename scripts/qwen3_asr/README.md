@@ -135,9 +135,10 @@ check below on each file printed. Only a file that survives *both* forces the
 pin to move.
 
 At the current pins the tt-metal command is not silent: it prints
-`tt/generator_vllm.py`. That is expected and is the worked example of the next
-paragraph -- the commit rewrote the ND-hang issue references in a comment block
-and nothing else, so the pin stays. The plugin command does print nothing.
+`tt/generator_vllm.py` and `tt/qwen3_asr_decoder.py`. That is expected and is
+the worked example of the next paragraph -- both commits rewrote comment blocks
+(the ND-hang issue references, and the prompt-length bound) and nothing else,
+so the pin stays. The plugin command does print nothing.
 
 One exception the filename filter cannot express: a commit that touches a
 served module but changes only comments. The rule is "does the server execute
@@ -146,10 +147,18 @@ leave the pin:
 
 ```
 git diff <pinned> <head> -- <the file> \
-  | grep -E '^[+-]' | grep -vE '^[+-]#|^(\+\+\+|---)'   # must print nothing
+  | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+  | grep -vE '^[+-][[:space:]]*(#|$)'                   # must print nothing
 ```
 
 Anything printed is a real code change and the pin has to move.
+
+`[[:space:]]*` is load-bearing: the earlier form anchored `#` directly after
+the `+`/`-`, so it only recognised a comment in column 0. Every comment inside
+a function is indented, so an indented comment-only diff was reported as a real
+code change -- which is what happened to `tt/qwen3_asr_decoder.py`, whose
+comment edit printed until this was fixed. Trailing `|$` drops blank-line
+changes for the same reason.
 
 The extra tt-metal exclusions are the same rule, not exceptions to it. Those
 files ship inside the image but nothing the server loads imports them: the

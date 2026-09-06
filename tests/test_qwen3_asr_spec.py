@@ -208,6 +208,74 @@ def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
     assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
 
 
+def _comment_only_filter():
+    """The comment-only grep the README tells you to run, as a Python predicate.
+
+    Mirrors `grep -vE '^[+-][[:space:]]*(#|$)'`: keep a diff line only if it is
+    neither an indented comment nor blank.
+    """
+    import re
+
+    # Built from the README's own pattern rather than restated, so a change to
+    # the documented grep is what this test exercises. BRE character classes
+    # translate directly enough for the two we use.
+    readme = _readme()
+    start = readme.index("| grep -vE '^[+-][[:space:]]")
+    quoted = readme[readme.index("'", start) + 1 :]
+    quoted = quoted[: quoted.index("'")]
+    pattern = re.compile(quoted.replace("[[:space:]]", "[ \\t]"))
+    return lambda line: not pattern.match(line)
+
+
+def test_the_comment_only_check_recognises_indented_comments():
+    """The documented grep anchored # to column 0, so it never fired in practice.
+
+    Every comment inside a function is indented, so
+
+        grep -vE '^[+-]#|^(\\+\\+\\+|---)'
+
+    let an indented comment-only diff through and reported it as a real code
+    change. That happened for real: tt/qwen3_asr_decoder.py's comment edit was
+    printed by the check, which -- taken at face value -- orders a ~7 h rebuild
+    for a diff that changes no executed byte.
+
+    The fixed form allows leading whitespace, and drops blank-line changes for
+    the same reason.
+    """
+    readme = _readme()
+    assert "[[:space:]]*" in readme, (
+        "the comment pattern must tolerate indentation, or it only matches column 0"
+    )
+    assert "^[+-]#|" not in readme, "the column-0-only form must not come back"
+    assert "load-bearing" in readme, (
+        "say why the whitespace class is there, or it gets 'simplified' away"
+    )
+
+    keep = _comment_only_filter()
+    # an indented comment-only diff must be filtered out entirely
+    for line in ("-        # old wording", "+        # new wording", "+\t# tab-indented", "+"):
+        assert not keep(line), f"{line!r} is a comment/blank change; it must be dropped"
+    # while real code must survive, indented or not
+    for line in ("+        S_pad = 1024", "-    return None", "+x = 1"):
+        assert keep(line), f"{line!r} is executable; it must be reported"
+
+
+def test_the_readme_lists_every_file_the_pin_check_prints_today():
+    """One name was listed while the command prints two.
+
+    Run at the current pins the filename filter prints both
+    tt/generator_vllm.py and tt/qwen3_asr_decoder.py. Naming only the first
+    leaves a reader who sees two files unsure whether the second is the known
+    case or a new one.
+    """
+    readme = _readme()
+    body = readme[readme.index("At the current pins the tt-metal command") :]
+    body = body[: body.index("One exception the filename filter")]
+    for name in ("tt/generator_vllm.py", "tt/qwen3_asr_decoder.py"):
+        assert name in body, f"{name} is printed by the check; name it"
+    assert "the pin stays" in body
+
+
 def _readme_row(readme, leading_cell):
     for line in readme.splitlines():
         if line.startswith(f"| {leading_cell}"):
