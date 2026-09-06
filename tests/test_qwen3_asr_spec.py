@@ -1395,7 +1395,7 @@ def test_the_readme_reports_what_the_perf_probes_measured():
     """
     readme = _readme()
     section = readme[readme.index("Serving-level timings") :]
-    section = section[: section.index("**How the current image was built.**")]
+    section = section[: section.index("**No image exists at these pins yet.**")]
 
     # both probes' headline numbers, not just one column
     for value in ("1.243", "1.338", "23.91", "22.22", "41.45", "39.52"):
@@ -1416,7 +1416,7 @@ def test_the_readme_explains_the_gap_between_the_two_probes():
     """
     readme = _readme()
     section = readme[readme.index("Serving-level timings") :]
-    section = section[: section.index("**How the current image was built.**")]
+    section = section[: section.index("**No image exists at these pins yet.**")]
     assert "SSE framing" in section, "say why the client-side number is higher"
     assert "final chunk carries no new token" in section, (
         "explain the off-by-one in tokens per request"
@@ -2294,4 +2294,30 @@ def test_the_readme_warns_against_exporting_arch_name_globally():
     lowered = body.lower()
     assert "do not" in lowered and "global" in lowered, (
         "say plainly not to export it globally, or the note reads as an invitation"
+    )
+def test_the_readme_admits_no_image_exists_at_the_current_pins():
+    """The pin moved for a code change; the measurements predate it.
+
+    The old wording said only that the branches were unpushed, which was true
+    but no longer the whole story: bumping tt_metal_commit to pick up the
+    served-decoder dtype fix means the image the numbers came from was built at
+    the *previous* pin and does not contain it. Reporting figures under a pin
+    nothing was built from, without saying so, is the sort of thing a reader
+    reasonably assumes has been checked.
+    """
+    readme = _readme()
+    body = readme[readme.index("**No image exists at these pins yet.**") :]
+    body = body[: body.index("\n## Install")]
+    flat = " ".join(body.split())
+
+    assert "No image exists at these pins yet" in flat
+    # which pin the numbers actually came from
+    assert "e7929dcf5dcf" in flat, (
+        "name the pin the measurements were taken at, or 'predates' is unfalsifiable"
+    )
+    # why the figures still stand, so this does not read as invalidating them
+    assert "moves no default" in flat
+    # and the ordering of what is left
+    assert "push the branches, then" in flat, (
+        "the rebuild depends on the push; give the order"
     )

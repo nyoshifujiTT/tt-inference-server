@@ -58,7 +58,7 @@ the upstream clone at all:
 ```
 cd $TT_METAL_HOME
 docker buildx bake -f dockerfile/docker-bake.hcl \
-  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:e7929dcf5dcf2ad8f8f98dc945d012f61ad075cb \
+  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:60166e19d45a0da3aa1735eb88fed13c444877aa \
   --set ci-build.output=type=docker \
   ci-build
 ```
@@ -280,7 +280,7 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +- weights:
 +    - neosophie/Qwen3-ASR-1.7B-JA
 +  version: "0.1.0"
-+  tt_metal_commit: "e7929dcf5dcf2ad8f8f98dc945d012f61ad075cb"
++  tt_metal_commit: "60166e19d45a0da3aa1735eb88fed13c444877aa"
 +  vllm_commit: "c0c4842"
 +  impl: tt_vllm_plugin
 +  min_disk_gb: 15
@@ -303,7 +303,7 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +  status: EXPERIMENTAL
 PATCH
 
-python3 scripts/build_docker_images.py --build-metal-commit e7929dcf5dcf2ad8f8f98dc945d012f61ad075cb --single-threaded
+python3 scripts/build_docker_images.py --build-metal-commit 60166e19d45a0da3aa1735eb88fed13c444877aa --single-threaded
 
 git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile \
              workflows/model_specs/prod/audio_tts.yaml
@@ -533,7 +533,7 @@ it is replaced, so keep at least 60 GB free.
 MODEL_SPECS_ENV=dev python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 \
   --workflow server --docker-server --dev-mode --no-auth --service-port 8110 \
   --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-e7929dcf5dcf2ad8f8f98dc945d012f61ad075cb-c0c4842
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-60166e19d45a0da3aa1735eb88fed13c444877aa-c0c4842
 ```
 
 `MODEL_SPECS_ENV=dev` is required here for the same reason as in the build: the
@@ -1018,15 +1018,25 @@ so far -- across the vLLM 0.24->0.26 upgrade, three separate image builds at the
 earlier pins, a device reset, and the current pins. The ~1 % spread in rtfx is
 session-to-session drift on this board.
 
-**How the current image was built.** The pinned commits are not on the forks
-yet, so `git clone https://github.com/nyoshifujiTT/...` cannot reach them. This
-image was built with both clone URLs pointed at a local `git daemon` instead;
-everything else -- the Bake base, the patch, the build command -- is exactly
-what is written above. Once the branches are pushed, the build has to be
-repeated with the fork URLs unchanged, which is the only step of this runbook
-that has not been executed as written at these pins. Earlier pins were
-reproduced that way (fork clone, and fork clone with the base rebuilt from
-Bake), and produced the same CER.
+**No image exists at these pins yet.** The `tt_metal_commit` above was bumped
+to pick up a real code change (the served decoder now takes its weight dtype
+from the same helper the demos use), and nothing has been built from it. The
+measurements in this runbook were taken on the image built at the previous pin
+`e7929dcf5dcf...`, which does not contain that change; they stand as
+accuracy/throughput figures because the change moves no default, but the image
+and the pin do not correspond until a rebuild happens.
+
+That rebuild is also blocked on the push: the pinned commits are not on the
+forks yet, so `git clone https://github.com/nyoshifujiTT/...` cannot reach
+them. Earlier images were built with both clone URLs pointed at a local
+`git daemon` instead -- everything else (the Bake base, the patch, the build
+command) exactly as written above -- and earlier pins were also reproduced
+with a plain fork clone, and with the base rebuilt from Bake, producing the
+same CER.
+
+So two things are outstanding at these pins, in order: push the branches, then
+build once with the fork URLs unchanged and re-run the corpus evals against the
+resulting image.
 
 ## Install
 ```
