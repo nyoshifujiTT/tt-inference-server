@@ -2004,6 +2004,44 @@ def test_the_guard_does_not_block_on_our_own_leftovers():
     )
 
 
+def test_recover_device_refuses_to_reset_a_chip_a_container_is_serving():
+    """The pre-launch guard is not the only way into tt-smi -r.
+
+    recover_device is also reached from the monitor loop, so a container
+    started underneath us -- or a canary failing for an unrelated reason --
+    lands on `tt-smi -r` with the deployment still serving. tt-smi does not
+    care who holds the chip, and device_ok reports success afterwards because
+    the board itself reads fine, so the reset is both destructive and invisible.
+    """
+    sh = _supervisor()
+    body = sh[sh.index("recover_device() {") : sh.index("kill_ours() {")]
+
+    assert "device_holders" in body, "recover_device must check who holds the chip"
+    assert "in_container" in body, "and only containerised holders may stop it"
+    assert "return 1" in body, "it must decline rather than reset"
+    # the check has to come before the reset, not after it
+    assert body.index("device_holders") < body.index("$TTSMI"), (
+        "the holder check must precede tt-smi -r"
+    )
+
+
+def test_a_declined_recovery_does_not_abort_the_supervisor():
+    """`set -u` is on and the callers ignore the status, so make that explicit.
+
+    Both call sites continue/break back to the guard, which then waits for the
+    container. Writing `recover_device || true` says the non-zero return is an
+    expected outcome rather than an oversight.
+    """
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+    calls = [ln.strip() for ln in main.splitlines() if "recover_device" in ln and not ln.lstrip().startswith("#")]
+    assert calls, "the main loop must still attempt recovery"
+    for call in calls:
+        assert call.endswith("|| true"), (
+            f"a declined recovery must not be read as a script error: {call}"
+        )
+
+
 def test_the_runbook_says_the_unit_waits_rather_than_taking_over():
     """Otherwise "enable the service" reads as "the service now runs".
 

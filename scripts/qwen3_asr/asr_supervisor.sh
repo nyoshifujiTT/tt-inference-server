@@ -64,6 +64,26 @@ device_ok() {
 }
 
 recover_device() {
+  # Never reset a chip a container is serving on.
+  #
+  # The pre-launch guard keeps us out of that state, but recover_device is also
+  # reached from the monitor loop, where a container could have been started
+  # underneath us since. `tt-smi -r` does not care who holds the device: it
+  # would reset the board out from under a deployment that is answering
+  # requests, and device_ok would then report success because the board reads
+  # fine. Bail out and let the main loop's guard wait for the container
+  # instead.
+  local held pid
+  held=""
+  for pid in $(device_holders); do
+    in_container "$pid" && held="$held $pid"
+  done
+  if [ -n "$held" ]; then
+    log "not recovering: device held by containerised pid(s):$held -- \
+tt-smi -r would reset the chip that deployment is serving on"
+    return 1
+  fi
+
   log "recovering device (tt-smi -r) ..."
   sudo "$TTSMI" -r >/dev/null 2>&1
   sleep 5
@@ -256,7 +276,9 @@ waiting for that deployment to stop (do not run this supervisor beside a \
 
   launch_server
   if ! wait_healthy; then
-    recover_device
+    # A refusal here (container appeared underneath us) is fine: continue
+    # returns to the guard above, which waits for it to go.
+    recover_device || true
     continue
   fi
   # monitor loop
@@ -270,7 +292,7 @@ waiting for that deployment to stop (do not run this supervisor beside a \
       log "canary failed ($fails)"
       if [ "$fails" -ge 2 ]; then
         log "server wedged; recovering + relaunching"
-        recover_device
+        recover_device || true
         break
       fi
     fi
