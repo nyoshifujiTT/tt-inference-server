@@ -3325,3 +3325,64 @@ def test_the_first_transcription_budget_clears_the_quoted_range():
     assert int(budget.group(1)) > high, (
         f"the budget {budget.group(1)}s does not clear the quoted worst case {high}s"
     )
+
+
+def test_the_supervisor_is_valid_shell():
+    """Every other check here reads the script as text; none runs a parser.
+
+    It is 374 lines started by systemd with Restart=always, so a syntax error
+    does not surface as a broken test -- ExecStart fails immediately, systemd
+    retries every RestartSec=15, and the service never comes up while every
+    text assertion in this file still passes. `git apply --check` is already
+    shelled out to below, so there is no reason not to.
+    """
+    import subprocess
+
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "asr_supervisor.sh"
+    )
+    result = subprocess.run(
+        ["bash", "-n", path], capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"asr_supervisor.sh is not valid bash: {result.stderr}"
+    )
+
+
+def test_the_unit_file_points_at_a_script_that_parses():
+    """The unit names an absolute path; check the file it would actually run.
+
+    Only the checked-out copy exists here, but the unit's ExecStart has to
+    name the script this test just parsed -- otherwise a valid script sits
+    beside a unit pointing somewhere else.
+    """
+    unit = _unit_file()
+    exec_start = [
+        line for line in unit.splitlines() if line.startswith("ExecStart=")
+    ]
+    assert len(exec_start) == 1, exec_start
+    assert exec_start[0].endswith("asr_supervisor.sh 8101"), exec_start[0]
+    assert "scripts/qwen3_asr/asr_supervisor.sh" in exec_start[0], (
+        "the unit must run the checked-out script, not a copy"
+    )
+
+
+def test_the_supervisor_does_not_set_e():
+    """-e would abort the recovery loop, which uses non-zero exits as control.
+
+    Stating this keeps someone from "hardening" the script into one that dies
+    the first time a canary times out -- which is the situation it exists to
+    handle. `set -u` is there and is what catches the typo'd variable.
+    """
+    sh = _supervisor()
+    set_lines = [
+        line.strip() for line in sh.splitlines() if line.strip().startswith("set ")
+    ]
+    assert set_lines == ["set -u"], (
+        f"expected only `set -u`; found {set_lines}. -e/pipefail would abort "
+        f"the monitor loop on the failures it is written to recover from"
+    )
+    # and the control flow that depends on it must still be there
+    assert "if ! " in sh or "|| true" in sh, (
+        "the loop no longer uses non-zero exits as control flow; revisit -e"
+    )
