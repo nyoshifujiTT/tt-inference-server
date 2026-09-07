@@ -1263,6 +1263,20 @@ exercised against the live host:
 | `in_container` | classifies a containerised pid correctly (cgroup `/system.slice/docker-<id>.scope`) |
 | `kill_ours` | leaves **every** process of a running `--docker-server` alone -- exercised against the live deployment with `kill` stubbed: both the API server (pid 2714943) and its engine were reported spared and nothing was killed |
 | `canary_ok` | 200 + text against the live server |
+| `relax_device_perms` | chmods the chip nodes only. Exercised both ways on the host: the helper leaves `/dev/tenstorrent/by-id` `drwxr-xr-x` with its symlink resolvable while `/dev/tenstorrent/0` stays `666`, and the earlier `chmod 666 /dev/tenstorrent/*` reproduces `drw-rw-rw-` plus `stat: Permission denied` immediately |
+
+That last row is a repair as well as a check. `chmod 666
+/dev/tenstorrent/*` also matched the `by-id/` directory udev creates for the
+stable `blackhole-<asic_id>` symlinks, and 666 on a directory drops its execute
+bit -- so an earlier supervisor run left `by-id` untraversable by anything
+non-root, and it stays that way until udev recreates it at the next boot. If
+you find it in that state on a host where an older copy of this script ran:
+
+```
+ls -ld /dev/tenstorrent/by-id      # drw-rw-rw- means it was hit
+sudo chmod 755 /dev/tenstorrent/by-id
+stat -c '%N' /dev/tenstorrent/by-id/*   # must now resolve to ../0
+```
 
 What is **not** re-verified is the full wedge → power-cycle → reboot → recover
 loop on this host, because that needs a wedged board and this one has not

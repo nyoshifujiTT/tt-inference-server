@@ -2095,6 +2095,27 @@ def test_every_device_chmod_goes_through_that_helper():
     assert "relax_device_perms" in launch, "launch_server must relax the nodes"
 
 
+def test_the_runbook_tells_you_how_to_repair_a_widened_by_id():
+    """Hosts that ran the older script are still broken until someone fixes it.
+
+    The bad chmod persists across supervisor restarts -- only a reboot (udev
+    recreating the directory) or an explicit chmod clears it -- so a fix in the
+    script does not fix the machines it already ran on. The delivery host was
+    found in that state days later.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "`relax_device_perms`")
+    assert "chip nodes only" in row, "say what the helper's scope is"
+    assert "drw-rw-rw-" in row, "and what the broken state looks like"
+
+    section = readme[readme.index("`relax_device_perms`") :]
+    flat = " ".join(section.split())
+    assert "chmod 755 /dev/tenstorrent/by-id" in flat, (
+        "give the repair command; the script fix does not reach hosts it already ran on"
+    )
+    assert "next boot" in flat, "say that it does not clear itself"
+
+
 def test_the_runbook_says_the_unit_waits_rather_than_taking_over():
     """Otherwise "enable the service" reads as "the service now runs".
 
