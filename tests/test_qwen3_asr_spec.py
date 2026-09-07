@@ -1444,10 +1444,27 @@ def test_the_readme_documents_how_to_measure():
     """
     readme = _readme()
     assert "### 4. Eval and benchmark" in readme
-    assert "asr_ja_eval.py" in readme, "the corpus CER harness must be named"
-    assert "asr_openai_benchmark.py" in readme, "the throughput harness must be named"
+
+    # Scoped to the "### 4." chapter -- its subsections included, since that is
+    # where the commands and their results live. A whole-file check said
+    # nothing (both CERs occur several times elsewhere), and bounding at the
+    # next `#### ` was too tight: `### 4.` opens by explaining why the upstream
+    # harnesses do not fit, and only its subsections name ours and quote the
+    # numbers.
+    chapter = readme[readme.index("### 4. Eval and benchmark") :]
+    next_chapter = re.search(r"\n## ", chapter)
+    assert next_chapter, "the chapter must be bounded by a following ## heading"
+    chapter = chapter[: next_chapter.start()]
+
+    assert "asr_ja_eval.py" in chapter, "the corpus CER harness must be named"
+    assert "asr_openai_benchmark.py" in chapter, (
+        "the throughput harness must be named"
+    )
     # the measured results, so a rerun can be compared against something
-    assert "0.1002" in readme and "0.1668" in readme
+    assert "0.1002" in chapter and "0.1668" in chapter, (
+        "the chapter that documents the harnesses must also record what they "
+        "measured, or the commands produce numbers with nothing to compare to"
+    )
 
 
 def test_the_readme_gives_a_runnable_check_for_the_import_graph_claim():
@@ -1877,15 +1894,31 @@ def test_the_supervisor_kills_the_engine_process_too():
     later launch then hangs in "Starting devices in cluster", and tt-smi -r does
     not help because the orphan reacquires the device after the reset. This was
     observed for real: a 10h-old orphan blocked three consecutive restarts.
+
+    Checked against code rather than the whole file. Two comments now explain
+    why the pattern is handled the way it is, so a containment check on the
+    file passed even with the actual kill deleted -- verified by removing
+    `kill_ours "VLLM::EngineCore"` and watching this test stay green.
     """
     sh = _supervisor()
-    assert "VLLM::EngineCore" in sh, (
+    code = "\n".join(
+        line for line in sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "VLLM::EngineCore" in code, (
         "the engine process must be killed, not just its run.py parent"
     )
-    assert "device_holders" in sh, (
+    assert "device_holders" in code, (
         "verify the device is actually free before relaunching"
     )
-    assert "kill -9" in sh, "escalate for anything that still holds the device"
+    assert "kill -9" in code, "escalate for anything that still holds the device"
+    # and the engine pattern must be stopped, not merely named somewhere
+    stop = sh[sh.index("stop_server() {") : sh.index("launch_server() {")]
+    stop_code = "\n".join(
+        line for line in stop.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "VLLM::EngineCore" in stop_code, (
+        "stop_server must be the place that stops the engine"
+    )
 
 
 def test_the_supervisor_finds_holders_that_lsof_cannot_see():
@@ -1944,7 +1977,12 @@ def test_the_supervisor_spares_containerised_servers():
         "the cleanup must define in_container to distinguish our processes "
         "from containerised ones"
     )
-    assert "/docker-" in sh, "identify container processes by cgroup"
+    # In code, not in the comment that explains it: a cgroup pattern only
+    # spares anything if in_container actually matches on it.
+    sh_code = "\n".join(
+        line for line in sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "/docker-" in sh_code, "identify container processes by cgroup"
     # and it must actually be consulted on both paths
     assert sh.count("in_container ") >= 2, (
         "in_container must gate both the engine kill and the device-holder "
@@ -2381,7 +2419,14 @@ def test_the_supervisor_recovery_checks_can_actually_fire():
     assert "/dev/tenstorrent/2" not in sh, (
         "a single-board p150 host only has /dev/tenstorrent/0"
     )
-    assert "/dev/tenstorrent/0" in sh
+    # and the correct node has to be used, not merely mentioned: three of the
+    # four occurrences are comments explaining the device-holder machinery.
+    node_code = "\n".join(
+        line for line in sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "/dev/tenstorrent/0" in node_code, (
+        "the post-power-cycle wait must test the node that exists on this host"
+    )
 
 
 def test_the_supervisor_waits_long_enough_for_startup():
