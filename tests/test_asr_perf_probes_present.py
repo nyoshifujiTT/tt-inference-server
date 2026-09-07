@@ -332,3 +332,45 @@ def test_the_benchmark_really_downloads_before_measuring():
         "clips are fetched before any request is posted; if that changes, the "
         "README's 'no request reached the server' claim stops holding"
     )
+
+
+def test_the_runbook_says_the_probes_need_an_idle_server():
+    """The /metrics probe cannot exclude other traffic, and nothing said so.
+
+    The counters it differences are server-wide, so concurrent requests land in
+    its result, and everything shares one device so they slow it down too.
+    Done by accident during verification here: a corpus eval overlapped the
+    benchmark and probe window, and the pass reported rtfx 4.476 (normal
+    11.6-13.0), gen_tokens 1689 (fixed at 1440) and TPS/user 10.79 (~25).
+    Nothing had regressed; the measurement was meaningless, and without this
+    note the numbers read as a serious performance loss.
+    """
+    readme = _read(README)
+    body = readme[readme.index("The non-streaming probe exists because") :]
+    body = body[: body.index("Measured on the delivery p150")]
+    flat = " ".join(body.split())
+
+    assert "Run these alone." in flat, "state the precondition"
+    assert "cannot be attributed to a client" in flat, (
+        "say why concurrent traffic corrupts the /metrics difference"
+    )
+    # the measured evidence, so the shape is recognisable
+    assert "4.476" in flat and "1689" in flat, (
+        "quote what a contaminated pass looked like"
+    )
+    # and the self-check that detects it
+    assert "gen_tokens" in flat and "requests x tokens-per-request" in flat, (
+        "give the invariant that reveals foreign traffic in the counters"
+    )
+
+
+def test_the_probe_really_sends_a_fixed_token_budget():
+    """The gen_tokens self-check only works while the budget is fixed."""
+    src = _read(PROBE)
+    assert '"max_completion_tokens":MAXTOK' in src.replace(" ", ""), (
+        "the probe must cap tokens per request, or gen_tokens cannot be "
+        "predicted and the contamination check above is unusable"
+    )
+    assert "MAXTOK=int(sys.argv[6])" in src.replace(" ", ""), (
+        "and the cap must be an argument, so the expected product is known"
+    )

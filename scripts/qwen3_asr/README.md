@@ -1113,6 +1113,17 @@ The non-streaming probe exists because the customer's client sets
 have to be read off the server's own counters. The streaming probe measures the
 same quantities the ordinary way and is the cross-check on them.
 
+**Run these alone.** The non-streaming probe differences server-wide `vllm:*`
+counters, which cannot be attributed to a client, so any other traffic in the
+window lands in its numbers -- and everything shares one device, so a
+concurrent load slows the run as well. Done by accident here: a corpus eval
+started for an unrelated check overlapped the benchmark and probe, and the pass
+reported `rtfx` 4.476 against a normal 11.6-13.0, probe `gen_tokens` 1689
+against a fixed 1440, and TPS/user 10.79 against ~25. Nothing had regressed;
+the measurement was invalid. `gen_tokens` is the tell: the probe sends a fixed
+clip with a fixed `max_completion_tokens`, so anything other than
+`requests x tokens-per-request` means the counters caught someone else's work.
+
 Measured on the delivery p150. **Not with the image the pins above name** --
 that one has not been built yet (see "No image exists at these pins yet"
 below). These come from the image at the previous pin,
