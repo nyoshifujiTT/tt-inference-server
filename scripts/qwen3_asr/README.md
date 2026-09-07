@@ -1237,6 +1237,7 @@ later inside `run.py`. Defaults are under the service user's home:
 | `CANARY_WAV` | `$HOME/real_ja.wav` | the clip from "The clip to check with" above -- verified the same file, md5 `3d43ec3ac2562231ec7c8c9ce4087ba4`. The canary only checks for HTTP 200 and a `"text"` field, so it does not depend on the transcript, but keeping it to that clip means a wrong answer is visible by eye in the log |
 | `TTSMI` | `$(command -v tt-smi)`, else `$HOME/ttvenv/bin/tt-smi` | |
 | `LOG` | `$HOME/asr_supervisor.log` | |
+| `CANARY_FIRST_TIMEOUT` | `600` (seconds) | budget for the **first** transcription after a launch, which JIT-compiles kernels rather than just inferring -- measured 6m27s–6m35s over five runs here. The supervisor spends this once, between `/health` turning 200 and the monitor loop starting, so the steady-state canary can keep its 45 s. Without it the monitor asked a still-compiling server for a transcription 20 s after startup, took two 45 s timeouts as a wedge 2.2 minutes in, reset the device mid-compile and relaunched -- so the supervisor could never bring the service up on a cold kernel cache. Raise it only if this board gets slower; lowering it below the compile time restores that loop |
 
 The unit file sets `TTIS` and nothing else, because the rest resolve correctly
 for a service running as `ubuntu` on this host. Override there when they do

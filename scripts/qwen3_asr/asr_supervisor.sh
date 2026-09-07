@@ -258,13 +258,37 @@ wait_healthy() {
 }
 
 canary_ok() {
-  # lightweight liveness: a bounded transcription must return 200 with text
-  local out
-  out=$(curl -s -m 45 "http://127.0.0.1:${PORT}/v1/audio/transcriptions" \
+  # Liveness: a bounded transcription must return 200 with text.
+  #
+  # The timeout is an argument because the FIRST transcription after a launch
+  # is not bounded by inference: tt-metal JIT-compiles kernels into the
+  # container/host cache, measured at 6m27s-6m35s across five runs on this
+  # board. /health turns 200 long before that (route published 02:35:52, first
+  # transcription done 02:45 = 9.1 min later), so a 45 s canary run straight
+  # out of wait_healthy always times out, and two of those declare a wedge
+  # after 2.2 minutes -- resetting the device mid-compile and starting over,
+  # forever.
+  local timeout="${1:-45}" out
+  out=$(curl -s -m "$timeout" "http://127.0.0.1:${PORT}/v1/audio/transcriptions" \
         -F "file=@${CANARY_WAV}" -F "model=neosophie/${MODEL_NAME}" -F language=ja \
         -w '\n%{http_code}' 2>/dev/null)
   local code="${out##*$'\n'}"
   [ "$code" = "200" ] && echo "$out" | grep -q '"text"'
+}
+
+# One transcription with the compile budget, so the steady-state canary can
+# stay short. README: "budget 7 minutes for it, and do not put a shorter
+# --max-time on that request".
+CANARY_FIRST_TIMEOUT="${CANARY_FIRST_TIMEOUT:-600}"
+
+warm_first_transcription() {
+  log "warming: first transcription JIT-compiles kernels (up to ${CANARY_FIRST_TIMEOUT}s)"
+  if canary_ok "$CANARY_FIRST_TIMEOUT"; then
+    log "warming: first transcription returned; steady-state canary starts now"
+    return 0
+  fi
+  log "warming: first transcription did not return within ${CANARY_FIRST_TIMEOUT}s"
+  return 1
 }
 
 log "=== supervisor start (port $PORT) ==="
@@ -296,6 +320,15 @@ waiting for that deployment to stop (do not run this supervisor beside a \
   if ! wait_healthy; then
     # A refusal here (container appeared underneath us) is fine: continue
     # returns to the guard above, which waits for it to go.
+    recover_device || true
+    continue
+  fi
+  # /health being 200 does not mean a transcription can complete yet -- the
+  # first one compiles kernels for ~6.5 min. Spend that here, with the long
+  # budget, so the monitor's short canary is only ever asked about a server
+  # that has already served once. Without this the monitor declares a wedge
+  # 2.2 min in, every single launch.
+  if ! warm_first_transcription; then
     recover_device || true
     continue
   fi

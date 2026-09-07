@@ -2116,6 +2116,80 @@ def test_the_runbook_tells_you_how_to_repair_a_widened_by_id():
     assert "next boot" in flat, "say that it does not clear itself"
 
 
+def _canary_timings(sh):
+    """(steady-state canary timeout, monitor sleep, fails before recovery)."""
+    canary = sh[sh.index("canary_ok() {") : sh.index("CANARY_FIRST_TIMEOUT=")]
+    default = re.search(r'local timeout="\$\{1:-(\d+)\}"', canary)
+    assert default, "canary_ok must take its timeout as an argument with a default"
+    monitor = sh[sh.index("# monitor loop") :]
+    nap = re.search(r"^\s*sleep (\d+)$", monitor, re.M)
+    fails = re.search(r'\[ "\$fails" -ge (\d+) \]', monitor)
+    assert nap and fails
+    return int(default.group(1)), int(nap.group(1)), int(fails.group(1))
+
+
+def test_the_monitor_is_not_asked_about_a_server_that_never_served():
+    """/health 200 does not mean a transcription can complete yet.
+
+    The first transcription JIT-compiles kernels: measured 6m27s-6m35s across
+    five runs, and on this run the route was published at 02:35:52 while the
+    first transcription finished at 02:45 -- 9.1 minutes later. The monitor
+    loop starts 20 s after wait_healthy returns and gives the canary 45 s, so
+    two failures arrive 2.2 minutes in and declare a wedge. recover_device then
+    resets the device mid-compile and the loop relaunches, so the supervisor
+    could never bring the service up by itself.
+
+    The launch path therefore has to spend the compile budget before the
+    monitor's short canary is used at all.
+    """
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+
+    assert "warm_first_transcription" in main, (
+        "the launch path must complete one transcription before monitoring"
+    )
+    # and it must come after wait_healthy but before the monitor loop
+    assert main.index("wait_healthy") < main.index("warm_first_transcription") < main.index(
+        "# monitor loop"
+    ), "the warm-up belongs between the health gate and the monitor"
+
+
+def test_the_warm_up_budget_covers_the_measured_compile():
+    """A budget shorter than the measurement reintroduces the same loop."""
+    sh = _supervisor()
+    budget = re.search(r'CANARY_FIRST_TIMEOUT="\$\{CANARY_FIRST_TIMEOUT:-(\d+)\}"', sh)
+    assert budget, "the first-transcription budget must be a named, overridable value"
+    seconds = int(budget.group(1))
+    # 6m35s measured, and the runbook tells readers to budget 7 minutes
+    assert seconds >= 7 * 60, (
+        f"{seconds}s is under the measured 6m35s compile plus margin; the "
+        f"runbook budgets 7 minutes"
+    )
+
+
+def test_the_steady_state_canary_stays_short():
+    """The long budget is for the first request only.
+
+    If the monitor also waited minutes, a genuinely wedged server would go
+    unnoticed for that long -- which is what the canary exists to catch.
+    """
+    default, nap, fails = _canary_timings(_supervisor())
+    assert default <= 60, f"the steady-state canary must stay short, got {default}s"
+    # and the wedge verdict must still be reached in a couple of minutes
+    worst = fails * (nap + default)
+    assert worst <= 5 * 60, f"a wedge would take {worst}s to notice"
+
+
+def test_a_failed_warm_up_recovers_instead_of_monitoring():
+    """If the first transcription never returns, that IS the wedge."""
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+    block = main[main.index("warm_first_transcription") :]
+    block = block[: block.index("# monitor loop")]
+    assert "recover_device" in block, "a failed warm-up must recover, not proceed"
+    assert "continue" in block, "and restart the launch rather than monitor"
+
+
 def test_the_runbook_says_the_unit_waits_rather_than_taking_over():
     """Otherwise "enable the service" reads as "the service now runs".
 
