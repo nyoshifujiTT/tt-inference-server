@@ -125,13 +125,32 @@ device_holders() {
   done | sort -un
 }
 
-stop_server() {
-  pkill -f "run.py --model Qwen3-ASR" 2>/dev/null
-  pkill -f "run_vllm_api_server.py" 2>/dev/null
-  # Not a bare pkill: the same pattern matches a containerised server's engine.
-  for pid in $(pgrep -f "VLLM::EngineCore" 2>/dev/null); do
-    in_container "$pid" || kill "$pid" 2>/dev/null
+# Kill our own processes matching a pattern, never a containerised one.
+#
+# A bare `pkill -f` is wrong for every pattern here, not just for
+# VLLM::EngineCore. Host /proc shows processes inside containers too, so
+# `pgrep -f run_vllm_api_server.py` on a host running --docker-server returns
+# the live production server's pid -- measured: pid 2714943, cgroup
+# /system.slice/docker-9c2677b2....scope, identical to the container's
+# .State.Pid. pkill would have killed it. The EngineCore loop below was given
+# this guard after that mistake once already; the guard has to cover the whole
+# of stop_server, or the accident just moves to another line.
+kill_ours() {
+  local pattern="$1" pid
+  for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+    [ "$pid" = "$$" ] && continue
+    if in_container "$pid"; then
+      log "leaving containerised pid $pid alone (matched: $pattern)"
+    else
+      kill "$pid" 2>/dev/null
+    fi
   done
+}
+
+stop_server() {
+  kill_ours "run.py --model Qwen3-ASR"
+  kill_ours "run_vllm_api_server.py"
+  kill_ours "VLLM::EngineCore"
   sleep 3
 
   # Whatever still holds the device blocks the next launch: tt-metal then hangs

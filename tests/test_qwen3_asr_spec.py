@@ -1907,10 +1907,62 @@ def test_the_supervisor_spares_containerised_servers():
         "in_container must gate both the engine kill and the device-holder "
         "escalation"
     )
-    # the engine kill must go through the filter, not be a bare pkill
-    assert 'pkill -f "VLLM::EngineCore"' not in sh, (
-        "a bare pkill on the engine pattern also kills containerised servers"
+
+
+def test_no_kill_in_the_supervisor_bypasses_that_filter():
+    """The guard was on one pattern; the other two killed the container.
+
+    This test used to ban only `pkill -f "VLLM::EngineCore"`, so
+
+        pkill -f "run.py --model Qwen3-ASR"
+        pkill -f "run_vllm_api_server.py"
+
+    sat right above it, unguarded, and passed. Host /proc lists processes
+    inside containers, so on a host serving via --docker-server the second one
+    matches the live server -- measured: `pgrep -af run_vllm_api_server.py` ->
+    pid 2714943, `/proc/2714943/cgroup` ->
+    /system.slice/docker-9c2677b2....scope, equal to the container's
+    .State.Pid. Sparing the engine while killing the API server in front of it
+    is not sparing anything.
+
+    So the rule is not "guard the engine pattern"; it is "every kill in this
+    script goes through in_container".
+    """
+    sh = _supervisor()
+    code = [ln for ln in sh.splitlines() if not ln.lstrip().startswith("#")]
+
+    # pkill cannot be filtered per-pid at all, so it may not appear in code.
+    offenders = [ln.strip() for ln in code if "pkill" in ln]
+    assert not offenders, (
+        f"pkill kills every match, including containerised ones: {offenders}"
     )
+
+    # Every kill must sit inside the one helper that consults in_container,
+    # or be the escalation that already filtered its pid list.
+    helper = sh[sh.index("kill_ours() {") : sh.index("stop_server() {")]
+    assert "in_container" in helper, "kill_ours must consult in_container"
+    assert 'kill "$pid"' in helper, "and it is the helper that does the killing"
+
+    outside = sh.replace(helper, "")
+    outside_code = [ln for ln in outside.splitlines() if not ln.lstrip().startswith("#")]
+    stray = [
+        ln.strip()
+        for ln in outside_code
+        # the -9 escalation in stop_server kills $stubborn, which device_holders
+        # + in_container already filtered; anything else is unguarded
+        if re.search(r"\bkill\b", ln) and "$stubborn" not in ln and "kill_ours" not in ln
+    ]
+    assert not stray, f"these kills do not go through in_container: {stray}"
+
+
+def test_every_process_pattern_the_supervisor_stops_is_routed_through_it():
+    """All three patterns must be stopped, and all three via the helper."""
+    sh = _supervisor()
+    stop = sh[sh.index("stop_server() {") : sh.index("launch_server() {")]
+    for pattern in ("run.py --model Qwen3-ASR", "run_vllm_api_server.py", "VLLM::EngineCore"):
+        assert f'kill_ours "{pattern}"' in stop, (
+            f"{pattern} must be stopped through the filtered helper"
+        )
 
 
 def test_the_supervisor_recovery_checks_can_actually_fire():
