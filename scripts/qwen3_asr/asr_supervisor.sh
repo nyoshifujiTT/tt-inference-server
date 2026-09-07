@@ -231,6 +231,29 @@ canary_ok() {
 
 log "=== supervisor start (port $PORT) ==="
 while true; do
+  # Do not launch while a container owns the chip.
+  #
+  # stop_server deliberately spares containerised processes, so the device is
+  # still held when a --docker-server deployment is running. Launching anyway
+  # does not fail cleanly: run.py hangs in "Starting devices in cluster",
+  # wait_healthy burns its full 20 minutes (and is watching a different port
+  # from the container's), and recover_device then runs `tt-smi -r` -- which
+  # resets the chip out from under the deployment that is serving traffic. Since
+  # device_ok only asks whether tt-smi can read the board, the reset "succeeds"
+  # and the loop repeats: a working production server wedged every 20 minutes,
+  # forever. Wait for the container to go away instead, and say so.
+  while true; do
+    held=""
+    for pid in $(device_holders); do
+      in_container "$pid" && held="$held $pid"
+    done
+    [ -z "$held" ] && break
+    log "device held by containerised pid(s):$held -- not launching; \
+waiting for that deployment to stop (do not run this supervisor beside a \
+--docker-server server)"
+    sleep 60
+  done
+
   launch_server
   if ! wait_healthy; then
     recover_device

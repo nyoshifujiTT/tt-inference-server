@@ -1965,6 +1965,45 @@ def test_every_process_pattern_the_supervisor_stops_is_routed_through_it():
         )
 
 
+def test_the_supervisor_will_not_launch_while_a_container_owns_the_chip():
+    """Sparing the container's processes is not enough on its own.
+
+    Once stop_server leaves them alone the device stays held, and launching
+    anyway does not fail cleanly: run.py hangs in "Starting devices in
+    cluster", wait_healthy spends its full 20 minutes (watching 8101 while the
+    container serves 8110), and recover_device then runs `tt-smi -r` -- a reset
+    of the chip the deployment is serving on. device_ok only asks whether
+    tt-smi can read the board, so the reset reports success and the loop
+    repeats: a healthy production server wedged every 20 minutes indefinitely.
+
+    The main loop therefore has to refuse to launch while a containerised pid
+    holds the device, rather than discovering it 20 minutes later.
+    """
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+    guard = main[: main.index("  launch_server")]
+
+    assert "device_holders" in guard, "the check must run before the launch"
+    assert "in_container" in guard, "and only containerised holders may block it"
+    assert "not launching" in guard, "say what it is doing instead"
+    # it must wait, not fall through
+    assert "sleep" in guard, "the guard must block rather than proceed"
+    # and the launch must be genuinely after it
+    assert guard.index("device_holders") < guard.index("sleep")
+
+
+def test_the_guard_does_not_block_on_our_own_leftovers():
+    """A stale local-server pid is ours to kill; only containers gate us."""
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+    guard = main[: main.index("  launch_server")]
+    # the holder list must be filtered by in_container before it blocks
+    assert 'in_container "$pid" && held=' in guard, (
+        "blocking on every holder would deadlock against our own stale process, "
+        "which stop_server is there to clean up"
+    )
+
+
 def test_the_runbook_does_not_narrow_the_guard_to_the_engine():
     """"spares the engine" understated it and matched the old broken code.
 
