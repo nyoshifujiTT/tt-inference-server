@@ -111,20 +111,43 @@ tt-smi -r would reset the chip that deployment is serving on"
     return 0
   fi
 
-  log "tt-smi -r insufficient; ipmitool chassis power cycle (host will reboot)"
-  sudo ipmitool chassis power cycle >/dev/null 2>&1
+  # Escalate to a power cycle -- but only report what actually happened.
+  #
+  # This host has no BMC (`ipmitool chassis power status` ->
+  # "Could not open device at /dev/ipmi0 ..."), and the old form discarded both
+  # the output and the status with `>/dev/null 2>&1`. It then entered a wait
+  # loop whose condition -- /dev/tenstorrent/0 exists and device_ok -- is
+  # already true here, so 30 s later it logged "device back after power cycle"
+  # having neither power-cycled nor done anything beyond the tt-smi -r above.
+  # Measured: the whole tail returned in 30 s with that line in the log. An
+  # operator reading it would conclude the board had been recovered.
+  local ipmi_err
+  log "tt-smi -r insufficient; escalating to ipmitool chassis power cycle"
+  if ! ipmi_err=$(sudo ipmitool chassis power cycle 2>&1); then
+    log "power cycle UNAVAILABLE: ${ipmi_err:-ipmitool failed}"
+    log "device is still wedged and this host cannot recover it automatically \
+-- a human has to power-cycle it (see scripts/qwen3_asr/README.md)"
+    relax_device_perms
+    return 1
+  fi
+
   # The host reboots under us, so this loop only matters if the power cycle was
-  # refused. systemd restarts the supervisor after the reboot (see the unit).
+  # accepted but deferred. systemd restarts the supervisor after the reboot
+  # (see the unit).
+  local came_back=1
   for _ in $(seq 1 40); do
     sleep 30
     # /dev/tenstorrent/0 is the p150; the old check looked for device 2, which
     # does not exist on a single-board host and so never became true.
     if [ -e /dev/tenstorrent/0 ] && device_ok; then
       log "device back after power cycle"
+      came_back=0
       break
     fi
   done
+  [ "$came_back" = 0 ] || log "device did not come back within 20 minutes of the power cycle"
   relax_device_perms
+  return "$came_back"
 }
 
 # Kill a previous run and make sure nothing still holds the device.

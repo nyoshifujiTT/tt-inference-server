@@ -642,22 +642,38 @@ def test_the_readme_says_the_power_cycle_fallback_is_unavailable_here():
 def test_the_supervisor_relaunches_even_when_the_power_cycle_is_refused():
     """The README's "degrades safely" claim has to be true of the script.
 
-    recover_device must not exit or return non-zero on the power-cycle path,
-    or the main loop would stop instead of retrying. Checked structurally: the
-    branch ends in the chmod and falls out of the function.
+    The main loop must keep retrying when the power cycle cannot run. This test
+    used to demand that recover_device "must not return non-zero" on that path,
+    which conflated two things: the loop continuing, and the function claiming
+    success. It got the second one wrong -- reporting a recovery that did not
+    happen is exactly the failure this suite is meant to catch -- so the
+    requirement is now stated as "every caller tolerates the failure", which is
+    what actually keeps the relaunch going.
     """
     sh = _supervisor()
     start = sh.index('log "tt-smi -r insufficient')
-    branch = sh[start : sh.index("}", start)]
+    branch = sh[start : sh.index("\n}", start)]
 
     assert "ipmitool chassis power cycle" in branch
     assert "exit" not in branch, (
         "the power-cycle path must fall through to a relaunch, not exit"
     )
-    # a bounded wait, so a refused power cycle does not hang the supervisor
+    # a bounded wait, so an accepted-but-deferred power cycle cannot hang us
     assert "seq 1 40" in branch and "sleep 30" in branch, (
         "keep the wait bounded; 40 x 30 s = 20 min matches the startup budget"
     )
+    # and the loop keeps going: every call site tolerates a non-zero return
+    main = sh[sh.index('log "=== supervisor start') :]
+    calls = [
+        ln.strip()
+        for ln in main.splitlines()
+        if "recover_device" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert calls, "the main loop must still attempt recovery"
+    for call in calls:
+        assert call.endswith("|| true"), (
+            f"a failed recovery must not stop the relaunch loop: {call}"
+        )
 
 
 def test_the_readme_names_what_actually_blocks_the_librispeech_eval():
@@ -2086,10 +2102,16 @@ def test_every_device_chmod_goes_through_that_helper():
     # freshly reset. recover_device has two of them -- the tt-smi -r success
     # return and the fall-through after the power cycle -- so counting once per
     # function let either be dropped silently.
+    # Count the exits rather than hardcoding a number: recover_device gained a
+    # third one when the unavailable-power-cycle path started returning
+    # failure, and a fixed 2 would have had to be edited rather than checked.
     recover = sh[sh.index("recover_device() {") : sh.index("# Kill a previous run")]
-    assert recover.count("relax_device_perms") == 2, (
-        "both exits of recover_device (tt-smi -r success, and after the power "
-        f"cycle) must relax the nodes; found {recover.count('relax_device_perms')}"
+    exits = len(re.findall(r"^\s+return\b", recover, re.M))
+    assert exits >= 3, f"recover_device should have several exits, found {exits}"
+    assert recover.count("relax_device_perms") == exits - 1, (
+        "every exit that leaves the device reset must relax the nodes; the only "
+        "exception is the containerised-holder refusal, which never touched it. "
+        f"exits={exits}, relax calls={recover.count('relax_device_perms')}"
     )
     launch = sh[sh.index("launch_server() {") : sh.index("wait_healthy() {")]
     assert "relax_device_perms" in launch, "launch_server must relax the nodes"
@@ -2188,6 +2210,70 @@ def test_a_failed_warm_up_recovers_instead_of_monitoring():
     block = block[: block.index("# monitor loop")]
     assert "recover_device" in block, "a failed warm-up must recover, not proceed"
     assert "continue" in block, "and restart the launch rather than monitor"
+
+
+def test_a_failed_power_cycle_is_not_reported_as_a_recovery():
+    """No BMC here, and the old form logged success anyway.
+
+    `sudo ipmitool chassis power cycle >/dev/null 2>&1` discarded both the
+    output and the status. The wait loop that followed breaks as soon as
+    /dev/tenstorrent/0 exists and device_ok passes -- both already true on this
+    host -- so 30 s later it logged "device back after power cycle" and
+    returned 0, having neither power-cycled nor done anything past the tt-smi
+    -r above. Measured, with ipmitool stubbed to fail as it really does here:
+
+        04:14:22 ... ipmitool chassis power cycle (host will reboot)
+        04:14:52 device back after power cycle        <- false
+
+    An operator reading the log would conclude the board was recovered.
+    """
+    sh = _supervisor()
+    body = sh[sh.index("recover_device() {") : sh.index("# Kill a previous run")]
+
+    # the status must be checked, and the error kept
+    assert ">/dev/null 2>&1" not in body.split("ipmitool")[1].split("\n")[0], (
+        "discarding ipmitool's status is what hid the failure"
+    )
+    assert "ipmi_err=$(sudo ipmitool chassis power cycle 2>&1)" in body, (
+        "capture stderr so the real reason can be logged"
+    )
+    assert "power cycle UNAVAILABLE" in body, "say plainly that it did not happen"
+    assert "a human has to power-cycle it" in body, (
+        "and what the operator has to do instead"
+    )
+
+
+def test_recover_device_returns_failure_when_it_did_not_recover():
+    """Callers treat 0 as recovered; only actual recovery may return 0."""
+    sh = _supervisor()
+    body = sh[sh.index("recover_device() {") : sh.index("# Kill a previous run")]
+
+    # the tt-smi -r success path returns 0
+    assert 'log "device recovered by tt-smi -r"' in body
+    # the no-BMC path must return non-zero
+    unavailable = body[body.index("power cycle UNAVAILABLE") :]
+    assert "return 1" in unavailable[: unavailable.index("for _ in")], (
+        "a power cycle that could not run is not a recovery"
+    )
+    # and a power cycle that ran but did not bring the board back
+    assert "did not come back within 20 minutes" in body, (
+        "an accepted-but-ineffective power cycle must be recorded too"
+    )
+    assert 'return "$came_back"' in body, "and reported to the caller"
+
+
+def test_the_no_bmc_note_and_the_script_agree():
+    """The runbook already said the power-cycle path cannot run here.
+
+    That note and a log line claiming success were both in the tree at once.
+    Keep the note, now that the script agrees with it.
+    """
+    readme = _readme()
+    assert "ipmitool" in readme, "the runbook must still name the escalation"
+    flat = " ".join(readme.split())
+    assert "no BMC" in flat or "BMC" in flat, (
+        "and that this host has none, or the script's refusal looks like a bug"
+    )
 
 
 def test_the_runbook_says_the_unit_waits_rather_than_taking_over():
