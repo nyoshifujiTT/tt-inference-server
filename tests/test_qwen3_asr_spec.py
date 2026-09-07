@@ -28,6 +28,14 @@ def _dev_specs():
 
 MODEL_SPECS = _dev_specs()
 
+
+def _spec_yaml():
+    """The catalog text, for the declarations that do not survive parsing."""
+    path = (
+        get_repo_root_path() / "workflows" / "model_specs" / "dev" / "audio_tts.yaml"
+    )
+    return path.read_text()
+
 ASR_SPEC_IDS = [
     "id_tt-vllm-plugin_Qwen3-ASR-1.7B_p150",
     "id_tt-vllm-plugin_Qwen3-ASR-1.7B-JA_p150",
@@ -3101,3 +3109,101 @@ def test_the_readme_admits_no_image_exists_at_the_current_pins():
     assert "push the branches, then" in flat, (
         "the rebuild depends on the push; give the order"
     )
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_serves_the_batch_width_the_comment_measured(spec_id):
+    """max_concurrency was the one declaration nothing asserted.
+
+    The comment beside it justifies 4 with a throughput sweep (1->2->4 scales
+    2.56 -> 4.59 -> 7.60 audio-s/s, and 8 regresses to 3.06 because prefill is
+    run one user at a time), and it is also the customer's ASR_CONCURRENCY. It
+    reaches vLLM as max_num_seqs, so changing it changes the operating point
+    every number in the runbook was taken at -- and the harness defaults are
+    pinned to it by tests/test_asr_harness_defaults_agree.py.
+    """
+    assert MODEL_SPECS[spec_id].device_model_spec.max_concurrency == 4
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_caps_the_context_at_the_kv_budget_it_was_sized_for(spec_id):
+    """max_context reaches vLLM as max_model_len and sizes the KV allocation.
+
+    The adapter's get_max_tokens_all_users() returns max_model_len *
+    max_num_seqs; at 2048 x 4 / block 64 that is the 128 (+padding) blocks the
+    device is given. Before that method existed the plugin fell back to 131072
+    tokens and overrode the block count to 2052 -- a 15x over-allocation, all
+    of it written to the device as zeros at startup, i.e. pure start-up time.
+    Raising max_context here scales that allocation linearly.
+    """
+    assert MODEL_SPECS[spec_id].device_model_spec.max_context == 2048
+
+
+def test_the_multi_weight_template_still_pins_its_display_name():
+    """Both weights must resolve to one display name, and it must be pinned.
+
+    The template lists two weights, and without an explicit
+    model_display_name the name is derived from whichever weight happens to be
+    first -- so reordering the list would rename the model. The comment in the
+    spec says exactly this; assert it rather than trusting the comment.
+    """
+    names = {MODEL_SPECS[spec_id].model_name for spec_id in ASR_SPEC_IDS}
+    assert names == {"Qwen3-ASR-1.7B", "Qwen3-ASR-1.7B-JA"}, names
+
+    spec_text = _spec_yaml()
+    qwen = spec_text[spec_text.index("Qwen3-ASR served through the TT vLLM backend") :]
+    assert "model_display_name: Qwen3-ASR-1.7B" in qwen, (
+        "the display name is no longer pinned; it would follow the weight order"
+    )
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_declares_both_offline_switches(spec_id):
+    """HF_HUB_OFFLINE alone does not stop transformers from reaching the hub.
+
+    The weights are staged by the runbook and the container has no business
+    contacting huggingface.co at start-up; the two variables cover the two
+    libraries that would. Only HF_HUB_OFFLINE was ever asserted, so dropping
+    the transformers one would have gone unnoticed.
+    """
+    env_vars = MODEL_SPECS[spec_id].env_vars
+    assert env_vars["HF_HUB_OFFLINE"] == "1"
+    assert env_vars["TRANSFORMERS_OFFLINE"] == "1"
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_states_its_own_footprint(spec_id):
+    """min_disk_gb / min_ram_gb must be declared, not inferred.
+
+    ModelSpec derives them from param_count when they are absent, and
+    infer_param_count() truncates "1.7B" to 1 -- so an inferred budget would be
+    computed from a 1-billion-parameter model. The declarations are what keep
+    that wrong number out of the disk and RAM guards.
+    """
+    spec = MODEL_SPECS[spec_id]
+    assert spec.min_disk_gb == 15
+    assert spec.min_ram_gb == 6
+
+
+def test_the_footprint_is_declared_because_the_inference_would_be_wrong():
+    """Guard the premise of the test above.
+
+    If infer_param_count() ever learns to read 1.7, the declarations stop being
+    load-bearing and this test says so instead of leaving the reasoning stale.
+    """
+    from workflows.model_spec import ModelSpec
+
+    assert ModelSpec.infer_param_count("neosophie/Qwen3-ASR-1.7B-JA") == 1, (
+        "the inference no longer truncates 1.7B to 1; revisit why the spec "
+        "declares min_disk_gb / min_ram_gb explicitly"
+    )
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_is_the_default_impl_for_p150(spec_id):
+    """Nothing else serves Qwen3-ASR, so it has to be the default.
+
+    Without default_impl the resolver has no leaf to pick for P150 and the
+    documented run command cannot name the model by weight alone.
+    """
+    assert MODEL_SPECS[spec_id].device_model_spec.default_impl is True
