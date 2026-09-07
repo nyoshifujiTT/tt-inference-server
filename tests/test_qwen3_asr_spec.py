@@ -2042,6 +2042,59 @@ def test_a_declined_recovery_does_not_abort_the_supervisor():
         )
 
 
+def test_the_device_chmod_does_not_widen_the_by_id_directory():
+    """`chmod 666 /dev/tenstorrent/*` also hits by-id/ and breaks traversal.
+
+    udev creates /dev/tenstorrent/by-id/ to hold the stable
+    `blackhole-<asic_id>` symlinks, and the glob matches that directory. 666 on
+    a directory drops its execute bit, so nothing non-root can traverse it, and
+    it stays that way until udev recreates it at the next boot.
+
+    Measured on the delivery host after the supervisor had run:
+
+        /dev/tenstorrent/by-id  drw-rw-rw-   ctime 2026-09-04 01:19
+        stat /dev/tenstorrent/by-id/*  ->  Permission denied
+
+    udev's own rule is `SUBSYSTEM=="tenstorrent", MODE="0666"`, which applies
+    to the device nodes only -- the scope the supervisor wanted.
+    """
+    sh = _supervisor()
+    code = [ln for ln in sh.splitlines() if not ln.lstrip().startswith("#")]
+
+    offenders = [ln.strip() for ln in code if "chmod 666 /dev/tenstorrent/*" in ln]
+    assert not offenders, (
+        f"this glob includes the by-id directory: {offenders}"
+    )
+
+    # the replacement must exist and must test for a character device
+    assert "\nrelax_device_perms() {" in sh, "the chmod belongs in one helper"
+    helper = sh[sh.index("relax_device_perms() {") : sh.index("recover_device() {")]
+    assert '[ -c "$node" ]' in helper, (
+        "only character devices may be chmod'ed; by-id is a directory"
+    )
+
+
+def test_every_device_chmod_goes_through_that_helper():
+    """Three call sites had the glob; a fourth must not reintroduce it."""
+    sh = _supervisor()
+    helper = sh[sh.index("relax_device_perms() {") : sh.index("recover_device() {")]
+    outside = sh.replace(helper, "")
+    code = [ln for ln in outside.splitlines() if not ln.lstrip().startswith("#")]
+    stray = [ln.strip() for ln in code if "chmod" in ln and "relax_device_perms" not in ln]
+    assert not stray, f"these chmods bypass the helper: {stray}"
+    # and the helper is actually used on every path that leaves the device
+    # freshly reset. recover_device has two of them -- the tt-smi -r success
+    # return and the fall-through after the power cycle -- so counting once per
+    # function let either be dropped silently.
+    recover = sh[sh.index("recover_device() {") : sh.index("# Kill a previous run")]
+    assert recover.count("relax_device_perms") == 2, (
+        "both exits of recover_device (tt-smi -r success, and after the power "
+        f"cycle) must relax the nodes; found {recover.count('relax_device_perms')}"
+    )
+    launch = sh[sh.index("launch_server() {") : sh.index("wait_healthy() {")]
+    assert "relax_device_perms" in launch, "launch_server must relax the nodes"
+
+
 def test_the_runbook_says_the_unit_waits_rather_than_taking_over():
     """Otherwise "enable the service" reads as "the service now runs".
 

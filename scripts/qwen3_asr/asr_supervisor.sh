@@ -63,6 +63,24 @@ device_ok() {
   sudo "$TTSMI" -s 2>/dev/null | grep -q "BOARD_ID_HIGH"
 }
 
+# Make the chip nodes writable by the service user after a reset.
+#
+# Not `chmod 666 /dev/tenstorrent/*`: that glob also matches the by-id/
+# directory udev creates for the stable `blackhole-<asic_id>` symlinks, and
+# 666 on a directory drops its execute bit, so nothing non-root can traverse
+# it any more. Measured on this host after the supervisor had run --
+# /dev/tenstorrent/by-id was drw-rw-rw- with a ctime matching the supervisor's
+# log, and `stat /dev/tenstorrent/by-id/*` returned Permission denied. It stays
+# broken until udev recreates it at the next boot. udev's own rule
+# (`SUBSYSTEM=="tenstorrent", MODE="0666"`) applies to the device nodes only,
+# which is exactly the scope wanted here.
+relax_device_perms() {
+  local node
+  for node in /dev/tenstorrent/*; do
+    [ -c "$node" ] && sudo chmod 666 "$node" 2>/dev/null
+  done
+}
+
 recover_device() {
   # Never reset a chip a container is serving on.
   #
@@ -89,7 +107,7 @@ tt-smi -r would reset the chip that deployment is serving on"
   sleep 5
   if device_ok; then
     log "device recovered by tt-smi -r"
-    sudo chmod 666 /dev/tenstorrent/* 2>/dev/null
+    relax_device_perms
     return 0
   fi
 
@@ -106,7 +124,7 @@ tt-smi -r would reset the chip that deployment is serving on"
       break
     fi
   done
-  sudo chmod 666 /dev/tenstorrent/* 2>/dev/null
+  relax_device_perms
 }
 
 # Kill a previous run and make sure nothing still holds the device.
@@ -198,7 +216,7 @@ stop_server() {
 
 launch_server() {
   stop_server
-  sudo chmod 666 /dev/tenstorrent/* 2>/dev/null
+  relax_device_perms
   log "launching run.py --local-server on port $PORT"
   # MODEL_SPECS_ENV=dev: the spec lives only in the dev catalog (prod entries are
   # release artifacts written by promote_dev_spec_to_prod.py), and run.py defaults
