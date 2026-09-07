@@ -105,6 +105,26 @@ def load_manifest(path):
             if line: items.append(json.loads(line))
     return items
 
+def manifest_wav(it):
+    """Audio path, under any of the names corpora ship it as.
+
+    The demo-side eval (tt-metal's eval/corpus_eval.py) accepts wav / audio /
+    audio_filepath / path, and the two are compared on the same manifest -- so
+    a manifest one can read and the other cannot means the parity claim is
+    made over different inputs. Raises KeyError when none is present, as the
+    demo side does, rather than skipping the line silently.
+    """
+    return it.get("wav") or it.get("audio") or it.get("audio_filepath") or it["path"]
+
+def manifest_ref(it):
+    """Reference text, or "" when the manifest carries none.
+
+    Same order as the demo side. An empty reference still scores and drags
+    that clip's CER to 1.0; dropping the line instead would quietly shrink the
+    corpus.
+    """
+    return it.get("ref") or it.get("text") or it.get("reference") or ""
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--host",default="http://127.0.0.1:8110")
@@ -126,8 +146,9 @@ def main():
     data=[]
     for it in items:
         try:
-            with open(it["wav"],"rb") as f: fb=f.read()
-            d=wav_dur(it["wav"])
+            wav=manifest_wav(it)
+            with open(wav,"rb") as f: fb=f.read()
+            d=wav_dur(wav)
         except Exception as e:
             eprint(f"skip {it.get('id')}: {e}"); continue
         data.append((it,fb,d))
@@ -152,10 +173,11 @@ def main():
         ok,el,d,asec,txt,it=r
         if ok:
             okc+=1; lat.append(el); audio+=(asec or d)
-            rn=norm_ja(it["ref"]); hn=norm_ja(txt)
-            tot_ref+=len(rn); tot_err+=round(cer(it["ref"],txt)*max(1,len(rn)))
+            ref=manifest_ref(it)
+            rn=norm_ja(ref); hn=norm_ja(txt)
+            tot_ref+=len(rn); tot_err+=round(cer(ref,txt)*max(1,len(rn)))
             samples.append({"id":it.get("id"),"dur":round(d,2),"lat":round(el,3),
-                            "ref":it["ref"],"hyp":txt,"cer":round(cer(it["ref"],txt),4)})
+                            "ref":ref,"hyp":txt,"cer":round(cer(ref,txt),4)})
         else:
             failc+=1; samples.append({"id":it.get("id"),"error":txt})
     agg_cer=tot_err/tot_ref if tot_ref else None

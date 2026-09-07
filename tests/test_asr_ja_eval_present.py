@@ -535,3 +535,111 @@ def test_the_two_harnesses_normalise_identically():
             f"the two harnesses disagree on {text!r}: {ours(text)!r} vs "
             f"{theirs(text)!r} -- their CERs are then not comparable"
         )
+
+
+MANIFEST_WAV_KEYS = ["wav", "audio", "audio_filepath", "path"]
+MANIFEST_REF_KEYS = ["ref", "text", "reference"]
+
+
+def test_the_manifest_reader_accepts_the_names_other_corpora_use():
+    """One manifest has to be readable by both evals, or parity is a fiction.
+
+    tt-metal's corpus_eval.py accepts wav / audio / audio_filepath / path and
+    documents the order; this client took it["wav"] and nothing else, so a
+    manifest built for the demo side (NeMo-style audio_filepath, say) could
+    not be handed to the served side without rewriting it -- and "same clips,
+    same metric" stops being true when the files differ.
+    """
+    module = _eval_module()
+
+    for key in MANIFEST_WAV_KEYS:
+        assert module.manifest_wav({key: "/clip.wav"}) == "/clip.wav", key
+
+
+def test_the_wav_keys_are_tried_in_the_documented_order():
+    """Order matters when a manifest carries more than one of them."""
+    module = _eval_module()
+
+    item = {key: f"/{key}.wav" for key in MANIFEST_WAV_KEYS}
+    for key in MANIFEST_WAV_KEYS:
+        assert module.manifest_wav(item) == f"/{key}.wav", (
+            f"expected {key} to win over {MANIFEST_WAV_KEYS[MANIFEST_WAV_KEYS.index(key) + 1:]}"
+        )
+        del item[key]
+
+
+def test_a_line_with_no_audio_path_raises():
+    """Skipping it silently would shrink the corpus without saying so.
+
+    The demo side raises KeyError here; the counts the runbook quotes (509
+    clips) are only meaningful if a malformed line is loud.
+    """
+    module = _eval_module()
+
+    with pytest.raises(KeyError):
+        module.manifest_wav({"ref": "text but no audio"})
+
+
+def test_the_reference_falls_back_to_an_empty_string():
+    """An empty reference scores 1.0 for that clip -- it is not dropped.
+
+    That behaviour is documented on both sides; returning None here would
+    crash norm_ja instead, turning a scoring case into a traceback.
+    """
+    module = _eval_module()
+
+    for key in MANIFEST_REF_KEYS:
+        assert module.manifest_ref({key: "参照"}) == "参照", key
+    assert module.manifest_ref({"wav": "/clip.wav"}) == ""
+
+
+def test_both_evals_resolve_a_manifest_line_identically():
+    """Compare the readers, not the prose: they must agree line by line."""
+    ours = _eval_module()
+
+    metal = os.path.join(
+        HERE, "..", "..", "tt-metal", "models", "demos", "audio", "qwen3_asr",
+        "eval", "corpus_eval.py",
+    )
+    if not os.path.exists(metal):
+        pytest.skip("tt-metal is not checked out beside this repo")
+
+    src = _read(metal)
+    match = re.search(r"path = (it\.get\(.*?\)\s*or\s*it\[\"path\"\])", src)
+    assert match, "the demo-side path resolution must stay greppable"
+    theirs = eval(  # noqa: S307 - literal lifted from our own source
+        f"lambda it: {match.group(1)}"
+    )
+
+    for item in (
+        {"wav": "/a.wav"},
+        {"audio": "/b.wav"},
+        {"audio_filepath": "/c.wav"},
+        {"path": "/d.wav"},
+        {"wav": "/a.wav", "path": "/d.wav"},
+        {"audio": "/b.wav", "audio_filepath": "/c.wav"},
+    ):
+        assert ours.manifest_wav(item) == theirs(item), (
+            f"the two readers disagree on {item!r}"
+        )
+
+
+def test_the_runbook_documents_the_keys_the_reader_accepts():
+    """The table has to name every key, or a working manifest looks invalid."""
+    readme = _read(README)
+    table = readme[readme.index("| field | keys tried, in order |") :]
+    table = table[: table.index("\n\n")]
+
+    for key in MANIFEST_WAV_KEYS + MANIFEST_REF_KEYS:
+        assert f"`{key}`" in table, f"{key} is accepted but not documented"
+
+
+def test_the_eval_reads_every_manifest_field_through_the_helpers():
+    """A direct it["wav"] left behind would bypass the aliases."""
+    src = _read(EVAL)
+    body = src[src.index("def main():") :]
+
+    for direct in ('it["wav"]', 'it["ref"]'):
+        assert direct not in body, (
+            f"{direct} bypasses the alias helpers; use manifest_wav/manifest_ref"
+        )

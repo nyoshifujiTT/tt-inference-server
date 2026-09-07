@@ -1050,6 +1050,18 @@ text:
  "ref": "今大学教員をやってるんですけど"}
 ```
 
+`wav` and `ref` are the canonical names, but the reader accepts the ones other
+corpora ship with, so an existing manifest usually needs no rewriting. The
+demo-side eval (`eval/corpus_eval.py` in tt-metal) accepts the same set, which
+is what lets both be pointed at one manifest -- the parity claim is "same
+clips, same metric", and it stops meaning that if one side cannot read the file
+the other was given.
+
+| field | keys tried, in order |
+|---|---|
+| audio path | `wav`, `audio`, `audio_filepath`, then `path` (**required** -- a line with none of these raises `KeyError`) |
+| reference text | `ref`, `text`, `reference`, else `""` (an empty reference still scores, and drags CER to 1.0 for that clip) |
+
 - **TED — 509 clips, monologue.** TEDxJP-10K (laboroai) ships no audio; it is
   reconstructed from YouTube with the project's own `compose_tedxjp10k.py`
   (v1.1, `utt_id_table.csv` + `diffs`), which emits Kaldi `text` and
