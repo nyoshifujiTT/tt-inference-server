@@ -16,6 +16,8 @@ import ast
 import os
 import re
 
+import pytest
+
 HERE = os.path.dirname(__file__)
 EVAL = os.path.join(HERE, "..", "reference_config", "evals", "asr_ja_eval.py")
 README = os.path.join(HERE, "..", "scripts", "qwen3_asr", "README.md")
@@ -380,3 +382,156 @@ def test_both_harnesses_state_the_same_rule():
     for src, name in ((bench, "asr_openai_benchmark.py"), (eval_src, "asr_ja_eval.py")):
         assert "billing quantity" in src, f"{name} must say why the server figure is not a measurement"
         assert "1649.4" in src and "1892.0" in src, f"{name} must cite the measured overstatement"
+
+
+def _eval_module():
+    """Import the harness so its scoring can be exercised, not just grepped.
+
+    Every test above reads the source text or the runbook. None of them calls
+    norm_ja / cer / _edit -- the three functions that actually produce the CER
+    this bring-up is accepted on -- so the regex, the division and the edit
+    distance could all be rewritten without a single failure here.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_asr_ja_eval_behaviour", os.path.abspath(EVAL)
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_normaliser_strips_what_the_readme_says_it_strips():
+    """CER is computed after NFKC and punctuation removal; check both happen."""
+    norm = _eval_module().norm_ja
+
+    assert norm("ＡＢＣ") == "ABC", "NFKC must fold full-width to ASCII"
+    assert norm("周りを見ると。") == norm("周りを見ると"), "trailing 。 must not count"
+    assert norm("「はい」、そうです！") == "はいそうです"
+    assert norm("あ い　う") == "あいう", "both ASCII and ideographic space go"
+    assert norm("コーヒー") == "コヒ", (
+        "the long-vowel mark is in the strip set; if that changes, every "
+        "katakana loanword's CER moves"
+    )
+
+
+def test_the_normaliser_keeps_the_characters_cer_is_counted_over():
+    """Stripping too much would flatter the score."""
+    norm = _eval_module().norm_ja
+
+    for text in ("東京", "ひらがな", "カタカナ", "abc", "123"):
+        assert norm(text) == text, f"{text!r} must survive normalisation"
+
+
+def test_cer_is_edits_over_reference_length():
+    """The denominator is the reference, not the hypothesis or the max.
+
+    Dividing by the hypothesis length would let a truncated transcript score
+    perfectly, and dividing by max() would cap every error below 1.0.
+    """
+    module = _eval_module()
+
+    assert module.cer("あいうえお", "あいうえお") == 0.0
+    assert module.cer("あいうえお", "あいうX") == pytest.approx(2 / 5), (
+        "one substitution (え->X) and one deletion (お) over a 5-character "
+        "reference"
+    )
+    # a hypothesis twice as long as the reference scores above 1.0
+    assert module.cer("あい", "あいうえお") == pytest.approx(3 / 2)
+
+
+def test_cer_normalises_both_sides_before_comparing():
+    """Both arguments go through norm_ja, not just the reference.
+
+    The obvious cases only exercise the reference side: "周りを見ると。" vs
+    "周りを見ると" and "ＡＢＣ" vs "ABC" both pass if only ref is normalised,
+    because the hypothesis is already in normal form. The model is the side
+    that emits punctuation and full-width characters, so it is the hypothesis
+    that needs normalising -- each case below has the material on that side.
+    """
+    module = _eval_module()
+
+    assert module.cer("周りを見ると。", "周りを見ると") == 0.0
+    assert module.cer("ＡＢＣ", "ABC") == 0.0
+
+    # hypothesis carries the punctuation / width the reference does not
+    assert module.cer("周りを見ると", "周りを見ると。") == 0.0, (
+        "the hypothesis must be normalised too, or every trailing 。 the "
+        "model emits counts as an insertion"
+    )
+    assert module.cer("ABC", "ＡＢＣ") == 0.0
+    assert module.cer("はいそうです", "「はい」、そうです！") == 0.0
+
+
+def test_an_empty_reference_scores_one_unless_the_hypothesis_is_empty_too():
+    """Both branches are load-bearing for the corpus totals.
+
+    A manifest line with no reference text still goes through scoring; the
+    runbook says such a clip "drags CER to 1.0 for that clip", which is this
+    branch. Returning 0.0 instead would silently improve the corpus number.
+    """
+    module = _eval_module()
+
+    assert module.cer("", "") == 0.0
+    assert module.cer("", "なにか") == 1.0
+
+
+def test_the_edit_distance_is_a_real_levenshtein():
+    """Substitution, insertion and deletion must all cost exactly one.
+
+    The DP is hand-rolled over a single row with a `prev` carry; dropping any
+    of the three candidates, or updating `prev` at the wrong point, still
+    returns plausible-looking numbers.
+    """
+    edit = _eval_module()._edit
+
+    assert edit(list("kitten"), list("sitting")) == pytest.approx(3 / 6)
+    assert edit(list("abc"), list("abc")) == 0.0
+    assert edit(list("abc"), list("abd")) == pytest.approx(1 / 3)  # substitution
+    assert edit(list("abc"), list("ab")) == pytest.approx(1 / 3)   # deletion
+    assert edit(list("abc"), list("abcd")) == pytest.approx(1 / 3)  # insertion
+    assert edit(list("abc"), list("")) == 1.0
+    assert edit(list("abc"), list("xyz")) == 1.0
+
+
+def test_the_two_harnesses_normalise_identically():
+    """demo-vs-served parity is a CER comparison, so the metric must match.
+
+    tt-metal's corpus_eval.py exists to be compared against this client on the
+    same clips. Its own tests assert its normalisation against fixed cases
+    because scoring the two sides differently once made the demo look 8 CER
+    points worse. Nothing asserted the same from this side.
+    """
+    ours = _eval_module().norm_ja
+
+    metal = os.path.join(
+        HERE, "..", "..", "tt-metal", "models", "demos", "audio", "qwen3_asr",
+        "eval", "corpus_eval.py",
+    )
+    if not os.path.exists(metal):
+        pytest.skip("tt-metal is not checked out beside this repo")
+
+    import re as _re
+    import unicodedata
+
+    src = _read(metal)
+    match = _re.search(r'_NORM_STRIP = re\.compile\((r"[^\n]*")\)', src)
+    assert match, "the demo-side normalisation regex must stay greppable"
+    pattern = _re.compile(eval(match.group(1)))  # noqa: S307 - literal from our own source
+
+    def theirs(text):
+        return pattern.sub("", unicodedata.normalize("NFKC", text)).strip()
+
+    for text in (
+        "周りを見ると。",
+        "「はい」、そうです！",
+        "ＡＢＣ",
+        "コーヒー",
+        "あ い　う",
+        "東京都は、日本の首都です。",
+    ):
+        assert ours(text) == theirs(text), (
+            f"the two harnesses disagree on {text!r}: {ours(text)!r} vs "
+            f"{theirs(text)!r} -- their CERs are then not comparable"
+        )
