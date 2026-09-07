@@ -1015,6 +1015,29 @@ $ grep -o 'ERROR: [^"]*' samples.jsonl | sort | uniq -c
 
 So the accepted TED figure reads "494 ok / 15 download artifacts".
 
+**A higher fail count is not automatically a regression -- separate the
+permanent 15 from transient ones before concluding anything.** The harness
+records a failure and moves on; it does not retry, so one network hiccup moves
+the count. Observed on this host: a pass came in at 490 ok / 19 fail with
+`corpus_cer` 0.1000 and `audio_s` 1636.1, and an immediate rerun against the
+same server returned exactly 494 / 15, CER 0.1002, `audio_s` 1649.4. The
+server's own counters showed `error`, `abort`, `length` and `repetition` all at
+0.0 throughout, so nothing had failed on the model side.
+
+Tell the two apart by their error text rather than by the count:
+
+```
+$ grep -o 'ERROR: [^"]*' samples.jsonl | sort | uniq -c
+     15 ERROR: HTTP Error 400: Bad Request      # permanent: the empty wavs
+      4 ERROR: <timeout / connection error>     # transient: rerun these
+```
+
+`audio_s` moves with the fail count because it sums the clips that succeeded
+(1649.4 - 1636.1 = 13.3 s over the 4 extra failures, ~3.3 s each), so a drop
+there is a symptom of the same thing rather than separate evidence. Only a
+change in the count of `HTTP Error 400` failures, or a `corpus_cer` that moves
+beyond the fourth decimal on a full 494, is about the model.
+
 #### Where the two manifests come from
 
 Neither corpus can be redistributed, so the manifests are built locally. A

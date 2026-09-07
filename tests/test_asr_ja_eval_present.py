@@ -242,6 +242,75 @@ def test_the_runbook_explains_the_fifteen_expected_ted_failures():
     assert "frames 0" in readme
 
 
+def test_the_runbook_separates_transient_failures_from_the_permanent_fifteen():
+    """The fail count is not fixed, and 15 was documented as though it were.
+
+    asr_ja_eval.py records a failure and moves on -- it does not retry -- so a
+    single network hiccup changes the number. Measured on this host: one pass
+    returned 490 ok / 19 fail (corpus_cer 0.1000, audio_s 1636.1) and an
+    immediate rerun against the same server returned 494 / 15, CER 0.1002,
+    audio_s 1649.4, with the server's error/abort/length/repetition counters at
+    0.0 the whole time. Reading 19 against a documented 15 looks like a
+    regression and is not one.
+    """
+    readme = _read(README)
+    body = readme[readme.index("494 ok / 15 download artifacts") :]
+    body = body[: body.index("#### Where the two manifests come from")]
+    flat = " ".join(body.split())
+
+    assert "A higher fail count is not automatically a regression" in flat, (
+        "say that the count moves, or 19 reads as a model failure"
+    )
+    assert "it does not retry" in flat, "name the reason the count moves"
+    # the measured pair, so the reader can recognise the shape
+    assert "490 ok / 19 fail" in flat and "494 / 15" in flat, (
+        "quote both passes; one number alone does not show the count moving"
+    )
+    # and how to tell them apart -- by error text, not by counting
+    assert "by their error text rather than by the count" in flat, (
+        "give the discriminator"
+    )
+
+
+def test_the_runbook_explains_why_audio_s_moves_with_the_fail_count():
+    """Otherwise the audio total looks like independent corroboration.
+
+    audio_s sums the clips that succeeded, so it drops by exactly the audio of
+    the extra failures (1649.4 - 1636.1 = 13.3 s over 4). A reader who treats
+    it as a second signal concludes two things went wrong instead of one.
+    """
+    readme = _read(README)
+    body = readme[readme.index("494 ok / 15 download artifacts") :]
+    body = body[: body.index("#### Where the two manifests come from")]
+    flat = " ".join(body.split())
+    assert "sums the clips that succeeded" in flat
+    assert "symptom of the same thing rather than separate evidence" in flat, (
+        "say it is not independent corroboration"
+    )
+    # and the arithmetic, read back out of the runbook
+    got = re.search(r"1649\.4 - 1636\.1 = ([\d.]+) s over the (\d+) extra failures", flat)
+    assert got, "quote the arithmetic that ties the two together"
+    assert abs(float(got.group(1)) - (1649.4 - 1636.1)) < 0.05
+
+
+def test_the_harness_really_does_not_retry():
+    """The runbook's explanation depends on this, so pin it.
+
+    If a retry is ever added the guidance above becomes wrong -- a transient
+    failure would no longer show up in the count at all.
+    """
+    src = _read(EVAL)
+    body = src[src.index("def transcribe(") : src.index("# --- Japanese text normalization")]
+    assert "for attempt" not in body and "retries" not in body, (
+        "a retry loop would change what a non-zero fail count means; update the "
+        "runbook's transient-vs-permanent guidance if one is added"
+    )
+    assert "ERROR: {e}" in body, (
+        "a failure must be recorded with its reason, since the reason is what "
+        "separates a transient failure from an empty wav"
+    )
+
+
 def _resolve_secs():
     """Compile resolve_secs out of the eval, so the real function is exercised."""
     tree = ast.parse(_read(EVAL))
