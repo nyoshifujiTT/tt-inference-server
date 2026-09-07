@@ -1225,8 +1225,18 @@ def test_the_readme_describes_the_merged_upstream_relationship():
     )
     # the one real exception, with its reason
     assert "upstream/yito/qwen3_asr_pr" in readme
-    # and the executor still has to be justified, since upstream ships none
-    assert "TTUniProcExecutor" in readme and "0.26.0" in readme
+    # And the executor still has to be justified, since upstream ships none.
+    #
+    # Not `"0.26.0" in readme`: the version appears three times in this file
+    # (the release the plugin pins, the range the merge moved through, and the
+    # executor's justification), so deleting the justification left this green.
+    # Require the sentence that carries the reason instead.
+    assert "TTUniProcExecutor" in readme
+    flat = " ".join(readme.split())
+    assert "async output thread was removed in 0.24.0 and has not returned in 0.26.0" in flat, (
+        "the executor exists because upstream dropped the async output thread "
+        "and has not restored it; say so, or it reads as an unexplained fork"
+    )
 
 
 def test_the_readme_backs_the_vllm_upgrade_with_measurements():
@@ -1303,10 +1313,27 @@ def test_the_readme_backs_the_switch_with_measurements():
 
     Without them the next reader cannot tell whether the fork was dropped after
     verification or on reasoning alone.
+
+    Scoped to the evidence section. Both CERs appear six and four times across
+    the file -- results table, per-round records, the upgrade note -- so a
+    whole-file check was satisfied by any of them and said nothing about the
+    switch. What has to be here is the side-by-side, which is the only place
+    the two routes are compared.
     """
     readme = _readme()
-    assert "0.1002" in readme, "the TED CER measured after the switch must be quoted"
-    assert "0.1668" in readme, "the MagicHub CER measured after the switch must be quoted"
+    section = readme[readme.index("Evidence that the move changed no output") :]
+    section = section[: section.index("\n#### ")]
+    for name, cer in (("TED 509 CER", "0.1002"), ("MagicHub 600 CER", "0.1668")):
+        row = next(
+            (ln for ln in section.splitlines() if ln.startswith(f"| {name} |")), None
+        )
+        assert row, f"the {name} row must be in the evidence table"
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        assert len(cells) == 3, f"both routes must be shown: {row}"
+        assert cer in cells[1] and cer in cells[2], (
+            f"{name} must be quoted for BOTH routes, or the table does not show "
+            f"the switch preserved it: {row}"
+        )
 
 
 def test_the_readme_keeps_the_migration_evidence():
