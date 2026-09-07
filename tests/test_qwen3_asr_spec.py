@@ -1965,6 +1965,27 @@ def test_every_process_pattern_the_supervisor_stops_is_routed_through_it():
         )
 
 
+def test_the_runbook_does_not_narrow_the_guard_to_the_engine():
+    """"spares the engine" understated it and matched the old broken code.
+
+    The review table said in_container "spares the engine of a running
+    --docker-server", which described exactly the state where the two pkills
+    above it killed that deployment's API server. A reader auditing whether the
+    supervisor is safe to install next to a container would have read that row
+    and stopped.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "`in_container`")
+    assert "spares the engine" not in row, (
+        "the guard is not engine-specific; that wording matched the bug"
+    )
+    helper_row = _readme_row(readme, "`kill_ours`")
+    assert "every" in helper_row.lower(), "say the guard covers every process"
+    assert "2714943" in helper_row, (
+        "quote the pid it was exercised against, so the claim is checkable"
+    )
+
+
 def test_the_supervisor_recovery_checks_can_actually_fire():
     """The escalation path was unreachable, so recovery stopped at tt-smi -r.
 

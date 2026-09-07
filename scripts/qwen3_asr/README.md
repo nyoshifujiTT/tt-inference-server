@@ -1243,7 +1243,8 @@ exercised against the live host:
 | `run.py` invocation | resolves `Qwen3-ASR-1.7B-JA`, no argument errors |
 | `TTSMI` resolution | `/home/ubuntu/ttvenv/bin/tt-smi`, executable |
 | `device_ok` | reports the healthy board |
-| `in_container` | spares the engine of a running `--docker-server` |
+| `in_container` | classifies a containerised pid correctly (cgroup `/system.slice/docker-<id>.scope`) |
+| `kill_ours` | leaves **every** process of a running `--docker-server` alone -- exercised against the live deployment with `kill` stubbed: both the API server (pid 2714943) and its engine were reported spared and nothing was killed |
 | `canary_ok` | 200 + text against the live server |
 
 What is **not** re-verified is the full wedge → power-cycle → reboot → recover
