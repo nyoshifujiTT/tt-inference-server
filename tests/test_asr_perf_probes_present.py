@@ -488,3 +488,99 @@ def test_the_success_counter_is_guarded_like_the_others():
     assert "gsum(r'vllm:request_success_total" in src, (
         "request_success_total must go through the guarded helper"
     )
+
+
+def _report_keys(path, var):
+    """Keys of the report dict a probe prints, read off the assignment.
+
+    Checking `"key" in src` is not the same thing: every one of these names
+    also appears in a comment or a computation nearby, so a name deleted from
+    the report is still found in the file. gen_tokens is the case that
+    mattered -- it occurs twice in asr_perf_probe.py, once in the report and
+    once in the comment explaining what a lost counter would print.
+    """
+    import ast
+
+    for node in ast.walk(ast.parse(_read(path))):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(t, ast.Name) and t.id == var for t in node.targets
+        ):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        return [
+            k.value
+            for k in node.value.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        ]
+    raise AssertionError(f"no dict assigned to {var} in {os.path.basename(path)}")
+
+
+def test_the_probe_reports_the_key_the_runbook_diagnoses_with():
+    """gen_tokens is the runbook's contamination tell; it must be printed.
+
+    The runbook says to read gen_tokens off the probe output and compare it
+    against requests x tokens-per-request -- 1440 for the documented workload.
+    Nothing required the probe to emit it, so the procedure could outlive the
+    field it depends on.
+    """
+    keys = _report_keys(PROBE, "rep")
+
+    assert "gen_tokens" in keys, (
+        f"the probe no longer reports gen_tokens; the runbook's contamination "
+        f"check reads it. Reported: {keys}"
+    )
+
+
+def test_the_probe_reports_every_figure_the_runbook_quotes():
+    """The comparison table is printed from these keys; all of them must exist."""
+    keys = set(_report_keys(PROBE, "rep"))
+
+    for key in (
+        "concurrency",
+        "requests",
+        "ok",
+        "gen_tokens",
+        "decode_tps_aggregate",
+        "decode_tps_per_user",
+        "mean_ttft_s",
+        "mean_e2e_s",
+        "mean_gen_tok_per_req",
+    ):
+        assert key in keys, f"{key} is quoted by the runbook but not reported"
+
+
+def test_the_streaming_probe_reports_its_side_of_the_comparison():
+    """The two probes are printed as two columns; the shared rows must match.
+
+    tokens per request is the agreement that validates the cross-check, so
+    both have to emit it under their own names.
+    """
+    keys = set(_report_keys(STREAM, "rep"))
+
+    for key in (
+        "concurrency",
+        "requests",
+        "ok",
+        "tokens_per_frame",
+        "decode_tps_per_user",
+        "decode_tps_aggregate",
+        "mean_tok_per_req",
+        "mean_frames_per_req",
+    ):
+        assert key in keys, f"{key} is quoted by the runbook but not reported"
+
+
+def test_both_probes_report_tokens_per_request():
+    """The one number the runbook says must agree exactly between them.
+
+    "Tokens per request agrees exactly, and that agreement is the check."
+    Under different key names, but each side has to have one.
+    """
+    probe = set(_report_keys(PROBE, "rep"))
+    stream = set(_report_keys(STREAM, "rep"))
+
+    assert "mean_gen_tok_per_req" in probe, probe
+    assert "mean_tok_per_req" in stream, stream
