@@ -1091,7 +1091,22 @@ Fetching HF dataset metadata: https://datasets-server.huggingface.co/rows?...
 TimeoutError: The read operation timed out
 ```
 
-That is the download, not the model -- no request reached port 8110. Rerun it.
+It also comes back as an HTTP status from that host rather than a timeout:
+
+```
+urllib.error.HTTPError: HTTP Error 502: Bad Gateway
+  ... datasets-server.huggingface.co/rows?dataset=openslr%2Flibrispeech_asr&...
+```
+
+Either way it is the download, not the model -- no request reached port 8110.
+Rerun it.
+
+The `vllm:request_success_total` delta proves which happened. A full pass adds
+`1 + 494 + 600 + 128 + 63 + 63 = 1349`; a pass where the benchmark never
+downloaded adds `1 + 494 + 600 + 63 + 63 = 1221`, exactly 128 fewer. Measured
+on the 502 above: **1221**, with `error`/`abort` still at 0.0. So a missing
+`bench.json` plus a 1221 delta is the documented download failure and not a
+server problem.
 
 Serving-level timings — TTFT, prefill, decode TPS and TPS/user — come from two
 more probes, both driving one fixed clip so the token count per request does

@@ -13,6 +13,7 @@ for anyone else, the same defect as the missing corpus eval.
 
 import ast
 import os
+import re
 
 HERE = os.path.dirname(__file__)
 BENCH_DIR = os.path.join(HERE, "..", "reference_config", "benchmarking")
@@ -318,6 +319,59 @@ def test_the_readme_separates_a_download_failure_from_a_model_failure():
     assert "datasets-server.huggingface.co" in body
     assert "before\nit touches the server" in body or "before it touches the server" in body
     assert "Rerun it." in body
+
+
+def test_the_readme_covers_the_http_form_of_that_failure_too():
+    """It arrives as a status as well as a timeout, and only one was recorded.
+
+    Measured on this host: `urllib.error.HTTPError: HTTP Error 502: Bad Gateway`
+    from the same datasets-server URL. A reader who has only the TimeoutError
+    example in front of them cannot tell whether a 502 is the same benign case.
+    """
+    readme = _read(README)
+    body = readme[readme.index("Throughput (LibriSpeech") :]
+    assert "HTTP Error 502" in body, "record the status form of the fetch failure"
+    assert "openslr" in body, "and that it comes from the LibriSpeech fetch"
+
+
+def test_the_readme_gives_the_counter_delta_that_proves_it_was_the_download():
+    """"no request reached the server" is checkable, so make it checked.
+
+    A full pass adds 1349 to vllm:request_success_total; a pass whose benchmark
+    never downloaded adds 1221, exactly the 128 benchmark requests fewer.
+    Measured on the 502 above: 1221, with error/abort at 0.0.
+    """
+    readme = _read(README)
+    body = readme[readme.index("Throughput (LibriSpeech") :]
+    flat = " ".join(body.split())
+
+    got = re.search(
+        r"`1 \+ 494 \+ 600 \+ 128 \+ 63 \+ 63 = (\d+)`.*?"
+        r"`1 \+ 494 \+ 600 \+ 63 \+ 63 = (\d+)`, exactly (\d+) fewer",
+        flat,
+    )
+    assert got, "give both sums and the difference between them"
+    full, without_bench, fewer = (int(g) for g in got.groups())
+    # Evaluate the terms as written. Comparing the totals to restated constants
+    # let "= 1400" through for the same terms, because the regex then simply
+    # captured 1400 and every check agreed with itself.
+    for label, total, terms in (
+        ("full pass", full, "1 + 494 + 600 + 128 + 63 + 63"),
+        ("no benchmark", without_bench, "1 + 494 + 600 + 63 + 63"),
+    ):
+        assert f"`{terms} = {total}`" in flat, f"the {label} sum must be written out"
+        computed = sum(int(t) for t in terms.split("+"))
+        assert computed == total, (
+            f"the {label} sum does not add up: {terms} = {computed}, "
+            f"but the runbook says {total}"
+        )
+    assert full - without_bench == fewer == 128, (
+        f"the difference must be the 128 benchmark requests: "
+        f"{full} - {without_bench} != {fewer}"
+    )
+    assert "Measured on the 502 above: **1221**" in flat, (
+        "quote the delta actually observed, not only the prediction"
+    )
 
 
 def test_the_benchmark_really_downloads_before_measuring():
