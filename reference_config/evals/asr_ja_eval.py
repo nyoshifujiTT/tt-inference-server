@@ -107,7 +107,7 @@ def load_manifest(path):
 
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("--host",default="http://127.0.0.1:8101")
+    ap.add_argument("--host",default="http://127.0.0.1:8110")
     ap.add_argument("--model",default="neosophie/Qwen3-ASR-1.7B-JA")
     ap.add_argument("--manifest",required=True)
     ap.add_argument("--concurrency",type=int,default=4)
