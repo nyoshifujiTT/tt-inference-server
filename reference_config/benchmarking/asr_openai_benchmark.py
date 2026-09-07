@@ -296,7 +296,10 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     )
     ap.add_argument("--samples", type=int, default=8, help="Distinct LibriSpeech samples to download")
     ap.add_argument("--num-requests", type=int, default=16, help="Total requests to send")
-    ap.add_argument("--concurrency", type=int, default=1, help="Concurrent in-flight requests")
+    ap.add_argument(
+        "--concurrency", type=int, default=4,
+        help="Concurrent in-flight requests (default: the served max_num_seqs)",
+    )
     ap.add_argument("--download-concurrency", type=int, default=4)
     ap.add_argument("--config", default="clean")
     ap.add_argument("--split", default="test")

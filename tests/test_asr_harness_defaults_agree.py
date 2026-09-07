@@ -151,4 +151,52 @@ def test_the_runbook_still_targets_the_host_the_defaults_claim():
             f"{os.path.basename(path)} is not mentioned by the runbook"
         )
 
+def test_every_harness_defaults_to_the_server_batch_width():
+    """A default of 1 measures batch-1 while the server is configured for 4.
 
+    Every figure in the runbook is taken at concurrency 4 -- it is both
+    max_num_seqs in the P150 spec and the customer's setting -- so a harness
+    that defaults to 1 silently reports a different operating point than the
+    one being certified.
+    """
+    for path in asr_harnesses():
+        concurrency = harness_defaults(path)["concurrency"]
+        assert concurrency == SERVER_BATCH_WIDTH, (
+            f"{os.path.basename(path)}: default concurrency {concurrency!r} is "
+            f"not the server's batch width {SERVER_BATCH_WIDTH}"
+        )
+
+
+def test_the_batch_width_is_the_one_the_spec_serves():
+    """Read max_concurrency off the spec rather than restating 4 here."""
+    spec = _read(
+        os.path.join(HERE, "..", "workflows", "model_specs", "dev", "audio_tts.yaml")
+    )
+    qwen = spec[spec.index("neosophie/Qwen3-ASR-1.7B-JA") :]
+    match = re.search(r"^\s*max_concurrency:\s*(\d+)", qwen, re.M)
+    assert match, "the Qwen3-ASR template no longer declares max_concurrency"
+    assert int(match.group(1)) == SERVER_BATCH_WIDTH, (
+        f"the spec now serves {match.group(1)} concurrent requests; the "
+        f"harness defaults pin {SERVER_BATCH_WIDTH}"
+    )
+
+
+def test_the_defaults_are_reachable_through_the_parsers_we_can_import():
+    """Assert on the parsed namespace, not only on the source text.
+
+    The AST scan would keep passing if a harness read the flag but then
+    overrode it, so check the parser's own answer where the module exposes one.
+    """
+    import argparse
+    import importlib.util
+
+    path = os.path.join(BENCH_DIR, "asr_openai_benchmark.py")
+    spec = importlib.util.spec_from_file_location("_asr_bench_defaults", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    args = module.parse_args([])
+    assert isinstance(args, argparse.Namespace)
+    assert args.host == RUNBOOK_HOST
+    assert args.model == SERVED_MODEL
+    assert args.concurrency == SERVER_BATCH_WIDTH
