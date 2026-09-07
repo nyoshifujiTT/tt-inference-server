@@ -85,10 +85,10 @@ def test_every_counter_the_probe_scrapes_is_actually_stored():
             f"{counter} is parsed but never stored in the returned dict"
         )
     # and nothing may be parsed into a variable that goes nowhere. The shared
-    # helper g() legitimately calls re.search into a local it returns, so the
+    # helpers g()/gsum() legitimately match into a local they return, so the
     # check is on the counter patterns instead: a vllm: pattern outside the
-    # helper must be on a line that stores into the returned dict.
-    helper = body[body.index("def g(pat):") : body.index('d["ttft_sum"]')]
+    # helpers must be on a line that stores into the returned dict.
+    helper = body[body.index("def g(pat") : body.index('d["ttft_sum"]')]
     outside = body.replace(helper, "")
     dropped = [
         ln.strip()
@@ -427,4 +427,64 @@ def test_the_probe_really_sends_a_fixed_token_budget():
     )
     assert "MAXTOK=int(sys.argv[6])" in src.replace(" ", ""), (
         "and the cap must be an argument, so the expected product is known"
+    )
+
+
+def test_the_metrics_reader_refuses_a_counter_it_cannot_find():
+    """A missing counter must abort, not become a zero.
+
+    Every figure the non-streaming probe prints is m1 - m0 of a /metrics
+    counter. The reader returned 0.0 on a regex miss, so a renamed or
+    relabelled vLLM counter made both reads 0.0 and the difference a
+    plausible zero: gen_tokens 0, decode_tps_aggregate 0.0, req_per_s 0.0,
+    all printed as if measured. The runbook's "gen_tokens must be 1440"
+    self-check only catches that if a human reads the line.
+    """
+    src = _read(PROBE)
+
+    assert "return float(m.group(1)) if m else 0.0" not in src, (
+        "the silent-zero fallback is back; a lost counter would be reported "
+        "as a measurement"
+    )
+    assert re.search(r"if not m:\s*\n\s*sys\.exit\(", src), (
+        "a regex miss must exit; see the counters this probe differences"
+    )
+
+
+def test_every_counter_the_probe_differences_is_named_in_its_error():
+    """The abort has to say which counter went missing.
+
+    Seven counters go through one helper; "a counter is missing" would send
+    the reader back to the source to work out which. Passing the metric name
+    to the helper is what makes the message actionable.
+    """
+    src = _read(PROBE)
+
+    counters = re.findall(r"=gs?u?m?\(r'(vllm:[a-z0-9_]+)", src)
+    assert len(counters) >= 7, f"expected the seven differenced counters, got {counters}"
+
+    for counter in counters:
+        assert f'"{counter}"' in src, (
+            f"{counter} is read but its name is not passed to the reader, so "
+            f"the abort cannot say which one is missing"
+        )
+
+
+def test_the_success_counter_is_guarded_like_the_others():
+    """findall returns [] and sum([]) is 0 -- the same substitution.
+
+    request_success_total is read with findall rather than search, so the
+    guard above does not cover it; without its own check it would reintroduce
+    exactly the behaviour that check exists to forbid.
+    """
+    src = _read(PROBE)
+    assert "vllm:request_success_total" in src
+    assert re.search(r"def gsum\(pat, name\):", src), (
+        "the findall-based read needs its own guard helper"
+    )
+    assert re.search(r"if not vals:\s*\n\s*sys\.exit\(", src), (
+        "the success counter must abort when absent, like the differenced ones"
+    )
+    assert "gsum(r'vllm:request_success_total" in src, (
+        "request_success_total must go through the guarded helper"
     )

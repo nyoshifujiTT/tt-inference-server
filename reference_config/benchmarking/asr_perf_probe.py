@@ -25,18 +25,38 @@ MAXTOK=int(sys.argv[6]) if len(sys.argv)>6 else 100
 def metrics():
     raw=urllib.request.urlopen(HOST+"/metrics",timeout=10).read().decode()
     d={}
-    def g(pat):
+    # Every figure this probe prints is a difference of two of these counters,
+    # so a counter that stops matching does not produce an error: both reads
+    # return the same substitute and the difference is a plausible-looking
+    # zero. gen_tokens 0 / decode_tps_aggregate 0.0 would then be reported as
+    # a measurement. Fail on the spot instead -- a renamed or relabelled vLLM
+    # counter is a reason to fix the probe, not a result.
+    def g(pat, name):
         m=re.search(pat,raw)
-        return float(m.group(1)) if m else 0.0
-    d["ttft_sum"]=g(r'vllm:time_to_first_token_seconds_sum\{[^}]*\}\s+([0-9.eE+]+)')
-    d["ttft_cnt"]=g(r'vllm:time_to_first_token_seconds_count\{[^}]*\}\s+([0-9.eE+]+)')
-    d["e2e_sum"]=g(r'vllm:e2e_request_latency_seconds_sum\{[^}]*\}\s+([0-9.eE+]+)')
-    d["e2e_cnt"]=g(r'vllm:e2e_request_latency_seconds_count\{[^}]*\}\s+([0-9.eE+]+)')
-    d["pref_sum"]=g(r'vllm:request_prefill_time_seconds_sum\{[^}]*\}\s+([0-9.eE+]+)')
-    d["dec_sum"]=g(r'vllm:request_decode_time_seconds_sum\{[^}]*\}\s+([0-9.eE+]+)')
-    d["gen_tok"]=g(r'vllm:generation_tokens_total\{[^}]*\}\s+([0-9.eE+]+)')
-    # request_success total across finish reasons
-    d["succ"]=sum(float(x) for x in re.findall(r'vllm:request_success_total\{[^}]*\}\s+([0-9.eE+]+)',raw))
+        if not m:
+            sys.exit("probe: /metrics has no %s (pattern %r). vLLM's counter "
+                     "set has changed; every figure here is a delta of these, "
+                     "so continuing would report zeros as measurements."%(name,pat))
+        return float(m.group(1))
+
+    # findall gives [] rather than None when a counter goes away, and sum([])
+    # is 0 -- the same silent substitution g() refuses.
+    def gsum(pat, name):
+        vals=re.findall(pat,raw)
+        if not vals:
+            sys.exit("probe: /metrics has no %s (pattern %r)."%(name,pat))
+        return sum(float(x) for x in vals)
+    d["ttft_sum"]=g(r'vllm:time_to_first_token_seconds_sum\{[^}]*\}\s+([0-9.eE+]+)',"vllm:time_to_first_token_seconds_sum")
+    d["ttft_cnt"]=g(r'vllm:time_to_first_token_seconds_count\{[^}]*\}\s+([0-9.eE+]+)',"vllm:time_to_first_token_seconds_count")
+    d["e2e_sum"]=g(r'vllm:e2e_request_latency_seconds_sum\{[^}]*\}\s+([0-9.eE+]+)',"vllm:e2e_request_latency_seconds_sum")
+    d["e2e_cnt"]=g(r'vllm:e2e_request_latency_seconds_count\{[^}]*\}\s+([0-9.eE+]+)',"vllm:e2e_request_latency_seconds_count")
+    d["pref_sum"]=g(r'vllm:request_prefill_time_seconds_sum\{[^}]*\}\s+([0-9.eE+]+)',"vllm:request_prefill_time_seconds_sum")
+    d["dec_sum"]=g(r'vllm:request_decode_time_seconds_sum\{[^}]*\}\s+([0-9.eE+]+)',"vllm:request_decode_time_seconds_sum")
+    d["gen_tok"]=g(r'vllm:generation_tokens_total\{[^}]*\}\s+([0-9.eE+]+)',"vllm:generation_tokens_total")
+    # request_success total across finish reasons. findall gives [] rather
+    # than None when the counter goes away, and sum([]) is 0 -- the same
+    # silent substitution g() now refuses, so refuse it here too.
+    d["succ"]=gsum(r'vllm:request_success_total\{[^}]*\}\s+([0-9.eE+]+)',"vllm:request_success_total")
     return d
 
 body=open(WAV,"rb").read()
