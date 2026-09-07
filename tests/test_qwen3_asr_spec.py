@@ -2226,8 +2226,8 @@ def _canary_timings(sh):
 def test_the_monitor_is_not_asked_about_a_server_that_never_served():
     """/health 200 does not mean a transcription can complete yet.
 
-    The first transcription JIT-compiles kernels: measured 6m27s-6m35s across
-    five runs, and on this run the route was published at 02:35:52 while the
+    The first transcription JIT-compiles kernels: measured 6m27s-6m45s across
+    fourteen runs, and on this run the route was published at 02:35:52 while the
     first transcription finished at 02:45 -- 9.1 minutes later. The monitor
     loop starts 20 s after wait_healthy returns and gives the canary 45 s, so
     two failures arrive 2.2 minutes in and declare a wedge. recover_device then
@@ -2255,10 +2255,16 @@ def test_the_warm_up_budget_covers_the_measured_compile():
     budget = re.search(r'CANARY_FIRST_TIMEOUT="\$\{CANARY_FIRST_TIMEOUT:-(\d+)\}"', sh)
     assert budget, "the first-transcription budget must be a named, overridable value"
     seconds = int(budget.group(1))
-    # 6m35s measured, and the runbook tells readers to budget 7 minutes
+    # Slowest first transcription observed here is 6m44.8s (of fourteen), and
+    # the runbook tells readers to budget 7 minutes. 7*60 = 420s clears the
+    # slowest by 15s, which is why the shipped default is 600s rather than 420.
+    slowest_measured = 6 * 60 + 45
+    assert seconds >= slowest_measured, (
+        f"{seconds}s is under the slowest measured compile ({slowest_measured}s); "
+        f"the monitor would call a still-compiling server wedged"
+    )
     assert seconds >= 7 * 60, (
-        f"{seconds}s is under the measured 6m35s compile plus margin; the "
-        f"runbook budgets 7 minutes"
+        f"{seconds}s is under the 7 minutes the runbook tells readers to budget"
     )
 
 
@@ -3253,3 +3259,64 @@ def test_the_supervisor_table_has_one_row_per_variable():
     for var in sorted(_supervisor_env_reads()):
         rows = [line for line in table.splitlines() if f"`{var}`" in line.split("|")[1]]
         assert len(rows) == 1, f"{var} has {len(rows)} rows in the table"
+
+
+def test_the_first_transcription_range_covers_every_run_we_recorded():
+    """The quoted range is a claim about our own measurements.
+
+    It read "6m27s-6m35s over five runs" long after fourteen had been taken,
+    two of which (6m40.0s and 6m44.8s) fell outside it -- the second measured
+    in the very session that left the sentence alone. A range narrower than
+    the observations tells the reader 6m36s is abnormal when it is not, and it
+    is the stated basis for CANARY_FIRST_TIMEOUT.
+
+    The runbook's own numbers are the evidence here: the worked example quotes
+    6m33.591s, and the range has to contain it with room for the spread.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "`CANARY_FIRST_TIMEOUT`")
+
+    bounds = re.search(r"measured (\d+)m(\d+)s[\u2013-](\d+)m(\d+)s", row)
+    assert bounds, f"the row must state a measured range: {row[:200]}"
+    low = int(bounds.group(1)) * 60 + int(bounds.group(2))
+    high = int(bounds.group(3)) * 60 + int(bounds.group(4))
+    assert low < high, (low, high)
+
+    # the worked example elsewhere in the runbook must sit inside the range
+    example = re.search(r"real (\d+)m([\d.]+)s` for the\s*\n?first transcription", readme)
+    assert example, "the runbook no longer quotes a first-transcription time"
+    example_s = int(example.group(1)) * 60 + float(example.group(2))
+    assert low <= example_s <= high, (
+        f"the worked example {example_s}s is outside the quoted range "
+        f"{low}-{high}s"
+    )
+
+    # and the slowest run named in the row must be inside it too
+    slowest = [
+        int(m.group(1)) * 60 + float(m.group(2))
+        for m in re.finditer(r"(\d+)m([\d.]+)s", row)
+    ]
+    assert slowest, row
+    assert max(slowest) <= high, (
+        f"the row names {max(slowest)}s but claims the range tops out at {high}s"
+    )
+
+
+def test_the_first_transcription_budget_clears_the_quoted_range():
+    """CANARY_FIRST_TIMEOUT is justified by that range, so it must exceed it.
+
+    Reading the bound out of the README rather than restating it means
+    widening the range without revisiting the budget fails here.
+    """
+    row = _readme_row(_readme(), "`CANARY_FIRST_TIMEOUT`")
+    bounds = re.search(r"measured \d+m\d+s[\u2013-](\d+)m(\d+)s", row)
+    assert bounds, row[:200]
+    high = int(bounds.group(1)) * 60 + int(bounds.group(2))
+
+    budget = re.search(
+        r'CANARY_FIRST_TIMEOUT="\$\{CANARY_FIRST_TIMEOUT:-(\d+)\}"', _supervisor()
+    )
+    assert budget, "the budget must stay a named, overridable value"
+    assert int(budget.group(1)) > high, (
+        f"the budget {budget.group(1)}s does not clear the quoted worst case {high}s"
+    )
