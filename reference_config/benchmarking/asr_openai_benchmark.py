@@ -290,9 +290,13 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     ap.add_argument("--host", default="http://127.0.0.1:8110", help="Server base URL")
     ap.add_argument("--model", default="neosophie/Qwen3-ASR-1.7B-JA", help="Served model name")
     ap.add_argument("--language", default=None, help="Optional language hint (e.g. ja, en)")
+    # verbose_json is in the vLLM schema but this model answers HTTP 400
+    # ("Currently do not support verbose_json for ..."), so every request made
+    # with it fails; the help used to promise it was how you got `duration`.
+    # srt/vtt are rejected by the server too. json and text are what work.
     ap.add_argument(
-        "--response-format", default="json", choices=["json", "verbose_json", "text"],
-        help="OpenAI response_format. json -> usage.seconds; verbose_json -> duration.",
+        "--response-format", default="json", choices=["json", "text"],
+        help="OpenAI response_format. json carries usage.seconds; text does not.",
     )
     ap.add_argument("--samples", type=int, default=8, help="Distinct LibriSpeech samples to download")
     ap.add_argument("--num-requests", type=int, default=16, help="Total requests to send")

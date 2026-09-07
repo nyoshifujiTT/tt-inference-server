@@ -200,3 +200,84 @@ def test_the_defaults_are_reachable_through_the_parsers_we_can_import():
     assert args.host == RUNBOOK_HOST
     assert args.model == SERVED_MODEL
     assert args.concurrency == SERVER_BATCH_WIDTH
+
+
+def _response_format_choices(path):
+    """The choices= list on a harness's --response-format flag."""
+    for node in ast.walk(ast.parse(_read(path))):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "attr", None) != "add_argument":
+            continue
+        if not node.args or getattr(node.args[0], "value", None) != "--response-format":
+            continue
+        for kw in node.keywords:
+            if kw.arg == "choices":
+                return [elt.value for elt in kw.value.elts]
+    return None
+
+
+# What the served model actually accepts, measured against the running server:
+#
+#   json          HTTP 200
+#   text          HTTP 200
+#   verbose_json  HTTP 400  "Currently do not support verbose_json for
+#                            neosophie/Qwen3-ASR-1.7B-JA"
+#   srt / vtt     HTTP 400  "Currently only support response_format: `text`,
+#                            `json` or `verbose_json`"
+#
+# verbose_json is in vLLM's schema but unimplemented for this model, and
+# leaving it unimplemented is a settled decision, not an oversight.
+SERVED_RESPONSE_FORMATS = ["json", "text"]
+
+
+def test_no_harness_offers_a_response_format_the_server_rejects():
+    """A choice that always 400s is worse than no choice at all.
+
+    Both harnesses listed verbose_json, and the benchmark's help went further
+    and told the reader it was how to get `duration`. Picking it fails every
+    request. argparse choices= is a promise that the value works.
+    """
+    for path in asr_harnesses():
+        choices = _response_format_choices(path)
+        if choices is None:
+            continue
+        rejected = [c for c in choices if c not in SERVED_RESPONSE_FORMATS]
+        assert not rejected, (
+            f"{os.path.basename(path)} offers {rejected}, which the server "
+            f"answers with HTTP 400"
+        )
+
+
+def test_the_harnesses_offer_the_same_response_formats():
+    """Two harnesses run against one server; a format works for both or neither."""
+    offered = {
+        os.path.basename(path): _response_format_choices(path)
+        for path in asr_harnesses()
+        if _response_format_choices(path) is not None
+    }
+    assert len(offered) == 2, offered
+    values = list(offered.values())
+    assert values[0] == values[1], offered
+
+
+def test_no_harness_help_promises_the_unimplemented_format():
+    """The help text is read more often than the choices list.
+
+    "verbose_json -> duration" survived in the benchmark's help after the
+    format stopped being reachable, which is how a reader would still be told
+    to use it.
+    """
+    for path in asr_harnesses():
+        src = _read(path)
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(node.func, "attr", None) != "add_argument":
+                continue
+            for kw in node.keywords:
+                if kw.arg == "help" and isinstance(kw.value, ast.Constant):
+                    assert "verbose_json ->" not in kw.value.value, (
+                        f"{os.path.basename(path)}: the help still advertises "
+                        f"verbose_json as usable: {kw.value.value!r}"
+                    )

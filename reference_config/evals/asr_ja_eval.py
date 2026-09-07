@@ -113,7 +113,10 @@ def main():
     ap.add_argument("--concurrency",type=int,default=4)
     ap.add_argument("--timeout",type=int,default=120)
     ap.add_argument("--limit",type=int,default=0)
-    ap.add_argument("--response-format",default="json",choices=["json","verbose_json"])
+    # verbose_json is advertised by the vLLM schema but this model rejects it
+    # ("Currently do not support verbose_json for ...", HTTP 400), so offering
+    # it here would only let a caller pick a format every request fails on.
+    ap.add_argument("--response-format",default="json",choices=["json","text"])
     ap.add_argument("--output",default=None)
     ap.add_argument("--samples-out",default=None)
     a=ap.parse_args()
