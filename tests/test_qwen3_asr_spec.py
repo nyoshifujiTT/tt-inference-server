@@ -3207,3 +3207,49 @@ def test_asr_spec_is_the_default_impl_for_p150(spec_id):
     documented run command cannot name the model by weight alone.
     """
     assert MODEL_SPECS[spec_id].device_model_spec.default_impl is True
+
+
+def _supervisor_env_reads():
+    """Every ${VAR:-default} the supervisor script expands, with its default."""
+    import re
+
+    found = {}
+    for var, default in re.findall(
+        r"\$\{([A-Z_][A-Z0-9_]*):-([^}]*)\}", _supervisor()
+    ):
+        # first expansion wins; later ones reuse the resolved value
+        found.setdefault(var, default)
+    return found
+
+
+def _supervisor_env_table():
+    readme = _readme()
+    start = readme.index("| variable | default | note |")
+    table = readme[start:]
+    return table[: table.index("\n\n")]
+
+
+def test_the_runbook_documents_every_variable_the_supervisor_reads():
+    """The table is the only place an operator learns what can be overridden.
+
+    It listed nine of the ten and there was no test that it listed any
+    particular number, so HF_TOKEN -- which the script exports into run.py's
+    environment -- was absent with nothing to notice. Scan the script instead
+    of restating its variables, so the eleventh cannot be missed either.
+    """
+    reads = _supervisor_env_reads()
+    assert reads, "the scan found no ${VAR:-default} expansions; pattern is stale"
+
+    table = _supervisor_env_table()
+    missing = [var for var in sorted(reads) if f"`{var}`" not in table]
+    assert not missing, (
+        f"the supervisor reads {missing} but the runbook table does not list them"
+    )
+
+
+def test_the_supervisor_table_has_one_row_per_variable():
+    """Two rows for one variable let a stale one survive beside a correct one."""
+    table = _supervisor_env_table()
+    for var in sorted(_supervisor_env_reads()):
+        rows = [line for line in table.splitlines() if f"`{var}`" in line.split("|")[1]]
+        assert len(rows) == 1, f"{var} has {len(rows)} rows in the table"
