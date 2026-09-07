@@ -288,7 +288,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         description="vLLM OpenAI-compatible ASR (/v1/audio/transcriptions) benchmark client."
     )
     ap.add_argument("--host", default="http://127.0.0.1:8110", help="Server base URL")
-    ap.add_argument("--model", default="Qwen3-ASR-1.7B-JA", help="Served model name")
+    ap.add_argument("--model", default="neosophie/Qwen3-ASR-1.7B-JA", help="Served model name")
     ap.add_argument("--language", default=None, help="Optional language hint (e.g. ja, en)")
     ap.add_argument(
         "--response-format", default="json", choices=["json", "verbose_json", "text"],

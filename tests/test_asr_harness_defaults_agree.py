@@ -126,6 +126,16 @@ def test_every_harness_defaults_to_the_runbook_host():
         )
 
 
+def test_every_harness_defaults_to_the_served_model_name():
+    """The owner prefix is part of the served name; without it the server 404s."""
+    for path in asr_harnesses():
+        model = harness_defaults(path)["model"]
+        assert model == SERVED_MODEL, (
+            f"{os.path.basename(path)}: default model {model!r} is not the "
+            f"served {SERVED_MODEL!r}"
+        )
+
+
 def test_the_runbook_still_targets_the_host_the_defaults_claim():
     """If the runbook moves off 8110, this rule has to move with it.
 
