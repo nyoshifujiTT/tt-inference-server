@@ -2226,8 +2226,8 @@ def _canary_timings(sh):
 def test_the_monitor_is_not_asked_about_a_server_that_never_served():
     """/health 200 does not mean a transcription can complete yet.
 
-    The first transcription JIT-compiles kernels: measured 6m27s-6m45s across
-    fourteen runs, and on this run the route was published at 02:35:52 while the
+    The first transcription JIT-compiles kernels: measured 6m25s-6m45s across
+    fifteen runs, and on this run the route was published at 02:35:52 while the
     first transcription finished at 02:45 -- 9.1 minutes later. The monitor
     loop starts 20 s after wait_healthy returns and gives the canary 45 s, so
     two failures arrive 2.2 minutes in and declare a wedge. recover_device then
@@ -3291,14 +3291,19 @@ def test_the_first_transcription_range_covers_every_run_we_recorded():
         f"{low}-{high}s"
     )
 
-    # and the slowest run named in the row must be inside it too
-    slowest = [
+    # and every run named in the row must be inside it, at BOTH ends. The
+    # upper bound was the one that had drifted, so only it was checked -- and
+    # the very next measurement (6m25.8s) fell off the *bottom* instead.
+    named = [
         int(m.group(1)) * 60 + float(m.group(2))
         for m in re.finditer(r"(\d+)m([\d.]+)s", row)
     ]
-    assert slowest, row
-    assert max(slowest) <= high, (
-        f"the row names {max(slowest)}s but claims the range tops out at {high}s"
+    assert named, row
+    assert max(named) <= high, (
+        f"the row names {max(named)}s but claims the range tops out at {high}s"
+    )
+    assert min(named) >= low, (
+        f"the row names {min(named)}s but claims the range starts at {low}s"
     )
 
 
