@@ -1203,6 +1203,23 @@ They are also not interchangeable at runtime: the supervisor runs
 `--docker-server`. Only one of the two can own `/dev/tenstorrent/0`, which is
 why the holder check exists.
 
+**Enabling the unit while a container is serving does not take the service
+over -- it waits.** The supervisor logs
+
+```
+device held by containerised pid(s): <pid> -- not launching; waiting for that
+deployment to stop (do not run this supervisor beside a --docker-server server)
+```
+
+once a minute and does not start `run.py` until the container is gone. That is
+deliberate, and it is stronger than it looks: launching anyway would not fail
+cleanly. `run.py` hangs in `Starting devices in cluster`, `wait_healthy` spends
+its full 20 minutes on a port the container is not serving, and
+`recover_device` then runs `tt-smi -r` -- resetting the chip out from under a
+deployment that is answering requests. `device_ok` only asks whether `tt-smi`
+can read the board, so that reset looks successful and the loop repeats,
+wedging a healthy server every 20 minutes. Stop the container first.
+
 ### What the supervisor reads from the environment
 
 Every path it uses is overridable, and it checks them before launching -- a

@@ -2004,6 +2004,28 @@ def test_the_guard_does_not_block_on_our_own_leftovers():
     )
 
 
+def test_the_runbook_says_the_unit_waits_rather_than_taking_over():
+    """Otherwise "enable the service" reads as "the service now runs".
+
+    Someone installing the unit on a host that is already serving via
+    --docker-server needs to know the supervisor will sit and log rather than
+    start, and why launching anyway would have been worse than useless.
+    """
+    readme = _readme()
+    section = readme[readme.index("why the holder check exists") :]
+    section = section[: section.index("### What the supervisor reads")]
+    flat = " ".join(section.split())
+    assert "does not take the service over -- it waits" in flat, (
+        "say what enabling the unit does while a container holds the chip"
+    )
+    assert "not launching" in flat, "quote the log line, so it is recognisable"
+    # and the reason the guard is not merely tidy
+    assert "tt-smi -r" in flat and "resetting the chip" in flat, (
+        "say that launching anyway resets a chip that is serving traffic"
+    )
+    assert "every 20 minutes" in flat, "and that it repeats, rather than failing once"
+
+
 def test_the_runbook_does_not_narrow_the_guard_to_the_engine():
     """"spares the engine" understated it and matched the old broken code.
 
