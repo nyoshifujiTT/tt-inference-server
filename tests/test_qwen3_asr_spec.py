@@ -3765,3 +3765,131 @@ def test_kill_ours_never_kills_the_supervisor_itself(tmp_path):
     assert not killed.exists(), (
         f"the supervisor's own pid was killed: {killed.read_text()}"
     )
+
+
+def test_relax_device_perms_widens_only_the_character_devices(tmp_path):
+    """The runbook says this was "exercised both ways on the host" -- do that here.
+
+    The earlier `chmod 666 /dev/tenstorrent/*` matched the by-id directory
+    udev creates and dropped its execute bit, leaving it untraversable until
+    the next boot; it sat that way on the delivery host for days. The fix is
+    the `[ -c "$node" ]` test, and until now only its presence in the source
+    was asserted.
+
+    Creating a character device needs root, so chmod is stubbed and the
+    helper's decisions are recorded: what it chose to widen is the thing
+    under test. /dev/null stands in for the chip node -- it is a character
+    device on every Linux -- and a real directory for by-id.
+    """
+    import os
+    import re
+    import subprocess
+
+    log = tmp_path / "chmodded"
+    helper = re.search(r"relax_device_perms\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    assert helper, "relax_device_perms must stay a shell function"
+
+    # Feed the loop the two real entry kinds by name, via a stubbed glob.
+    body = helper.group(0).replace(
+        "/dev/tenstorrent/*", '/dev/null "%s/by-id"' % tmp_path
+    )
+    (tmp_path / "by-id").mkdir()
+
+    script = (
+        "set -u\n"
+        f'sudo() {{ shift; echo "$2" >> "{log}"; }}\n'
+        f"{body}\nrelax_device_perms\n"
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert not result.stderr, result.stderr
+
+    widened = log.read_text().split() if log.exists() else []
+    assert widened == ["/dev/null"], (
+        f"only the character device may be chmod'ed; the helper chose {widened}"
+    )
+    assert str(tmp_path / "by-id") not in widened, (
+        "the by-id directory must never be chmod'ed -- 666 drops its x bit"
+    )
+
+
+def test_the_old_glob_really_did_break_the_directory(tmp_path):
+    """Guard the premise: without the -c test the directory does lose x.
+
+    If a future chmod becomes harmless on directories, the test above stops
+    being load-bearing and this says so rather than leaving dead reasoning.
+    """
+    import os
+    import stat
+    import subprocess
+
+    devdir = tmp_path / "tenstorrent"
+    devdir.mkdir()
+    (devdir / "by-id").mkdir()
+    os.chmod(devdir / "by-id", 0o755)
+
+    result = subprocess.run(
+        ["bash", "-c", f"chmod 666 {devdir}/*"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+    mode = stat.S_IMODE(os.stat(devdir / "by-id").st_mode)
+    assert not mode & stat.S_IXUSR, (
+        f"the unguarded glob no longer drops the execute bit ({oct(mode)}); "
+        f"revisit why relax_device_perms tests for a character device"
+    )
+
+
+def test_no_caller_depends_on_relax_device_perms_exit_status():
+    """Its status is the last `[ -c ]` test, which is normally false.
+
+    /dev/tenstorrent/by-id sorts after the numbered nodes, so the loop's last
+    iteration fails the character-device test and the function returns 1 on a
+    perfectly healthy host. That is fine only because nothing reads it and the
+    script does not run under set -e; both of those have to stay true.
+    """
+    sh = _supervisor()
+
+    consumed = [
+        line.strip()
+        for line in sh.splitlines()
+        if "relax_device_perms" in line
+        and any(
+            token in line
+            for token in ("if ", "&&", "||", "! ", "while ", "until ")
+        )
+    ]
+    assert not consumed, (
+        f"these read a status that is normally 1: {consumed}"
+    )
+
+    set_lines = [ln.strip() for ln in sh.splitlines() if ln.strip().startswith("set ")]
+    assert set_lines == ["set -u"], (
+        f"set -e would abort on relax_device_perms' normal exit: {set_lines}"
+    )
+
+
+def test_the_old_glob_really_did_break_the_directory(tmp_path):
+    """Guard the premise: without the -c test the directory does lose x.
+
+    If a future chmod becomes harmless on directories, the test above stops
+    being load-bearing and this says so rather than leaving dead reasoning.
+    """
+    import os
+    import stat
+    import subprocess
+
+    devdir = tmp_path / "tenstorrent"
+    devdir.mkdir()
+    (devdir / "by-id").mkdir()
+    os.chmod(devdir / "by-id", 0o755)
+
+    result = subprocess.run(
+        ["bash", "-c", f"chmod 666 {devdir}/*"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+    mode = stat.S_IMODE(os.stat(devdir / "by-id").st_mode)
+    assert not mode & stat.S_IXUSR, (
+        f"the unguarded glob no longer drops the execute bit ({oct(mode)}); "
+        f"revisit why relax_device_perms tests for a character device"
+    )
