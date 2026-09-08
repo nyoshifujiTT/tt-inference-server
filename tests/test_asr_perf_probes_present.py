@@ -15,6 +15,8 @@ import ast
 import os
 import re
 
+import pytest
+
 HERE = os.path.dirname(__file__)
 BENCH_DIR = os.path.join(HERE, "..", "reference_config", "benchmarking")
 PROBE = os.path.join(BENCH_DIR, "asr_perf_probe.py")
@@ -27,6 +29,113 @@ def _read(path):
         return fh.read()
 
 
+# One counter line per figure metrics() returns, in the exposition format vLLM
+# uses. request_success_total is split over finish reasons on purpose: the
+# probe has to add them up, not read the first one.
+_METRICS_PAYLOAD = "\n".join(
+    (
+        'vllm:time_to_first_token_seconds_sum{model_name="m"} 12.5',
+        'vllm:time_to_first_token_seconds_count{model_name="m"} 10',
+        'vllm:e2e_request_latency_seconds_sum{model_name="m"} 25.0',
+        'vllm:e2e_request_latency_seconds_count{model_name="m"} 10',
+        'vllm:request_prefill_time_seconds_sum{model_name="m"} 9.0',
+        'vllm:request_decode_time_seconds_sum{model_name="m"} 8.0',
+        'vllm:generation_tokens_total{model_name="m"} 240',
+        'vllm:request_success_total{finished_reason="stop",model_name="m"} 7',
+        'vllm:request_success_total{finished_reason="length",model_name="m"} 3',
+    )
+)
+
+
+def _run_metrics(payload):
+    """Execute the shipped metrics() against a stubbed /metrics body.
+
+    Only that one function is compiled, so importing the probe (which parses
+    argv and opens a wav at module scope) is not required.
+    """
+    import sys
+    import types
+
+    source = _read(PROBE)
+    function = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "metrics"
+    )
+
+    class _Response:
+        def read(self):
+            return payload.encode()
+
+    request = types.ModuleType("urllib.request")
+    request.urlopen = lambda url, timeout=10: _Response()
+    urllib = types.ModuleType("urllib")
+    urllib.request = request
+
+    namespace = {"re": re, "sys": sys, "urllib": urllib, "HOST": "http://stub"}
+    module = ast.Module(body=[function], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), PROBE, "exec"), namespace)  # noqa: S102
+    return namespace["metrics"]()
+
+
+def test_the_probe_reads_each_counter_off_a_metrics_body():
+    """The checks here read the source; this one runs the parsing.
+
+    Every figure the probe prints is a difference of these values, so a regex
+    that matched the wrong number would not error -- it would report a
+    plausible measurement. The exponent form is allowed by the patterns
+    ([0-9.eE+]), which is how a large counter is actually exposed.
+    """
+    values = _run_metrics(_METRICS_PAYLOAD)
+
+    assert values == {
+        "ttft_sum": 12.5,
+        "ttft_cnt": 10.0,
+        "e2e_sum": 25.0,
+        "e2e_cnt": 10.0,
+        "pref_sum": 9.0,
+        "dec_sum": 8.0,
+        "gen_tok": 240.0,
+        # 7 + 3: summed over finish reasons, not the first match
+        "succ": 10.0,
+    }, values
+
+
+def test_the_probe_totals_the_success_counter_over_finish_reasons():
+    """A `stop`-only read would under-count exactly when something went wrong.
+
+    length/abort/error/repetition are separate series. Reading one of them
+    makes `ok` disagree with the requests actually served, which is the number
+    used to decide whether a run was healthy.
+    """
+    payload = _METRICS_PAYLOAD + (
+        '\nvllm:request_success_total{finished_reason="abort",model_name="m"} 5'
+    )
+    assert _run_metrics(payload)["succ"] == 15.0
+
+
+def test_every_counter_the_probe_needs_is_mandatory():
+    """A missing counter must stop the run, not become a zero.
+
+    re.search returns None and re.findall returns [] when a counter is
+    renamed; substituting either would make gen_tokens 0 and
+    decode_tps_aggregate 0.0 look like results. Each line is dropped in turn
+    and the probe must exit for all of them.
+    """
+    names = sorted({line.split("{")[0] for line in _METRICS_PAYLOAD.splitlines()})
+    assert len(names) == 8, names
+
+    for name in names:
+        payload = "\n".join(
+            line
+            for line in _METRICS_PAYLOAD.splitlines()
+            if not line.startswith(name)
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            _run_metrics(payload)
+        assert name in str(excinfo.value), (
+            f"the message must name the counter that went missing: {excinfo.value}"
+        )
 def test_both_probes_are_committed():
     for path in (PROBE, STREAM):
         assert os.path.exists(path), f"{os.path.basename(path)} must be in the repo"
