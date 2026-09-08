@@ -3386,3 +3386,176 @@ def test_the_supervisor_does_not_set_e():
     assert "if ! " in sh or "|| true" in sh, (
         "the loop no longer uses non-zero exits as control flow; revisit -e"
     )
+
+
+ADAPTER = os.path.join(
+    os.path.dirname(__file__), "..", "evals", "lmms_eval_models", "qwen3_asr_openai.py"
+)
+
+
+def _adapter_fn(name, namespace=None):
+    """Compile one function out of the lmms-eval adapter.
+
+    The module imports lmms_eval, which is not installed here (it is pulled
+    into a workflow venv by setup_evals_audio), so it cannot be imported. The
+    two functions below are plain numpy/wave code and can be extracted.
+    """
+    import ast
+
+    with open(ADAPTER) as fh:
+        tree = ast.parse(fh.read())
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            module = ast.Module(body=[node], type_ignores=[])
+            ns = dict(namespace or {})
+            exec(compile(module, ADAPTER, "exec"), ns)  # noqa: S102 - our own source
+            return ns[name]
+    raise AssertionError(f"{name} not found in qwen3_asr_openai.py")
+
+
+def test_the_adapter_encodes_audio_as_the_wav_the_server_expects():
+    """Nothing has ever run the code that builds the request body.
+
+    Every test around this file checks that it is orphaned; none calls into
+    it. _wav_bytes turns a float waveform into the bytes posted to
+    /v1/audio/transcriptions, and each way it can break produces a valid WAV
+    carrying the wrong audio -- an HTTP 200 and a bad transcript, visible only
+    in CER.
+    """
+    import io
+    import numpy as np
+    import wave
+
+    wav_bytes = _adapter_fn("_wav_bytes", {"np": np, "io": io, "wave": wave})
+
+    audio = np.array([0.0, 0.5, -0.5, 1.0, -1.0], dtype=np.float32)
+    data = wav_bytes(None, audio, 16000)
+
+    with wave.open(io.BytesIO(data), "rb") as handle:
+        assert handle.getnchannels() == 1, "the server is sent mono"
+        assert handle.getsampwidth() == 2, "16-bit PCM"
+        assert handle.getframerate() == 16000, "the sample rate must be carried through"
+        assert handle.getnframes() == len(audio)
+        frames = handle.readframes(handle.getnframes())
+
+    decoded = np.frombuffer(frames, dtype="<i2")
+    assert decoded.tolist() == [0, 16383, -16383, 32767, -32767], (
+        f"the sample values changed: {decoded.tolist()}"
+    )
+
+
+def test_the_adapter_clips_instead_of_wrapping_around():
+    """Out-of-range samples must saturate, not overflow.
+
+    Without the clip, 1.5 * 32767 does not fit in int16 and wraps to a large
+    negative number -- silence turns into a loud click and the transcript
+    degrades with no error anywhere.
+    """
+    import io
+    import numpy as np
+    import wave
+
+    wav_bytes = _adapter_fn("_wav_bytes", {"np": np, "io": io, "wave": wave})
+
+    loud = np.array([1.5, -1.5], dtype=np.float32)
+    with wave.open(io.BytesIO(wav_bytes(None, loud, 16000)), "rb") as handle:
+        decoded = np.frombuffer(handle.readframes(handle.getnframes()), dtype="<i2")
+
+    assert decoded.tolist() == [32767, -32767], (
+        f"samples outside [-1, 1] must saturate, got {decoded.tolist()}"
+    )
+
+
+def test_the_adapter_writes_little_endian_samples():
+    """WAV is little-endian; a byte-swapped file is valid and wrong.
+
+    Checked on the raw bytes rather than through numpy's dtype, so the
+    assertion cannot be satisfied by reading back with the same wrong dtype.
+    """
+    import io
+    import numpy as np
+    import wave
+
+    wav_bytes = _adapter_fn("_wav_bytes", {"np": np, "io": io, "wave": wave})
+
+    with wave.open(io.BytesIO(wav_bytes(None, np.array([1.0], np.float32), 16000)), "rb") as handle:
+        frames = handle.readframes(1)
+
+    assert frames == b"\xff\x7f", f"32767 must be written little-endian, got {frames!r}"
+
+
+def test_the_adapter_skips_resampling_when_the_rate_already_matches():
+    """The equal-rate short circuit is what keeps librosa off the hot path.
+
+    Asserting `out is audio` is not enough: librosa.resample returns its
+    input unchanged when the rates match, so deleting the guard leaves that
+    identity intact and the clip still goes through librosa on every call.
+    Check the guard itself, and that no resampler runs behind it.
+    """
+    import ast
+    import numpy as np
+
+    downsample = _adapter_fn("_downsample", {"np": np})
+
+    audio = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+    out = downsample(audio, 16000, 16000)
+
+    assert out is audio, "an unchanged rate must return the same array untouched"
+
+    # ...and it must get there without calling a resampler at all. Compile the
+    # function against a librosa that fails if touched.
+    class _Boom:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"librosa.{name} was called for an unchanged sample rate"
+            )
+
+    import sys
+
+    guarded = _adapter_fn("_downsample", {"np": np})
+    saved = sys.modules.get("librosa")
+    sys.modules["librosa"] = _Boom()
+    try:
+        assert guarded(audio, 16000, 16000) is audio
+    finally:
+        if saved is None:
+            del sys.modules["librosa"]
+        else:
+            sys.modules["librosa"] = saved
+
+    # and the short circuit must be the first thing in the body, so it cannot
+    # be reached only after some other work has already happened
+    with open(ADAPTER) as fh:
+        tree = ast.parse(fh.read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_downsample":
+            first = node.body[0]
+            assert isinstance(first, ast.If), (
+                "the equal-rate short circuit must be the first statement"
+            )
+            assert "orig_sr == target_sr" in ast.unparse(first.test), (
+                f"unexpected guard: {ast.unparse(first.test)}"
+            )
+            break
+    else:
+        raise AssertionError("_downsample not found")
+
+
+def test_the_adapter_defers_the_librosa_import():
+    """librosa is only needed when a rate conversion actually happens.
+
+    A module-level import would make the adapter unimportable wherever
+    librosa is absent -- which is most places, since it is installed into the
+    evals workflow venv rather than the server environment.
+    """
+    with open(ADAPTER) as fh:
+        source = fh.read()
+
+    module_level = [
+        line
+        for line in source.splitlines()
+        if line.startswith("import librosa") or line.startswith("from librosa")
+    ]
+    assert not module_level, f"librosa must stay a local import: {module_level}"
+    assert "    import librosa" in source, "the deferred import must still be there"
