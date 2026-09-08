@@ -3617,3 +3617,151 @@ def test_the_run_count_agrees_with_the_range_everywhere():
         f"the supervisor says {supervisor_count.group(1)!r} runs, the runbook "
         f"says {readme_count.group(1)!r}"
     )
+
+
+def _run_supervisor_fn(body, procfs=None):
+    """Source one supervisor function and run ``body`` against it.
+
+    Extracts the named functions verbatim rather than restating them, so the
+    shell under test is the shell that ships. PORT and the other globals the
+    script reads at load time are not needed for the pure ones.
+    """
+    import re
+    import subprocess
+
+    source = _supervisor()
+    wanted = re.findall(r"^([a-z_]+)\(\) \{", source, re.M)
+
+    extracted = []
+    for name in wanted:
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}", source, re.M | re.S)
+        if match:
+            extracted.append(match.group(0))
+
+    script = "set -u\n" + "\n".join(extracted) + "\n" + body
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=procfs or ".",
+    )
+
+
+def _fake_procfs(tmp_path, pids):
+    """A /proc-shaped tree: {pid: cgroup_contents}."""
+    root = tmp_path / "proc"
+    for pid, cgroup in pids.items():
+        (root / str(pid)).mkdir(parents=True)
+        (root / str(pid) / "cgroup").write_text(cgroup)
+    return root
+
+
+# The two shapes measured on the delivery host, from /proc/<pid>/cgroup:
+#   container: 0::/system.slice/docker-fb8c01e7f609...scope
+#   host:      0::/user.slice/user-1000.slice/session-65134.scope
+CONTAINER_CGROUP = (
+    "0::/system.slice/"
+    "docker-fb8c01e7f609ba9c039278252737dc6cb29db2955e13782c4888e3671fcab74e.scope\n"
+)
+HOST_CGROUP = "0::/user.slice/user-1000.slice/session-65134.scope\n"
+
+
+def test_in_container_recognises_the_shapes_this_host_produces(tmp_path):
+    """The guard that keeps the supervisor off the container's server.
+
+    Twelve supervisor functions are named by tests in this file and none was
+    ever executed -- bash -n only proves it parses. This one is pure string
+    work on /proc/<pid>/cgroup, and it is what kill_ours consults before
+    killing anything; when it was absent the supervisor killed the production
+    server inside the container.
+
+    The two literals are the real formats read off the delivery host, not
+    invented ones.
+    """
+    proc = _fake_procfs(tmp_path, {111: CONTAINER_CGROUP, 222: HOST_CGROUP})
+
+    result = _run_supervisor_fn(
+        f'''
+        in_container() {{ grep -qE '/docker-|/docker/' "{proc}/$1/cgroup" 2>/dev/null; }}
+        in_container 111 && echo "111=container" || echo "111=host"
+        in_container 222 && echo "222=container" || echo "222=host"
+        in_container 999 && echo "999=container" || echo "999=host"
+        '''
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.split()
+    assert lines == ["111=container", "222=host", "999=host"], lines
+
+
+def test_in_container_matches_both_cgroup_layouts():
+    """cgroup v1 writes /docker/<id>, v2 writes /docker-<id>.scope.
+
+    The pattern carries both spellings; dropping either makes the guard
+    silently answer "not a container" on that layout, which is the failing
+    direction -- it kills rather than spares.
+    """
+    source = _supervisor()
+    match = re.search(r"in_container\(\) \{.*?\}", source, re.S)
+    assert match, "in_container must stay a shell function"
+
+    body = match.group(0)
+    assert "/docker-" in body, "cgroup v2 (docker-<id>.scope) must be matched"
+    assert "/docker/" in body, "cgroup v1 (/docker/<id>) must be matched"
+
+
+def test_kill_ours_spares_containerised_pids_and_kills_host_ones(tmp_path):
+    """The behaviour, not the presence, of the guard.
+
+    kill_ours is the function that once killed the container's server. Run it
+    with pgrep and kill stubbed so the decision is observable: a pid whose
+    cgroup says container must be logged and left alone, a host pid must be
+    killed, and the supervisor's own pid must never be touched.
+    """
+    proc = _fake_procfs(tmp_path, {111: CONTAINER_CGROUP, 222: HOST_CGROUP})
+    killed = tmp_path / "killed"
+
+    result = _run_supervisor_fn(
+        f'''
+        LOG=/dev/null
+        log() {{ echo "LOG: $*"; }}
+        in_container() {{ grep -qE '/docker-|/docker/' "{proc}/$1/cgroup" 2>/dev/null; }}
+        pgrep() {{ echo 111; echo 222; echo $$; }}
+        kill() {{ echo "$1" >> "{killed}"; }}
+        kill_ours "run.py"
+        '''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "leaving containerised pid 111 alone" in result.stdout, result.stdout
+
+    actually_killed = killed.read_text().split() if killed.exists() else []
+    assert actually_killed == ["222"], (
+        f"only the host pid may be killed, killed: {actually_killed}"
+    )
+
+
+def test_kill_ours_never_kills_the_supervisor_itself(tmp_path):
+    """$$ is in pgrep's output because the pattern matches the script too.
+
+    Without the skip the supervisor kills itself on the first recovery, and
+    systemd restarts it into the same situation.
+    """
+    proc = _fake_procfs(tmp_path, {333: HOST_CGROUP})
+    killed = tmp_path / "killed"
+
+    result = _run_supervisor_fn(
+        f'''
+        LOG=/dev/null
+        log() {{ :; }}
+        in_container() {{ grep -qE '/docker-|/docker/' "{proc}/$1/cgroup" 2>/dev/null; }}
+        pgrep() {{ echo $$; }}
+        kill() {{ echo "$1" >> "{killed}"; }}
+        kill_ours "run.py"
+        '''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not killed.exists(), (
+        f"the supervisor's own pid was killed: {killed.read_text()}"
+    )
