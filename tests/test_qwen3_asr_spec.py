@@ -3349,6 +3349,88 @@ def test_the_supervisor_is_valid_shell():
     )
 
 
+def test_the_unit_file_is_parsed_by_systemd_with_nothing_ignored():
+    """The script gets `bash -n`; the unit beside it got two string checks.
+
+    A unit is only as good as what systemd makes of it, and systemd *ignores*
+    what it cannot understand rather than refusing. Measured with
+    systemd-analyze 255 on this host:
+
+        Restart=always -> Resart=always   "Unknown key name ... ignoring"  exit 0
+        RestartSec=15  -> RestartSec=abc  "Failed to parse sec value"      exit 0
+        relative ExecStart / no [Service] / missing binary                 exit 1
+
+    So the two directives that make this a *supervisor* -- restart on exit and
+    the delay between attempts -- can both be typo'd into nothing while the
+    exit code stays 0 and every containment check in this file still passes.
+    The assertion is therefore on the diagnostics, not only on the status.
+    """
+    import shutil
+    import subprocess
+
+    analyze = shutil.which("systemd-analyze")
+    if analyze is None:
+        pytest.skip("systemd-analyze is not available")
+
+    path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "scripts",
+        "qwen3_asr",
+        "qwen3asr-supervisor.service",
+    )
+    # systemd-analyze resolves a bare name against the unit search path, so
+    # pass a path it cannot mistake for an installed unit name.
+    result = subprocess.run(
+        [analyze, "verify", os.path.abspath(path)],
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    # ExecStart names a path that only exists on a deployed host; that is the
+    # one diagnostic this checkout cannot satisfy.
+    noise = ("is not executable", "Failed to open", "Unit configuration has no")
+    complaints = [
+        line
+        for line in output.splitlines()
+        if line.strip() and not any(skip in line for skip in noise)
+    ]
+    assert not complaints, "systemd rejected or ignored part of the unit:\n" + "\n".join(
+        complaints
+    )
+
+
+def test_the_unit_keeps_the_directives_that_make_it_a_supervisor():
+    """systemd ignoring a typo'd key is exactly why these are asserted here.
+
+    Without Restart= the supervisor dies with its first crash and the service
+    is worse than no unit at all; without a RestartSec= the retries are the
+    default 100 ms, which on a wedged board is a hot loop against a device
+    reset. Both are only meaningful if systemd actually parsed them, which the
+    check above is what establishes.
+    """
+    unit = _unit_file()
+    directives = dict(
+        line.split("=", 1)
+        for line in unit.splitlines()
+        if "=" in line and not line.startswith(("#", "[", ";"))
+    )
+    assert directives.get("Restart") == "always", (
+        "the supervisor must be restarted whenever it exits, for any reason"
+    )
+    assert directives.get("RestartSec", "").rstrip("s").isdigit(), (
+        f"RestartSec must be a number systemd can parse: {directives.get('RestartSec')!r}"
+    )
+    assert int(directives["RestartSec"].rstrip("s")) >= 5, (
+        "a sub-second retry loop against a device reset is not a supervisor"
+    )
+    # Type=simple + no start timeout: the script's own wait_healthy budget is
+    # 20 minutes, so a systemd start timeout would kill it mid-warmup.
+    assert directives.get("TimeoutStartSec") == "0", (
+        "startup takes 7-12 minutes; systemd must not time it out"
+    )
+
+
 def test_the_unit_file_points_at_a_script_that_parses():
     """The unit names an absolute path; check the file it would actually run.
 
