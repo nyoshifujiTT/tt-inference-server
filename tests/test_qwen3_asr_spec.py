@@ -3559,3 +3559,61 @@ def test_the_adapter_defers_the_librosa_import():
     ]
     assert not module_level, f"librosa must stay a local import: {module_level}"
     assert "    import librosa" in source, "the deferred import must still be there"
+
+
+def _compile_ranges(text):
+    """Every "NmMs-NmMs" compile-time range stated in ``text``, as seconds."""
+    import re
+
+    found = []
+    for match in re.finditer(r"(\d+)m(\d+)s\s*[\u2013-]\s*(\d+)m(\d+)s", text):
+        low = int(match.group(1)) * 60 + int(match.group(2))
+        high = int(match.group(3)) * 60 + int(match.group(4))
+        found.append((low, high))
+    return found
+
+
+def test_every_place_that_states_the_compile_range_agrees():
+    """One measurement, three places that quote it -- they must not drift.
+
+    Widening the range to 6m25s-6m45s updated the runbook and this file's own
+    docstrings, and left the supervisor's canary_ok comment saying
+    "6m27s-6m35s across five runs" -- the very comment that justifies
+    CANARY_FIRST_TIMEOUT. The correction missed the copy that a reader
+    debugging the supervisor would find first.
+    """
+    readme_ranges = _compile_ranges(_readme_row(_readme(), "`CANARY_FIRST_TIMEOUT`"))
+    assert readme_ranges, "the runbook row must state the measured range"
+
+    supervisor_ranges = _compile_ranges(_supervisor())
+    assert supervisor_ranges, (
+        "the supervisor must keep stating the range its timeout is sized from"
+    )
+
+    assert set(supervisor_ranges) <= set(readme_ranges), (
+        f"the supervisor states {supervisor_ranges} but the runbook states "
+        f"{readme_ranges}; one of them is stale"
+    )
+
+
+def test_the_run_count_agrees_with_the_range_everywhere():
+    """"across five runs" outlived the five runs; pin the count too.
+
+    A stale count is what let the stale range hide: the sentence still read
+    plausibly, so nobody re-derived the bounds from it.
+    """
+    import re
+
+    readme_row = _readme_row(_readme(), "`CANARY_FIRST_TIMEOUT`")
+    readme_count = re.search(r"over (\w+) runs", readme_row)
+    assert readme_count, f"the runbook must say how many runs: {readme_row[:160]}"
+
+    supervisor = _supervisor()
+    supervisor_count = re.search(r"across (\w+) runs", supervisor)
+    if supervisor_count is None:
+        return  # the supervisor need not repeat the count, only not contradict it
+
+    assert supervisor_count.group(1) == readme_count.group(1), (
+        f"the supervisor says {supervisor_count.group(1)!r} runs, the runbook "
+        f"says {readme_count.group(1)!r}"
+    )

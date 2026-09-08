@@ -285,7 +285,7 @@ canary_ok() {
   #
   # The timeout is an argument because the FIRST transcription after a launch
   # is not bounded by inference: tt-metal JIT-compiles kernels into the
-  # container/host cache, measured at 6m27s-6m35s across five runs on this
+  # container/host cache, measured at 6m25s-6m45s across fifteen runs on this
   # board. /health turns 200 long before that (route published 02:35:52, first
   # transcription done 02:45 = 9.1 min later), so a 45 s canary run straight
   # out of wait_healthy always times out, and two of those declare a wedge
