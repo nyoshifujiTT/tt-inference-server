@@ -365,6 +365,113 @@ def test_commands_reference_repo_files_by_a_path_that_resolves():
     assert not missing, f"named in the runbook but absent from the repo: {missing}"
 
 
+# Paths that look like this repo's but belong to another of the three
+# repositories the runbook drives.
+#
+# Only one entry: vllm-tt-plugin's tests/tt is named as `pytest tests/tt ...`
+# and as `--deselect tests/tt/test_tt_penalties.py::Class::test`, and neither
+# form reaches the check -- the first has no extension, and the second is
+# followed by `::`, which the trailing delimiter excludes. Adding it here would
+# be dead weight that silently excuses a future tests/tt/*.py of ours.
+_FOREIGN_PATHS = ("docs/install-vllm-tt.sh",)  # vllm-tt-plugin's own installer
+
+
+def test_the_path_check_covers_every_directory_this_repo_has():
+    """The check above allowlisted five directories, and claimed "every".
+
+    That is not a spelling nit: asr_openai_benchmark.py was *moved* from
+    benchmarking/ to reference_config/ during this bring-up, and `benchmarking`
+    was not one of the five. Verified by mutation -- restoring the pre-move
+    command `python3 benchmarking/asr_openai_benchmark.py` left all 19 tests in
+    this file green, so the runbook could ship a command whose very first
+    argument does not exist.
+
+    Rather than extend the list by hand (the next moved file lands in the next
+    directory not on it), take the prefixes from the tree and subtract only the
+    paths that genuinely belong to the other two repositories.
+    """
+    root = get_repo_root_path()
+    readme = _readme()
+
+    directories = sorted(
+        entry.name
+        for entry in os.scandir(root)
+        if entry.is_dir() and not entry.name.startswith(".")
+    )
+    assert "benchmarking" in directories and "reference_config" in directories, (
+        "the move this test exists for is between these two directories"
+    )
+
+    candidates = set(
+        re.findall(
+            r"(?:^|\s)(?:\$TT_INFERENCE_SERVER/)?"
+            r"((?:" + "|".join(map(re.escape, directories)) + r")"
+            r"/[A-Za-z0-9_./-]+?\.(?:py|ya?ml|json|sh|service|Dockerfile|md))"
+            r"(?=[\s\\)`]|$)",
+            readme,
+            re.M,
+        )
+    )
+    assert candidates, "the runbook does name in-repo files; keep this meaningful"
+
+    missing = sorted(
+        path
+        for path in candidates
+        if not (root / path).exists()
+        and path not in _FOREIGN_PATHS
+    )
+    assert not missing, f"named in the runbook but absent from the repo: {missing}"
+
+
+def test_every_foreign_exemption_is_still_needed_and_still_foreign():
+    """The subtraction above is only honest while those paths are not ours.
+
+    If either lands in this repository the exemption must go, or a genuinely
+    broken path stays hidden behind it; if the runbook stops naming one, the
+    exemption is dead weight that will silently excuse a future file.
+
+    "Still needed" is checked by asking whether the exemption actually
+    suppresses something, not by looking for its text: an earlier version of
+    this list carried `tests/tt/`, which reads as load-bearing but suppressed
+    nothing, and a substring check on the runbook happily confirmed it.
+    """
+    root = get_repo_root_path()
+    readme = _readme()
+
+    for path in _FOREIGN_PATHS:
+        assert not (root / path).exists(), (
+            f"{path} is in this repository now; drop the exemption so the "
+            "path check applies to it"
+        )
+        assert path in readme, (
+            f"the runbook no longer names {path}; drop the stale exemption"
+        )
+
+    # and each one must be doing work: without the exemptions, exactly these
+    # paths are what the check would otherwise report.
+    directories = sorted(
+        entry.name
+        for entry in os.scandir(root)
+        if entry.is_dir() and not entry.name.startswith(".")
+    )
+    candidates = set(
+        re.findall(
+            r"(?:^|\s)(?:\$TT_INFERENCE_SERVER/)?"
+            r"((?:" + "|".join(map(re.escape, directories)) + r")"
+            r"/[A-Za-z0-9_./-]+?\.(?:py|ya?ml|json|sh|service|Dockerfile|md))"
+            r"(?=[\s\\)`]|$)",
+            readme,
+            re.M,
+        )
+    )
+    suppressed = {p for p in candidates if not (root / p).exists()}
+    assert suppressed == set(_FOREIGN_PATHS), (
+        "the exemption list must be exactly what the check would report: "
+        f"unused {sorted(set(_FOREIGN_PATHS) - suppressed)}, "
+        f"unexempted {sorted(suppressed - set(_FOREIGN_PATHS))}"
+    )
+
+
 def test_the_unit_file_is_copied_from_where_it_lives():
     readme = _readme()
     assert "scripts/qwen3_asr/qwen3asr-supervisor.service" in readme, (
