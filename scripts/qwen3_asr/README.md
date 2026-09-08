@@ -1226,6 +1226,25 @@ measurements in this runbook were taken on the image built at the previous pin
 accuracy/throughput figures because the change moves no default, but the image
 and the pin do not correspond until a rebuild happens.
 
+**The branch heads have moved past the pins, and deliberately so.** Both pins
+name a commit that is an ancestor of its branch head, not the head itself.
+Everything committed since is either tests, documentation, or -- in one case --
+a failure path this deployment does not reach:
+
+| repository | committed since the pin | reaches the image? |
+|---|---|---|
+| `tt-metal` | `README.md`, `demo/*.py`, `reference/prep_wav.py`, seven `tests/*.py`, and a **comment** in `tt/generator_vllm.py` | no: nothing executable changed |
+| `vllm-tt-plugin` | four `tests/*.py`, comments plus a dropped `# pragma: no cover` in `executor.py`, and the compilation-mode guard in `platform.py` | the guard does, see below |
+
+The `platform.py` change narrows `except Exception` around the
+compilation-mode pin to `except ImportError` around the import alone, with the
+two assignments moved to an `else`. When `CompilationMode` and `CUDAGraphMode`
+both resolve -- which they do on the vLLM this image ships -- the old and new
+code run the same two assignments in the same order. They differ only when the
+import or an assignment fails, which is why the corpus figures have not moved
+across it. Bumping `vllm_commit` to the head is therefore optional, not a
+correctness fix; leave it until there is a reason to rebuild anyway.
+
 That rebuild is also blocked on the push: the pinned commits are not on the
 forks yet, so `git clone https://github.com/nyoshifujiTT/...` cannot reach
 them. Earlier images were built with both clone URLs pointed at a local

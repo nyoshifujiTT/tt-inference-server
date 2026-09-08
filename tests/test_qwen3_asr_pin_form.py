@@ -18,6 +18,8 @@ fork does not have. A full 40-char SHA survives the grep as itself.
 import os
 import re
 
+import pytest
+
 from workflows.utils import get_repo_root_path
 
 HERE = os.path.dirname(__file__)
@@ -392,4 +394,174 @@ def test_the_patch_targets_files_that_exist():
         assert (root / a).exists(), (
             f"the patch edits {a}, which is not in the repository; git apply "
             "would fail before the build starts"
+        )
+
+
+def _repo_beside(name):
+    """A sibling checkout of one of the pinned repositories, if present."""
+    path = os.path.join(os.path.dirname(__file__), "..", "..", name)
+    return path if os.path.isdir(os.path.join(path, ".git")) else None
+
+
+def _git(repo, *args):
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "-C", repo, *args], capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"git {' '.join(args)}: {result.stderr}"
+    return result.stdout
+
+
+def _pinned(kind):
+    """The commit OUR patch pins, by key name.
+
+    Scoped to the `git apply <<'PATCH'` block: the runbook also quotes the
+    pyannote/Qwen3.5 recipe from PR #4837, whose vllm_commit is a different
+    repository's commit entirely. Matching the first occurrence in the file
+    picked that one up.
+    """
+    import re
+
+    readme = _readme()
+    start = readme.index("git apply <<'PATCH'")
+    block = readme[start : readme.index("\nPATCH\n", start)]
+
+    match = re.search(rf'\+\s*{kind}: "([0-9a-f]+)"', block)
+    assert match, f"our patch block must pin {kind}"
+    return match.group(1)
+
+
+def test_each_pin_is_an_ancestor_of_the_branch_it_names():
+    """A pin the branch does not contain cannot be cloned from that branch.
+
+    The runbook says the clone checks out the pinned commit and the branch
+    only has to *contain* it. Nothing checked that it does -- a rebase or an
+    amended commit would leave the pin unreachable and the documented build
+    would fail at `git checkout`.
+    """
+    for repo_name, kind in (
+        ("tt-metal", "tt_metal_commit"),
+        ("vllm-tt-plugin", "vllm_commit"),
+    ):
+        repo = _repo_beside(repo_name)
+        if repo is None:
+            pytest.skip(f"{repo_name} is not checked out beside this repo")
+
+        import subprocess
+
+        pin = _pinned(kind)
+        result = subprocess.run(
+            ["git", "-C", repo, "merge-base", "--is-ancestor", pin, "HEAD"],
+            capture_output=True,
+        )
+        assert result.returncode == 0, (
+            f"{repo_name}: the pinned {pin} is not an ancestor of the branch "
+            f"head; the documented clone cannot reach it"
+        )
+
+
+# Paths that end up inside the image. Everything else in these repositories is
+# tests, docs or tooling that the Dockerfile never copies.
+IMAGE_PATHS = {
+    "tt-metal": ("models/demos/audio/qwen3_asr/tt/",),
+    "vllm-tt-plugin": ("src/",),
+}
+
+
+def _executable_diff(repo, pin, paths):
+    """Changed lines since ``pin`` under ``paths``, prose removed.
+
+    Compares the compiled code objects rather than filtering the diff by eye:
+    a module docstring edit shows up as ordinary changed lines, and this file
+    is about whether the image would *behave* differently. Falls back to a
+    line filter only for files that cannot be parsed.
+    """
+    import ast
+
+    changed = []
+    for path in paths:
+        names = _git(repo, "diff", "--name-only", f"{pin}..HEAD", "--", path)
+        for name in names.split():
+            if not name.endswith(".py"):
+                changed.append(name)
+                continue
+            before = _git(repo, "show", f"{pin}:{name}")
+            after = _git(repo, "show", f"HEAD:{name}")
+            if _stripped_ast(before) != _stripped_ast(after):
+                changed.append(name)
+    return changed
+
+
+def _stripped_ast(src):
+    """The module's AST with docstrings removed, as text.
+
+    Comments never reach the AST; docstrings do, so drop them explicitly.
+    Two modules with the same stripped AST run the same code.
+    """
+    import ast
+
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        if not isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            if isinstance(first.value.value, str):
+                body.pop(0)
+                if not body:
+                    body.append(ast.Pass())
+    return ast.dump(ast.fix_missing_locations(tree))
+
+
+def test_the_runbook_admits_the_heads_have_moved_past_the_pins():
+    """Silence here reads as "pin == head", which stopped being true.
+
+    Both branches carry commits the pinned images do not, and a reader
+    comparing `git log -1` against the pin needs to know that is expected.
+    """
+    readme = _readme()
+    assert "The branch heads have moved past the pins" in readme, (
+        "say that the heads are ahead of the pins, or the next rebuild reads "
+        "the difference as a mistake"
+    )
+
+
+def test_nothing_executable_reached_the_image_paths_since_the_pins():
+    """The claim the runbook now makes, checked against the trees.
+
+    tt-metal's post-pin change under tt/ is a comment; the plugin's is the
+    compilation-mode guard, which the runbook calls out by name. If anything
+    else executable lands there, the runbook's "leave the pin" advice stops
+    being true and this fails.
+    """
+    for repo_name, kind in (
+        ("tt-metal", "tt_metal_commit"),
+        ("vllm-tt-plugin", "vllm_commit"),
+    ):
+        repo = _repo_beside(repo_name)
+        if repo is None:
+            pytest.skip(f"{repo_name} is not checked out beside this repo")
+
+        changed = _executable_diff(repo, _pinned(kind), IMAGE_PATHS[repo_name])
+        if not changed:
+            continue
+
+        # The one exception the runbook documents, and only that one.
+        assert repo_name == "vllm-tt-plugin", (
+            f"{repo_name}: executable changes under {IMAGE_PATHS[repo_name]} "
+            f"since the pin: {changed[:6]}"
+        )
+        assert changed == ["src/vllm_tt_plugin/platform.py"], (
+            f"only the documented compilation-mode guard may differ from the "
+            f"pin; these do too: {changed}"
+        )
+
+        assert "compilation-mode guard" in _readme(), (
+            "the runbook must name the one executable change it tolerates"
         )
