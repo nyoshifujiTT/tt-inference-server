@@ -13,6 +13,7 @@ under reference_config/; this one belongs next to it.
 """
 
 import ast
+import json
 import os
 import re
 
@@ -643,3 +644,56 @@ def test_the_eval_reads_every_manifest_field_through_the_helpers():
         assert direct not in body, (
             f"{direct} bypasses the alias helpers; use manifest_wav/manifest_ref"
         )
+
+
+def test_the_manifest_reader_counts_the_clips_it_is_given(tmp_path):
+    """Every corpus number in the runbook is `len(load_manifest(...))`.
+
+    The key *resolution* is covered above, but the reader itself -- which
+    decides how many clips there are -- was never run. TED 509 / MagicHub 600
+    are the counts the accuracy claims are stated over, and a reader that
+    quietly dropped or doubled a line would move the denominator of every CER
+    without failing anything.
+    """
+    module = _eval_module()
+
+    manifest = tmp_path / "m.jsonl"
+    manifest.write_text(
+        '{"wav": "/a.wav", "ref": "A"}\n{"wav": "/b.wav", "ref": "B"}\n'
+    )
+
+    items = module.load_manifest(str(manifest))
+    assert items == [
+        {"wav": "/a.wav", "ref": "A"},
+        {"wav": "/b.wav", "ref": "B"},
+    ], items
+
+
+def test_blank_lines_do_not_become_clips(tmp_path):
+    """A trailing newline is normal in a generated manifest.
+
+    Counting it would add an item with no audio path, so the run would die in
+    manifest_wav with a KeyError on a manifest that is perfectly valid.
+    """
+    module = _eval_module()
+
+    manifest = tmp_path / "m.jsonl"
+    manifest.write_text('{"wav": "/a.wav"}\n\n   \n{"wav": "/b.wav"}\n')
+
+    assert len(module.load_manifest(str(manifest))) == 2
+
+
+def test_a_malformed_line_is_loud_rather_than_skipped(tmp_path):
+    """Same rule as a line with no audio path: the corpus must not shrink.
+
+    509 clips means 509 lines were read. If a truncated write or a stray log
+    line were skipped, the eval would report a CER over fewer clips than the
+    number printed beside it.
+    """
+    module = _eval_module()
+
+    manifest = tmp_path / "bad.jsonl"
+    manifest.write_text('{"wav": "/a.wav"}\nnot json at all\n')
+
+    with pytest.raises(json.JSONDecodeError):
+        module.load_manifest(str(manifest))
