@@ -1151,6 +1151,21 @@ the measurement was invalid. `gen_tokens` is the tell: the probe sends a fixed
 clip with a fixed `max_completion_tokens`, so anything other than
 `requests x tokens-per-request` means the counters caught someone else's work.
 
+A milder version shows up even when the stages run in sequence: a pass that
+followed the 600-clip MagicHub eval reported `rtfx` 11.576, below the 11.6 the
+band starts at, with `p99_latency_s` 8.964 against a usual ~6.5 while
+`p50_latency_s` stayed at 2.227. Nothing had failed -- 128/128, every
+`finished_reason` counter at zero, both corpus CERs to four places -- and the
+15-minute load average was 5.65 against a usual ~3.5, because the previous
+stage's teardown and this one's clip download from
+`datasets-server.huggingface.co` overlapped. Run alone immediately after, the
+same benchmark gave `rtfx` 12.236 and `p99` 6.486.
+
+So read the band as steady-state, and read `p50` before concluding anything
+from `rtfx`: a low `rtfx` with a normal `p50` and a stretched `p99` is queueing
+in the window, not a slower model. Rerun it alone before treating it as a
+regression.
+
 Measured on the delivery p150. **Not with the image the pins above name** --
 that one has not been built yet (see "No image exists at these pins yet"
 below). These come from the image at the previous pin,

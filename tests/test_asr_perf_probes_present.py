@@ -584,3 +584,51 @@ def test_both_probes_report_tokens_per_request():
 
     assert "mean_gen_tok_per_req" in probe, probe
     assert "mean_tok_per_req" in stream, stream
+
+
+def test_the_runbook_says_how_to_read_an_rtfx_below_the_band():
+    """A number under the band must not be read as a regression on its own.
+
+    A pass following the 600-clip corpus eval reported rtfx 11.576, under the
+    11.6 the band starts at, with p99 8.964 against a usual ~6.5 and p50
+    unchanged at 2.227 -- queueing in the window, not a slower model. Rerun
+    alone it gave 12.236 and p99 6.486.
+
+    The runbook already warns about *concurrent* load; this is the milder
+    sequential case, and without it the next reader either widens the band or
+    chases a regression that is not there.
+    """
+    readme = _read(README)
+
+    assert "11.576" in readme, (
+        "record the observation, so the band is not quietly widened to fit it"
+    )
+    assert "12.236" in readme, "and the value it returned to when run alone"
+    assert "p50" in readme and "p99" in readme, (
+        "the diagnosis is p50 normal + p99 stretched; name both"
+    )
+    assert "Rerun it alone" in readme or "rerun it alone" in readme, (
+        "say what to do before calling it a regression"
+    )
+
+
+def test_the_band_still_starts_where_the_runbook_says():
+    """Pin the band, so the advice above cannot outlive it.
+
+    If the band is ever moved, the 11.576 explanation stops making sense --
+    it is only interesting because it fell below the stated floor.
+    """
+    import re
+
+    readme = _read(README)
+    match = re.search(r"a normal (\d+\.\d+)-(\d+\.\d+)", readme)
+    assert match, "the runbook must state the steady-state rtfx band"
+
+    low, high = float(match.group(1)), float(match.group(2))
+    assert (low, high) == (11.6, 13.0), (
+        f"the band moved to {low}-{high}; revisit the 11.576 note, which is "
+        f"only meaningful as a value below the floor"
+    )
+    assert low < 11.576 < high or 11.576 < low, (
+        "the recorded outlier must still be below the band it is contrasted with"
+    )
