@@ -4293,3 +4293,202 @@ def test_the_canary_requires_exactly_200_not_merely_a_code():
 
     result = _run_canary_ok('{"text":"ok"}', 200)
     assert "rc=0" in result.stdout, result.stdout
+
+
+def _run_monitor_loop(stubs, max_steps=40):
+    """Run the supervisor's top-level loop with everything stubbed.
+
+    The loop is not a function, so the per-function audits never reached it --
+    yet it is what decides when to launch, when to call a wedge and when to
+    reset. Extract the body from `log "=== supervisor start` onwards and run
+    it verbatim; the stubs count their own calls and exit once ``max_steps``
+    actions have happened, since the loop is otherwise infinite.
+    """
+    import subprocess
+
+    source = _supervisor()
+    body = source[source.index('log "=== supervisor start') :]
+
+    script = (
+        "set -u\n"
+        f"MAX_STEPS={max_steps}\nSTEPS=0\n"
+        'step() { STEPS=$((STEPS+1)); echo "$1"; '
+        '[ "$STEPS" -ge "$MAX_STEPS" ] && exit 0; return 0; }\n'
+        + stubs
+        + "\n"
+        + body
+    )
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=60
+    )
+
+
+def test_the_monitor_waits_instead_of_launching_while_a_container_holds_the_chip():
+    """The pre-launch gate: launching beside a --docker-server run cannot work.
+
+    Two processes cannot open the chip, so a local launch while the container
+    serves either fails or fights it. The existing test only greps the log
+    line out of the source.
+    """
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { echo 111; }
+        in_container() { return 0; }
+        sleep() { step "SLEPT"; }
+        launch_server() { step "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        canary_ok() { return 0; }
+        recover_device() { step "RECOVERED"; }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=3)
+
+    assert "LAUNCHED" not in result.stdout, (
+        f"launched while a container held the chip: {result.stdout}"
+    )
+    assert "not launching" in result.stdout, result.stdout
+    assert result.stdout.count("SLEPT") >= 1, result.stdout
+
+
+def test_the_monitor_launches_once_the_chip_is_free():
+    """The other direction -- a gate that never opens never serves."""
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { echo 111; }
+        in_container() { return 1; }
+        sleep() { step "SLEPT"; }
+        launch_server() { step "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        canary_ok() { return 0; }
+        recover_device() { step "RECOVERED"; }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=4)
+
+    assert "LAUNCHED" in result.stdout, (
+        f"a free chip must be launched on: {result.stdout}"
+    )
+
+
+def test_a_single_canary_failure_does_not_reset_the_device():
+    """One failure is a hiccup; the threshold is two consecutive ones.
+
+    A reset costs the compile cache and six and a half minutes, so tripping
+    on a single timeout would make the service worse than no supervisor. The
+    existing test extracts the literal 2 from the source, which says nothing
+    about the counter actually being consulted.
+    """
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { :; }
+        in_container() { return 1; }
+        sleep() { :; }
+        launch_server() { echo "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        recover_device() { step "RECOVERED"; }
+        CANARY_N=0
+        canary_ok() {
+            CANARY_N=$((CANARY_N+1))
+            # fail once, then succeed forever
+            [ "$CANARY_N" = 1 ] && return 1
+            step "CANARY_OK"
+            return 0
+        }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=5)
+
+    assert "RECOVERED" not in result.stdout, (
+        f"a single canary failure triggered a reset: {result.stdout}"
+    )
+    assert "canary failed (1)" in result.stdout, result.stdout
+
+
+def test_two_consecutive_canary_failures_reset_and_relaunch():
+    """The wedge path: recover, then come back round and launch again.
+
+    `continue` rather than `break` is what makes the outer loop relaunch; a
+    break here would leave systemd to restart the whole supervisor, losing
+    the pre-launch gate.
+    """
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { :; }
+        in_container() { return 1; }
+        sleep() { :; }
+        launch_server() { step "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        canary_ok() { return 1; }
+        recover_device() { step "RECOVERED"; }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=6)
+
+    assert "RECOVERED" in result.stdout, result.stdout
+    assert "server wedged" in result.stdout, result.stdout
+    # ...and the outer loop comes back to launch again
+    assert result.stdout.count("LAUNCHED") >= 2, (
+        f"the loop must relaunch after recovering: {result.stdout}"
+    )
+
+
+def test_a_recovered_canary_clears_the_failure_count():
+    """Failures must be consecutive, not cumulative.
+
+    Without the `fails=0` on success the count only ever rises, so any two
+    failures in the lifetime of a launch -- however far apart -- reset the
+    device.
+    """
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { :; }
+        in_container() { return 1; }
+        sleep() { :; }
+        launch_server() { echo "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        recover_device() { step "RECOVERED"; }
+        CANARY_N=0
+        canary_ok() {
+            CANARY_N=$((CANARY_N+1))
+            # fail, succeed, fail, then succeed forever: never two in a row
+            case "$CANARY_N" in
+                1|3) return 1 ;;
+            esac
+            step "CANARY_OK"
+            return 0
+        }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=6)
+
+    assert "RECOVERED" not in result.stdout, (
+        f"non-consecutive failures reset the device: {result.stdout}"
+    )
+
+
+def test_an_unhealthy_launch_recovers_and_retries():
+    """wait_healthy failing must recover and loop, not fall through to the canary."""
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { :; }
+        in_container() { return 1; }
+        sleep() { :; }
+        launch_server() { step "LAUNCHED"; }
+        wait_healthy() { return 1; }
+        warm_first_transcription() { step "WARMED"; return 0; }
+        canary_ok() { step "CANARY"; return 0; }
+        recover_device() { step "RECOVERED"; }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=6)
+
+    assert "RECOVERED" in result.stdout, result.stdout
+    assert "WARMED" not in result.stdout, (
+        f"an unhealthy server must not reach the warm-up: {result.stdout}"
+    )
+    assert "CANARY" not in result.stdout, result.stdout
