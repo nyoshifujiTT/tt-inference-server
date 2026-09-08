@@ -1768,6 +1768,71 @@ def _supervisor():
     ).read_text()
 
 
+def _launch_flags():
+    """The long flags actually passed on the supervisor's run.py line."""
+    sh = _supervisor()
+    launch = sh[sh.index("launch_server()") : sh.index("wait_healthy()")]
+    code = "\n".join(
+        line for line in launch.splitlines() if not line.lstrip().startswith("#")
+    )
+    return set(re.findall(r"(--[a-z0-9][a-z0-9-]+)", code))
+
+
+def test_every_flag_the_supervisor_passes_exists_in_run_pys_parser():
+    """The text checks here pin known-bad flags; this one asks the parser.
+
+    `--device` being renamed `--tt-device` is the failure that motivated these
+    tests, and it was only caught because someone happened to run the
+    supervisor. A containment check can only ever ban the flags we already know
+    about -- the next rename is invisible to it, and shows up as the production
+    restart path exiting with "unrecognized arguments" at the moment the
+    service needed to come back.
+
+    run.py's parser is built in parse_arguments(), so the option strings are
+    collected by recording add_argument calls while it runs.
+
+    This complements, and does not replace,
+    test_the_supervisor_launches_the_model_the_way_run_py_still_accepts: going
+    back to `--device` is *not* caught here, because run.py still declares it
+    as a hidden deprecated alias (help=argparse.SUPPRESS), so the parser
+    genuinely accepts it. Banning it stays a text check; this test is for the
+    flags nobody thought to ban.
+    """
+    import argparse
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "run_py_under_test", str(get_repo_root_path() / "run.py")
+    )
+    run_py = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run_py)
+
+    known = set()
+    original = argparse.ArgumentParser.add_argument
+
+    def recording(self, *args, **kwargs):
+        known.update(a for a in args if isinstance(a, str) and a.startswith("-"))
+        return original(self, *args, **kwargs)
+
+    argparse.ArgumentParser.add_argument = recording
+    try:
+        run_py.parse_arguments()
+    except SystemExit:
+        # parse_arguments() parses sys.argv; the parser is fully built by then,
+        # which is all this test needs.
+        pass
+    finally:
+        argparse.ArgumentParser.add_argument = original
+
+    assert "--tt-device" in known, (
+        "the recording did not capture run.py's options; the check would pass "
+        "vacuously"
+    )
+    passed = _launch_flags()
+    assert passed, "no flags were found on the launch line"
+    assert not (passed - known), (
+        f"run.py has no such option(s): {sorted(passed - known)}"
+    )
 def test_the_supervisor_launches_the_model_the_way_run_py_still_accepts():
     """The supervisor is the production restart path; a stale flag breaks it.
 
