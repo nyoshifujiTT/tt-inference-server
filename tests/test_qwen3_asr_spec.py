@@ -4032,3 +4032,118 @@ def test_stop_server_skips_the_escalation_when_nothing_is_stubborn(tmp_path):
     assert not killed.exists(), (
         f"kill was invoked with nothing stubborn: {killed.read_text()}"
     )
+
+
+
+def _reroot_proc(body, proc):
+    """Point device_holders at a fixture tree instead of the real /proc.
+
+    The function strips the literal "/proc/" prefix to get the pid, so both
+    the glob and that strip have to move together -- rewriting only the glob
+    leaves it echoing full paths.
+    """
+    return body.replace("/proc/[0-9]*/fd", f"{proc}/[0-9]*/fd").replace(
+        '${fd#/proc/}', f'${{fd#{proc}/}}'
+    )
+
+def test_device_holders_reports_pids_whose_fds_point_at_the_chip(tmp_path):
+    """The scan both guards depend on -- if it finds nothing they pass vacuously.
+
+    recover_device and stop_server decide from this list, so a scan that
+    silently returns empty makes the tt-smi -r guard and the SIGKILL guard
+    both hold for the wrong reason. Until now it was asserted only by
+    grepping for "/proc/[0-9]*/fd" and "readlink".
+
+    Build a /proc-shaped tree with symlinks and run the function against it.
+    """
+    import os
+    import re
+    import subprocess
+
+    proc = tmp_path / "proc"
+    for pid, target in (
+        ("111", "/dev/tenstorrent/0"),
+        ("222", "/dev/null"),
+        ("333", "/dev/tenstorrent/by-id/blackhole-abc"),
+    ):
+        fd = proc / pid / "fd"
+        fd.mkdir(parents=True)
+        os.symlink(target, fd / "3")
+    # a pid with no fd directory at all must not break the walk
+    (proc / "444").mkdir()
+
+    match = re.search(r"^device_holders\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    assert match, "device_holders must stay a shell function"
+    body = _reroot_proc(match.group(0), proc)
+
+    script = f'set -u\nsudo() {{ "$@"; }}\n{body}\ndevice_holders\n'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    assert result.stdout.split() == ["111", "333"], (
+        f"expected the two chip holders, got {result.stdout.split()!r}"
+    )
+
+
+def test_device_holders_deduplicates_and_sorts_numerically(tmp_path):
+    """`sort -un` is why a pid with several chip fds appears once.
+
+    stop_server interpolates this list into `kill -9`, so a duplicated pid
+    means signalling a dead pid -- and lexical sorting would make the log
+    order confusing when triaging a wedge.
+    """
+    import os
+    import re
+    import subprocess
+
+    proc = tmp_path / "proc"
+    for pid, count in (("9", 1), ("10", 3), ("100", 1)):
+        fd = proc / pid / "fd"
+        fd.mkdir(parents=True)
+        for n in range(count):
+            os.symlink("/dev/tenstorrent/0", fd / str(3 + n))
+
+    match = re.search(r"^device_holders\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    body = _reroot_proc(match.group(0), proc)
+
+    script = f'set -u\nsudo() {{ "$@"; }}\n{body}\ndevice_holders\n'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    assert result.stdout.split() == ["9", "10", "100"], (
+        f"expected numeric order with no duplicates, got {result.stdout.split()!r}"
+    )
+
+
+def test_device_holders_finds_nothing_when_the_chip_is_free(tmp_path):
+    """A free chip must produce no holders.
+
+    Both callers read this through `$(device_holders)` and test `[ -n ... ]`.
+    Command substitution strips trailing newlines, so a stray blank line
+    cannot be mistaken for a holder -- verified by mutation: appending an
+    `echo` to the pipeline does not change the outcome. What this pins is the
+    filter, not the whitespace: an fd pointing somewhere else must not make
+    the supervisor decline to recover a board that is actually free.
+    """
+    import os
+    import re
+    import subprocess
+
+    proc = tmp_path / "proc"
+    fd = proc / "555" / "fd"
+    fd.mkdir(parents=True)
+    os.symlink("/dev/null", fd / "3")
+
+    match = re.search(r"^device_holders\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    body = _reroot_proc(match.group(0), proc)
+
+    script = (
+        f'set -u\nsudo() {{ "$@"; }}\n{body}\n'
+        'held="$(device_holders)"\n'
+        '[ -n "$held" ] && echo "NONEMPTY:[$held]" || echo "EMPTY"\n'
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert "EMPTY" in result.stdout, (
+        f"a free chip must produce an empty holder list: {result.stdout!r}"
+    )
