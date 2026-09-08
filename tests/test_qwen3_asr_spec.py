@@ -3893,3 +3893,142 @@ def test_the_old_glob_really_did_break_the_directory(tmp_path):
         f"the unguarded glob no longer drops the execute bit ({oct(mode)}); "
         f"revisit why relax_device_perms tests for a character device"
     )
+
+
+def _run_supervisor_with_stubs(function, stubs, invocation):
+    """Source ``function`` verbatim from the script and run it under ``stubs``.
+
+    The functions are extracted rather than restated, so the shell under test
+    is the shell that ships. Anything the function calls out to is stubbed by
+    name, which makes its decisions observable without a chip.
+    """
+    import re
+    import subprocess
+
+    source = _supervisor()
+    match = re.search(rf"^{function}\(\) \{{.*?^\}}", source, re.M | re.S)
+    assert match, f"{function} must stay a shell function"
+
+    script = "set -u\n" + stubs + "\n" + match.group(0) + "\n" + invocation
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+def test_recover_device_does_not_reset_a_chip_a_container_holds(tmp_path):
+    """The most destructive action in the script, checked by running it.
+
+    recover_device calls `tt-smi -r`, which resets the chip the deployment is
+    serving on and reports success afterwards because the board itself reads
+    fine. The existing test asserts four strings appear in the right order;
+    that holds even if the guard's logic is inverted or `held` is built
+    wrongly. Run it with the chip "held" by a containerised pid and require
+    that tt-smi is never invoked.
+    """
+    smi_calls = tmp_path / "smi"
+
+    stubs = f'''
+        TTSMI=tt-smi
+        log() {{ echo "LOG: $*"; }}
+        device_holders() {{ echo 111; }}
+        in_container() {{ [ "$1" = 111 ]; }}
+        sudo() {{ echo "$*" >> "{smi_calls}"; }}
+        device_ok() {{ return 0; }}
+        relax_device_perms() {{ :; }}
+        sleep() {{ :; }}
+        ipmitool() {{ :; }}
+    '''
+    result = _run_supervisor_with_stubs(
+        "recover_device", stubs, 'recover_device; echo "rc=$?"'
+    )
+
+    assert "rc=1" in result.stdout, (
+        f"a held chip must make recover_device decline: {result.stdout}"
+    )
+    assert "not recovering" in result.stdout, result.stdout
+    assert not smi_calls.exists(), (
+        f"tt-smi was invoked while a container held the chip: "
+        f"{smi_calls.read_text()}"
+    )
+
+
+def test_recover_device_does_reset_when_nothing_containerised_holds_it(tmp_path):
+    """The other half: a guard that never lets through is also broken.
+
+    If this direction stopped working the supervisor could never recover the
+    board, which is the reason it exists.
+    """
+    smi_calls = tmp_path / "smi"
+
+    stubs = f'''
+        TTSMI=tt-smi
+        log() {{ echo "LOG: $*"; }}
+        device_holders() {{ echo 222; }}
+        in_container() {{ return 1; }}
+        sudo() {{ echo "$*" >> "{smi_calls}"; }}
+        device_ok() {{ return 0; }}
+        relax_device_perms() {{ :; }}
+        sleep() {{ :; }}
+    '''
+    result = _run_supervisor_with_stubs(
+        "recover_device", stubs, 'recover_device; echo "rc=$?"'
+    )
+
+    assert "rc=0" in result.stdout, result.stdout
+    assert smi_calls.exists(), "a free chip must be reset"
+    assert "-r" in smi_calls.read_text(), smi_calls.read_text()
+
+
+def test_stop_server_never_sigkills_a_containerised_holder(tmp_path):
+    """The SIGKILL escalation must skip the deployment's own processes.
+
+    stop_server escalates to kill -9 for whatever still holds the chip. A
+    containerised holder belongs to the running deployment, so killing it is
+    the same failure kill_ours was fixed for -- and here it is SIGKILL, which
+    the process cannot decline.
+    """
+    killed = tmp_path / "killed"
+
+    stubs = f'''
+        log() {{ echo "LOG: $*"; }}
+        kill_ours() {{ :; }}
+        sleep() {{ :; }}
+        device_holders() {{ echo 111; echo 222; }}
+        in_container() {{ [ "$1" = 111 ]; }}
+        kill() {{ echo "$*" >> "{killed}"; }}
+    '''
+    result = _run_supervisor_with_stubs("stop_server", stubs, "stop_server")
+
+    assert result.returncode == 0, result.stderr
+    assert "containerised pid 111 -- leaving it alone" in result.stdout, result.stdout
+
+    escalated = killed.read_text().split() if killed.exists() else []
+    assert "111" not in escalated, (
+        f"the containerised holder was SIGKILLed: {escalated}"
+    )
+    assert escalated == ["-9", "222"], (
+        f"only the host holder may be escalated to, got {escalated}"
+    )
+
+
+def test_stop_server_skips_the_escalation_when_nothing_is_stubborn(tmp_path):
+    """`kill -9` with an empty list would kill nothing -- or the shell's own job.
+
+    The `[ -n "$stubborn" ]` test is what keeps `kill -9` from running with no
+    arguments; the word-splitting is deliberate (shellcheck is disabled on
+    that line), so an empty value must not reach it.
+    """
+    killed = tmp_path / "killed"
+
+    stubs = f'''
+        log() {{ echo "LOG: $*"; }}
+        kill_ours() {{ :; }}
+        sleep() {{ :; }}
+        device_holders() {{ echo 111; }}
+        in_container() {{ return 0; }}
+        kill() {{ echo "$*" >> "{killed}"; }}
+    '''
+    result = _run_supervisor_with_stubs("stop_server", stubs, "stop_server")
+
+    assert result.returncode == 0, result.stderr
+    assert not killed.exists(), (
+        f"kill was invoked with nothing stubborn: {killed.read_text()}"
+    )
