@@ -1778,25 +1778,11 @@ def _launch_flags():
     return set(re.findall(r"(--[a-z0-9][a-z0-9-]+)", code))
 
 
-def test_every_flag_the_supervisor_passes_exists_in_run_pys_parser():
-    """The text checks here pin known-bad flags; this one asks the parser.
+def _run_py_option_strings():
+    """Every option string run.py's parser actually declares.
 
-    `--device` being renamed `--tt-device` is the failure that motivated these
-    tests, and it was only caught because someone happened to run the
-    supervisor. A containment check can only ever ban the flags we already know
-    about -- the next rename is invisible to it, and shows up as the production
-    restart path exiting with "unrecognized arguments" at the moment the
-    service needed to come back.
-
-    run.py's parser is built in parse_arguments(), so the option strings are
-    collected by recording add_argument calls while it runs.
-
-    This complements, and does not replace,
-    test_the_supervisor_launches_the_model_the_way_run_py_still_accepts: going
-    back to `--device` is *not* caught here, because run.py still declares it
-    as a hidden deprecated alias (help=argparse.SUPPRESS), so the parser
-    genuinely accepts it. Banning it stays a text check; this test is for the
-    flags nobody thought to ban.
+    parse_arguments() builds the parser, so the strings are collected by
+    recording add_argument while it runs rather than by reading the source.
     """
     import argparse
     import importlib.util
@@ -1819,15 +1805,77 @@ def test_every_flag_the_supervisor_passes_exists_in_run_pys_parser():
         run_py.parse_arguments()
     except SystemExit:
         # parse_arguments() parses sys.argv; the parser is fully built by then,
-        # which is all this test needs.
+        # which is all the callers need.
         pass
     finally:
         argparse.ArgumentParser.add_argument = original
 
     assert "--tt-device" in known, (
-        "the recording did not capture run.py's options; the check would pass "
+        "the recording did not capture run.py's options; every check built on "
+        "this would pass vacuously"
+    )
+    return known
+
+
+def _readme_run_py_flags():
+    """The long flags the runbook's own run.py commands tell a reader to pass."""
+    flags = set()
+    for block in re.findall(r"```(?:bash|sh)?\n(.*?)```", _readme(), re.S):
+        if "run.py" not in block:
+            continue
+        # a shell continuation makes one command out of several lines
+        for line in block.replace("\\\n", " ").splitlines():
+            if "run.py" in line:
+                flags |= set(re.findall(r"(--[a-z0-9][a-z0-9-]+)", line))
+    return flags
+
+
+def test_every_flag_the_runbook_tells_you_to_pass_exists_in_run_pys_parser():
+    """The supervisor's launch line is checked against the parser; this is the
+    other place run.py gets invoked, and it is the one a human types.
+
+    A reader copies the Run block verbatim. A flag that no longer exists makes
+    it exit with "unrecognized arguments" before anything starts, and the
+    runbook is the only instruction they have -- there is no fallback the way
+    the supervisor has a service that keeps retrying.
+
+    Same known-alias caveat as the supervisor check: this catches flags that do
+    not exist, not flags that exist but are deprecated.
+    """
+    known = _run_py_option_strings()
+    used = _readme_run_py_flags()
+
+    assert used, "the runbook does show run.py commands; keep this meaningful"
+    assert "--workflow" in used, (
+        "the flags were not collected from the Run block; the check would pass "
         "vacuously"
     )
+    assert not (used - known), (
+        f"the runbook passes option(s) run.py does not have: {sorted(used - known)}"
+    )
+
+
+def test_every_flag_the_supervisor_passes_exists_in_run_pys_parser():
+    """The text checks here pin known-bad flags; this one asks the parser.
+
+    `--device` being renamed `--tt-device` is the failure that motivated these
+    tests, and it was only caught because someone happened to run the
+    supervisor. A containment check can only ever ban the flags we already know
+    about -- the next rename is invisible to it, and shows up as the production
+    restart path exiting with "unrecognized arguments" at the moment the
+    service needed to come back.
+
+    run.py's parser is built in parse_arguments(), so the option strings are
+    collected by recording add_argument calls while it runs.
+
+    This complements, and does not replace,
+    test_the_supervisor_launches_the_model_the_way_run_py_still_accepts: going
+    back to `--device` is *not* caught here, because run.py still declares it
+    as a hidden deprecated alias (help=argparse.SUPPRESS), so the parser
+    genuinely accepts it. Banning it stays a text check; this test is for the
+    flags nobody thought to ban.
+    """
+    known = _run_py_option_strings()
     passed = _launch_flags()
     assert passed, "no flags were found on the launch line"
     assert not (passed - known), (
