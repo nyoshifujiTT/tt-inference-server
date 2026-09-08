@@ -4147,3 +4147,149 @@ def test_device_holders_finds_nothing_when_the_chip_is_free(tmp_path):
     assert "EMPTY" in result.stdout, (
         f"a free chip must produce an empty holder list: {result.stdout!r}"
     )
+
+
+def _run_canary_ok(response_body, status_code, timeout_arg=""):
+    """Run canary_ok verbatim against a stubbed curl.
+
+    curl returns the body and the status code concatenated, and canary_ok
+    parses the code back out itself -- that parsing is what this exercises.
+    The function is extracted rather than restated so the shell under test is
+    the shell that ships.
+    """
+    import re
+    import subprocess
+
+    source = _supervisor()
+    match = re.search(r"^canary_ok\(\) \{.*?^\}", source, re.M | re.S)
+    assert match, "canary_ok must stay a shell function"
+
+    # curl's -w '\n%{http_code}' appends a newline then the code. Feed the
+    # payload through a heredoc so the newline survives verbatim -- passing it
+    # as a shell word mangles it, which is a property of the harness, not of
+    # canary_ok.
+    payload = f"{response_body}\n{status_code}"
+    stubs = (
+        "PORT=8110\nCANARY_WAV=/dev/null\nMODEL_NAME=Qwen3-ASR-1.7B-JA\n"
+        "curl() { cat \"$CANARY_FIXTURE\"; }\n"
+    )
+    script = (
+        "set -u\n" + stubs + match.group(0) + "\n"
+        f'canary_ok {timeout_arg}; echo "rc=$?"\n'
+    )
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fixture:
+        fixture.write(payload)
+        fixture_path = fixture.name
+
+    env = dict(os.environ, CANARY_FIXTURE=fixture_path)
+    try:
+        return subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, env=env
+        )
+    finally:
+        os.unlink(fixture_path)
+
+
+def test_the_canary_accepts_a_200_with_a_transcript():
+    """The liveness check the monitor loop decides "wedged" from.
+
+    Its only existing test is that the timeout is an argument with a default.
+    The status-code parsing -- pulling the code back out of curl's combined
+    body+code output -- had nothing.
+    """
+    result = _run_canary_ok('{"text":"こんにちは"}', 200)
+    assert "rc=0" in result.stdout, result.stdout
+
+
+def test_the_canary_rejects_a_non_200():
+    """A 500 must read as wedged, or a real wedge is never recovered."""
+    for code in (400, 500, 503):
+        result = _run_canary_ok('{"error":"boom"}', code)
+        assert "rc=1" in result.stdout, f"{code}: {result.stdout}"
+
+
+def test_the_canary_rejects_a_200_with_no_transcript():
+    """200 is not enough: an empty or error body means the model produced nothing."""
+    for body in ('{"error":"no audio"}', "{}", ""):
+        result = _run_canary_ok(body, 200)
+        assert "rc=1" in result.stdout, f"{body!r}: {result.stdout}"
+
+
+def test_the_canary_reads_the_code_after_a_multi_line_transcript():
+    """A transcript containing newlines must not be mistaken for the code.
+
+    curl concatenates body and code, so the code is whatever follows the LAST
+    newline -- `${out##*...}`, longest match. With the shortest match (`#`)
+    a multi-line body makes the first body line the "code", the comparison
+    against 200 fails, and the monitor declares a wedge on a healthy server:
+    it would reset the device on every check.
+    """
+    result = _run_canary_ok('{"text":"一行目\n二行目"}', 200)
+    assert "rc=0" in result.stdout, (
+        f"a multi-line transcript was misparsed: {result.stdout}"
+    )
+
+
+def test_the_canary_uses_the_longest_match_to_split_off_the_code():
+    """Pin the operator, since the multi-line case is what depends on it."""
+    import re
+
+    match = re.search(r"^canary_ok\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    body = match.group(0)
+
+    assert '${out##*' in body, (
+        "the code must be split off with ## (longest match); # would take the "
+        "first body line on a multi-line transcript"
+    )
+
+
+def test_the_canary_asks_curl_for_the_status_code():
+    """Without -w the body has no code appended and the parse yields the body."""
+    import re
+
+    body = re.search(r"^canary_ok\(\) \{.*?^\}", _supervisor(), re.M | re.S).group(0)
+
+    assert "%{http_code}" in body, "curl must be asked for the status code"
+    assert "\\n%{http_code}" in body or "'\\n%{http_code}'" in body, (
+        "the code must be preceded by a newline, or it concatenates with the body"
+    )
+
+
+def test_the_canary_rejects_an_error_that_mentions_text():
+    """The status code must be checked in its own right, not inferred.
+
+    The bodies in the tests above happen to lack the string "text", so they
+    pass even if the 200 comparison is deleted -- verified by mutation. A real
+    server can return a non-200 whose message contains it, and vLLM's
+    transcription errors are free-form strings:
+
+        {"error":{"message":"Invalid or unsupported audio file.", ...}}
+
+    Give it a body that satisfies the transcript check and a code that does
+    not, so only the code comparison can reject it.
+    """
+    for code in (400, 500, 503):
+        result = _run_canary_ok('{"error":{"message":"no \\"text\\" produced"}}', code)
+        assert "rc=1" in result.stdout, (
+            f"HTTP {code} with 'text' in the body was read as alive: "
+            f"{result.stdout}"
+        )
+
+
+def test_the_canary_requires_exactly_200_not_merely_a_code():
+    """`[ -n "$code" ]` would accept every response curl can produce.
+
+    A wedged server still answers with *some* status, so a presence test
+    makes the canary permanently green and the supervisor blind.
+    """
+    result = _run_canary_ok('{"text":"ok"}', 204)
+    assert "rc=1" in result.stdout, (
+        f"a 204 was accepted; the check must be equality with 200: "
+        f"{result.stdout}"
+    )
+
+    result = _run_canary_ok('{"text":"ok"}', 200)
+    assert "rc=0" in result.stdout, result.stdout
