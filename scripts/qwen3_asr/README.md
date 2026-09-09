@@ -619,7 +619,8 @@ is normal after `docker volume rm` or on a new host. The supervisor's budget is
 sized for the slow end (20 min) rather than for whichever figure you happen to
 measure.
 
-A second, separate cost sits inside that window on the image pinned above:
+A second cost sits inside that window, and the line that reports it is easy to
+misread. On an image built before `vllm-tt-plugin` `acae5aa`:
 
 ```
 init engine (profile, create kv cache, warmup model) took 214.11 s (compilation: 208.97 s)
@@ -627,15 +628,38 @@ compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, ...}
 ```
 
 The plugin sets `enforce_eager=True`, but `VllmConfig.__post_init__` derives
-the compilation mode *before* the platform hook runs, so on this pin the mode
-stays `VLLM_COMPILE` and ~209 s goes into a compiled graph the ttnn hot path
-never uses. `vllm-tt-plugin` `acae5aa` restores the pin that forces
-`CompilationMode.NONE`; a rebuild past it should drop most of that 209 s.
+the compilation mode *before* the platform hook runs, so on that pin the mode
+stayed `VLLM_COMPILE`. `acae5aa` restores the pin that forces
+`CompilationMode.NONE`, and a rebuild past it does fix the mode:
 
-This does **not** invalidate the throughput and accuracy numbers below.
-Upstream's own later check (`Enforce eager set, disabling torch.compile and
-CUDAGraphs`) still lands, and `cudagraph_mode` is already `NONE`, so execution
-was eager either way -- the loss is startup time, not steady-state speed.
+```
+init engine (profile, create kv cache, warmup model) took 218.27 s (compilation: 212.03 s)
+compilation_config={'mode': <CompilationMode.NONE: 0>, ...}
+```
+
+**The seconds do not go away, and expecting them to was wrong.** Measured on
+the rebuild: the mode is `NONE`, and the figure is 212.03 s -- slightly *more*
+than the 208.97 s it was supposed to remove. The two are separate facts about
+the same log line.
+
+What actually fills that window is the TT adapter's own decode-trace capture,
+not a torch.compile graph. It is the line immediately before:
+
+```
+models.tt_transformers.tt.generator:_prepare_decode_trace_text:1817 - Done Compiling Model
+```
+
+vLLM's `core.py` labels everything between engine start and that point
+"compilation", so the number survives `CompilationMode.NONE` because it was
+never torch.compile's to begin with. Removing it would mean giving up the
+decode trace, i.e. fast-dispatch/replay -- a steady-state slowdown traded for
+~3 minutes of startup, which is the wrong trade for a served model.
+
+This does **not** invalidate the throughput and accuracy numbers below, on
+either image. Upstream's own later check (`Enforce eager set, disabling
+torch.compile and CUDAGraphs`) still lands, and `cudagraph_mode` is already
+`NONE`, so execution was eager either way. The corpus figures were re-measured
+on the rebuilt image and are identical (TED CER 0.1002, MagicHub CER 0.1668).
 
 Requests use the HF repo id, not the spec's model name:
 

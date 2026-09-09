@@ -810,37 +810,63 @@ def test_the_scan_covers_the_implementation_side_too():
 
 
 def test_the_readme_records_the_compilation_cost_on_the_pinned_image():
-    """209 s of the startup window goes into an unused compiled graph.
+    """The `compilation:` seconds survive the fix, and the note must say so.
 
-    Read off the serving container's own log at the pinned plugin commit:
+    This note used to predict that rebuilding past `acae5aa` "should drop most
+    of that 209 s". The rebuild was measured and it does not:
 
-      init engine ... took 214.11 s (compilation: 208.97 s)
-      compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, ...}
+      before: took 214.11 s (compilation: 208.97 s)  mode=VLLM_COMPILE
+      after:  took 218.27 s (compilation: 212.03 s)  mode=NONE
 
-    enforce_eager is set, but VllmConfig.__post_init__ derives the compilation
-    mode before the platform hook runs, so the mode survives as VLLM_COMPILE.
-    The plugin fix (acae5aa) pins it to NONE.
+    Two separate facts about one log line. `acae5aa` really does fix the mode
+    (VLLM_COMPILE -> NONE, because VllmConfig.__post_init__ derives it before
+    the platform hook runs), but the seconds are not torch.compile's: the line
+    logged immediately before is the TT adapter's own decode-trace capture
+    (`_prepare_decode_trace_text`), and vLLM's core.py labels that whole window
+    "compilation". Dropping it would mean giving up fast-dispatch/replay.
 
-    Worth documenting precisely because the obvious reading is wrong twice: it
-    is not part of the kernel-cache story above (a warm cache does not avoid
-    it), and it does not call the throughput numbers into question (upstream's
-    later check still disables torch.compile, and cudagraph_mode is already
-    NONE, so execution was eager regardless).
+    The prediction sat here unverified for dozens of iterations, so the test
+    now requires the *measured* after-value and the real cause to be present.
+    A note that only quotes the before-value would read as still-pending work.
     """
     readme = _readme()
-    body = readme[readme.index("A second, separate cost sits inside that window") :]
+    body = readme[readme.index("A second cost sits inside that window") :]
     body = body[: body.index("Requests use the HF repo id")]
     flat = " ".join(body.split())
 
-    assert "208.97 s" in flat, "quote the measured compilation time"
-    assert "CompilationMode.VLLM_COMPILE" in flat, (
-        "show the mode that survived, or the cause is not identifiable"
+    # both measurements, or the reader cannot tell what the fix changed
+    assert "208.97 s" in flat, "quote the before value"
+    assert "212.03 s" in flat, (
+        "quote the measured after value; without it the retired prediction "
+        "that the cost disappears reads as still true"
+    )
+    # Both modes must appear *in the quoted logs*, not merely in the prose
+    # around them. "CompilationMode.NONE" occurs three times in this section,
+    # so a containment check on the whole body stayed green when the after-log
+    # was mutated -- verified by changing only the fenced block.
+    blocks = re.findall(r"```\n(.*?)```", body, re.S)
+    assert len(blocks) >= 2, f"both engine-init logs must be quoted: {len(blocks)}"
+    before, after = blocks[0], blocks[1]
+    assert "CompilationMode.VLLM_COMPILE" in before and "208.97 s" in before, (
+        "the first block must be the pre-fix log"
+    )
+    assert "CompilationMode.NONE" in after and "212.03 s" in after, (
+        "the second block must be the rebuilt log: mode fixed, seconds not"
     )
     assert "__post_init__" in flat, "name why enforce_eager alone is not enough"
-    assert "acae5aa" in flat, "point at the fix, so the note can be retired"
-    # and the scope limit, so this is not read as invalidating the benchmarks
+    assert "acae5aa" in flat, "point at the fix"
+    # the actual cause of the seconds, which is what makes the number explicable
+    assert "_prepare_decode_trace_text" in flat, (
+        "name what really fills the window, or the next reader re-predicts that "
+        "a rebuild removes it"
+    )
+    # and that removing it is not desirable
+    assert "fast-dispatch/replay" in flat, (
+        "say why the cost is kept, not merely that it is there"
+    )
+    # the scope limit, so this is not read as invalidating the benchmarks
     assert "does **not** invalidate" in body
-    assert "startup time, not steady-state" in flat
+    assert "eager either way" in flat
 
 
 def _comment_only_filter():
