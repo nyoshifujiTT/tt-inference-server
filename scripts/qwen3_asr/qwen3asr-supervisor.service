@@ -1,0 +1,23 @@
+[Unit]
+Description=Qwen3-ASR TT p150 server supervisor (auto-recovers tt-metal decode ND-hang)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+# Give the device a moment after boot (post power-cycle) before launching.
+ExecStartPre=/bin/sleep 20
+# Path to the checked-out script, not a copy: keep it in step with the repo.
+# The supervisor reads TTIS / TT_METAL_HOME / VENV / SNAP / CANARY_WAV from the
+# environment (see the script header); override them here when the host does
+# not use the defaults under the service user's home.
+Environment=TTIS=/home/ubuntu/tt-inference-server
+ExecStart=/home/ubuntu/tt-inference-server/scripts/qwen3_asr/asr_supervisor.sh 8101
+Restart=always
+RestartSec=15
+# Long-running; no timeout.
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

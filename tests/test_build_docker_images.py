@@ -352,3 +352,57 @@ class TestLogResourceSummary:
 
         assert "Available memory after reserve" in caplog.text
         assert "below the minimum per-build requirement" in caplog.text
+
+
+class TestDevImageClonesAreNotOverridable:
+    """No build arg may redirect a clone.
+
+    The recipe for a bring-up whose commits are not upstream yet is the one
+    PR#4837 established: patch the clone URL line with ``git apply``, build,
+    then ``git checkout`` to restore it. Build args that quietly redirect a
+    clone were tried during bring-up and withdrawn -- they make an image that
+    looks like it came from the committed Dockerfile when it did not.
+    """
+
+    def _build_command(self, env):
+        from scripts import build_docker_images as mod
+
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+
+        with patch.dict("os.environ", env, clear=False), patch.object(
+            mod, "run_command_with_logging", side_effect=fake_run
+        ), patch.object(
+            mod, "generate_model_specs_json", return_value="/tmp/model_spec.json"
+        ):
+            mod.build_dev_image(
+                image_tags={"dev": "dev:tag", "tt_metal_base": "base:tag"},
+                tt_metal_commit="deadbee",
+                vllm_commit="cafe123",
+                container_app_uid=1000,
+                logger=MagicMock(),
+            )
+        return captured["command"]
+
+    def test_no_repo_url_build_arg_is_forwarded(self):
+        command = self._build_command(
+            {
+                "TT_METAL_REPO_URL": "https://example.invalid/tt-metal.git",
+                "TT_VLLM_REPO_URL": "https://example.invalid/vllm.git",
+            }
+        )
+        for name in ("TT_METAL_REPO_URL", "TT_VLLM_REPO_URL"):
+            assert not any(name in str(arg) for arg in command), (
+                f"{name} must not be forwarded: the Dockerfile declares no such "
+                "ARG, and redirecting a clone belongs in a git apply patch"
+            )
+
+    def test_the_pinned_commits_are_still_passed(self):
+        command = self._build_command({})
+        assert "TT_METAL_COMMIT_SHA_OR_TAG=deadbee" in command
+        assert "TT_VLLM_COMMIT_SHA_OR_TAG=cafe123" in command, (
+            "TT_VLLM_COMMIT_SHA_OR_TAG names the vllm-tt-plugin commit and must "
+            "still be passed"
+        )

@@ -1,0 +1,674 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""tt_metal_commit has to be a full SHA while the branch lives on a fork.
+
+build_docker_images.resolve_commit_to_full_sha expands the pin with
+
+    git ls-remote https://github.com/tenstorrent/tt-metal.git | grep <pin>
+
+and takes the first hit. That is a substring match against UPSTREAM, which does
+not carry this branch. A short pin therefore resolves to whatever upstream
+object happens to contain those characters: "e7929dc" matched
+7e7929dcd898... (refs/pull/9507/head) and the build failed cloning a commit the
+fork does not have. A full 40-char SHA survives the grep as itself.
+"""
+
+import os
+import re
+
+import pytest
+
+from workflows.utils import get_repo_root_path
+
+HERE = os.path.dirname(__file__)
+README = os.path.join(HERE, "..", "scripts", "qwen3_asr", "README.md")
+
+
+def _readme():
+    with open(README) as fh:
+        return fh.read()
+
+
+def _patch_block(readme):
+    start = readme.index("git apply <<'PATCH'")
+    return readme[start : readme.index("\nPATCH\n")]
+
+
+def _pinned_metal(readme):
+    """tt_metal_commit as set by the runbook's own patch block.
+
+    Scoped deliberately: the section above quotes the original PR #4837 recipe,
+    which carries its own "+  ..._commit:" lines. A whole-file search would
+    report whichever came first.
+    """
+    match = re.search(
+        r'^\+  tt_metal_commit: "([0-9a-f]+)"', _patch_block(readme), re.M
+    )
+    assert match, "the runbook patch must set tt_metal_commit"
+    return match.group(1)
+
+
+def test_tt_metal_commit_is_a_full_sha():
+    pin = _pinned_metal(_readme())
+    assert len(pin) == 40, (
+        f"tt_metal_commit is {len(pin)} chars; it must be the full 40-char SHA, "
+        "or ls-remote|grep against upstream can resolve it to another object"
+    )
+
+
+def test_build_metal_commit_matches_the_pin_exactly():
+    """list_image_combinations filters with ==, not a prefix match."""
+    readme = _readme()
+    pin = _pinned_metal(readme)
+    flag = re.search(r"--build-metal-commit (\S+)", readme)
+    assert flag, "the build command must be documented"
+    assert flag.group(1) == pin, (
+        "--build-metal-commit is an exact-equality filter over catalog entries; "
+        f"it says {flag.group(1)!r} but the pin is {pin!r}"
+    )
+
+
+def test_the_image_tags_carry_the_same_pin():
+    """get_image_tags interpolates the pin verbatim into both tags."""
+    readme = _readme()
+    pin = _pinned_metal(readme)
+
+    base = re.search(r"ci-build\.tags=local/tt-metal/tt-metalium/\S+?:(\S+?)\s", readme)
+    assert base, "the bake command must tag the base image"
+    assert base.group(1) == pin, (
+        f"base image tag is {base.group(1)!r}, the pin is {pin!r}; "
+        "the dev build looks the base image up by this exact tag"
+    )
+
+    dev = re.search(r"vllm-tt-metal-src-dev-\S+?:(\S+)", readme)
+    assert dev, "the run command must name the dev image"
+    assert pin in dev.group(1), (
+        f"dev image tag {dev.group(1)!r} does not carry the pin {pin!r}"
+    )
+
+
+def test_the_readme_explains_why_a_short_pin_breaks():
+    """Otherwise the next reader shortens it again for readability."""
+    readme = _readme()
+    assert "full 40-character SHA" in readme
+    assert "ls-remote" in readme
+    assert "refs/pull/9507/head" in readme, "keep the observed collision on record"
+
+
+def test_the_no_runtime_diff_check_matches_the_stated_rule():
+    """The command has to implement "not in the import graph", not "not a test".
+
+    The rule the section states is import reachability, but the tt-metal command
+    only filtered '/tests/'. Commits touching reference/dump_reference.py or
+    eval/corpus_eval.py -- golden tooling and the offline eval, neither of which
+    anything under tt/ imports -- therefore appeared as runtime diffs and would
+    have forced a ~7 h rebuild that cannot change the served image.
+    """
+    readme = _readme()
+    body = readme[readme.index("Why the pin may lag the branch head") :]
+
+    assert "absence from the import graph" in body, "the rule must still be stated"
+    for excluded in (
+        "dump_reference",
+        "extract_text_decoder",
+        "corpus_eval",
+    ):
+        assert excluded in body, (
+            f"{excluded}.py is not reachable from tt/, so the check must not "
+            "report it as a runtime diff"
+        )
+
+
+def test_the_readme_says_how_to_confirm_an_exclusion():
+    """A hardcoded exclusion list rots the moment tt/ starts importing one.
+
+    Give the reader the check rather than asking them to trust the list.
+    """
+    body = _readme()
+    body = body[body.index("Why the pin may lag the branch head") :]
+    assert "grep -rn" in body
+    assert "models/demos/audio/qwen3_asr/tt/" in body
+
+
+def test_every_shell_variable_the_runbook_cds_into_is_defined():
+    """`cd $VAR` with VAR unset lands in $HOME and the next command runs there.
+
+    The runbook cd'd into $TT_METAL_HOME, $TT_INFERENCE_SERVER and
+    $VLLM_TT_PLUGIN without ever saying what they are. Following it literally
+    runs `docker buildx bake` and `pytest tests/tt` from the wrong directory.
+    """
+    import re
+
+    readme = _readme()
+    used = set(re.findall(r"cd \$([A-Z_]+)", readme))
+    assert used, "the runbook does use cd $VAR; keep this check meaningful"
+
+    for var in sorted(used):
+        assert re.search(rf"^export {var}=", readme, re.M), (
+            f"${var} is used with cd but never exported in the runbook"
+        )
+
+
+def test_the_runbook_names_the_branch_for_each_checkout():
+    """Three trees, one branch name; a reader on the wrong one gets no error."""
+    readme = _readme()
+    head = readme[: readme.index("## Serving with")]
+    assert "nyoshifujiTT/qwen3-asr-17b_p150x1" in head
+    for repo in ("tt-metal", "tt-inference-server", "vllm-tt-plugin"):
+        assert repo in head, f"{repo} must be listed among the checkouts"
+
+
+def test_the_readme_does_not_claim_a_fork_clone_build_at_these_pins():
+    """The pinned commits are not on the forks, so that build cannot have run.
+
+    The results table said the numbers were "reproduced across three
+    independent builds (loopback, fork clone, ...)". That was true of earlier
+    pins. At the current ones the fork clone would fail -- the commits are not
+    pushed -- so the current image was built over a local git daemon, and
+    saying otherwise claims a reproduction nobody performed.
+    """
+    readme = _readme()
+    body = readme[readme.index("Measured on the delivery p150") :]
+    head = body[: body.index("## Install")]
+
+    assert "reproduced across three independent builds" not in head, (
+        "do not claim fork-clone reproduction at pins that are not pushed"
+    )
+    assert "git daemon" in head, "say how the current image was actually built"
+    # The wording moved when the pin was bumped for a code change: at these
+    # pins nothing has been built at all, which is a stronger statement than
+    # "one step is still owed". Accept either, so long as the runbook says
+    # plainly that something is outstanding here.
+    assert (
+        "not been executed as written at these pins" in head
+        or "No image exists at these pins yet" in head
+    ), (
+        "name the one runbook step still owed once the branches are pushed"
+    )
+
+
+def test_the_readme_covers_a_comment_only_change_to_a_served_module():
+    """The filename filter cannot decide this case, and it came up.
+
+    A tt-metal commit fixed a wrong issue number in a comment inside
+    tt/generator_vllm.py -- a module the server does import. The documented
+    check prints the filename, which reads as "bump the pin and rebuild ~7 h",
+    but the stated rule is whether the server executes something different, and
+    a comment does not. Give the check that settles it.
+    """
+    readme = _readme()
+    body = readme[readme.index("Why the pin may lag the branch head") :]
+    assert "changes only comments" in body
+    # The check has to strip comment-only diff lines, not just look at names.
+    # Requiring the whitespace class rather than a bare '^[+-]#': the anchored
+    # form only matched column 0, so indented comments -- i.e. every comment
+    # inside a function -- were reported as real code changes.
+    assert "grep -vE '^[+-][[:space:]]*(#|$)'" in body
+    assert "Anything printed is a real code change" in body
+
+
+def test_the_readme_covers_a_real_code_change_the_server_never_loads():
+    """"real code change" and "the pin must move" are not the same question.
+
+    Two demo scripts and reference/prep_wav.py took real code edits -- env
+    lookups, a shared constant, a new SystemExit. They survive the filename
+    filter and the comment-only check, so by the letter of the documented
+    procedure the pin had to move and the image be rebuilt. It did not: the
+    served path never imports any of them, so the image cannot behave
+    differently.
+
+    Without this the procedure forces a ~7 h rebuild for a change the image
+    cannot observe, and the only alternative on offer is to widen the filename
+    filter -- which would let a future served-path change hide behind a
+    familiar path prefix.
+    """
+    readme = _readme()
+    body = readme[readme.index("Why the pin may lag the branch head") :]
+    body = body[: body.index("### 2. Dev image")]
+
+    flat = " ".join(body.split())
+    assert "does the server load it?" in flat, "state the question being answered"
+    # the census, and the window caveat that makes it trustworthy
+    assert "-name '*.pyc' -path '*qwen3_asr*'" in flat, (
+        "give the command that answers it from the running container"
+    )
+    assert "-newermt" in flat and "stale bound" in flat, (
+        "a window that predates the current image makes the census lie"
+    )
+    assert "A file with no `.pyc` was never imported" in flat, (
+        "say what the absence of a .pyc proves"
+    )
+
+
+def test_the_readme_refuses_to_widen_the_filename_filter():
+    """Padding the filter is the tempting fix and the wrong one."""
+    readme = _readme()
+    body = readme[readme.index("Why the pin may lag the branch head") :]
+    body = body[: body.index("### 2. Dev image")]
+    flat = " ".join(body.split())
+    assert "deliberately **not** in the filter" in flat, (
+        "say the omission is a choice, or someone will 'fix' it"
+    )
+    assert "hide behind a familiar path prefix" in flat, "and why it is a choice"
+    # and the filter itself must still not list them
+    filter_line = [ln for ln in body.splitlines() if "grep -vE '/tests/" in ln]
+    assert filter_line, "the filename filter must still be quoted here"
+    assert "demo/" not in filter_line[0] and "prep_wav" not in filter_line[0], (
+        "demo/ and prep_wav.py must not be excluded by name"
+    )
+
+
+def _pinned_vllm(readme):
+    """vllm_commit as set by the runbook's own patch block."""
+    match = re.search(r'^\+  vllm_commit: "([0-9a-f]+)"', _patch_block(readme), re.M)
+    assert match, "the runbook patch must set vllm_commit"
+    return match.group(1)
+
+
+def _sibling_checkout(name):
+    """Locate a co-checked-out repo without hardcoding one machine's layout.
+
+    The bring-up host keeps them at ~/<name>; the workstation at ~/repos/<name>.
+    Returning a missing path is fine: _count treats a failed git call as
+    "not available here" and the check skips rather than failing spuriously.
+    """
+    for candidate in (f"~/{name}", f"~/repos/{name}"):
+        if os.path.isdir(os.path.expanduser(os.path.join(candidate, ".git"))):
+            return candidate
+    return f"~/{name}"
+
+
+def test_the_quoted_test_counts_match_the_pinned_trees():
+    """The counts illustrate "tests ship in the image", and they go stale.
+
+    They were captured once and then drifted: the plugin figure said 28 while
+    the image built from the current pin carries 30, because the pin moved from
+    50695d8 to c0c4842 and the merge brought new test files. A reader who runs
+    the quoted command sees a different number and cannot tell whether the
+    image is wrong or the doc is.
+
+    Derive the expected counts from the pinned trees so the doc fails here
+    rather than in front of a reader.
+    """
+    import subprocess
+
+    readme = _readme()
+    counts = re.findall(r"\| wc -l\n([0-9]+)\n", readme)
+    assert len(counts) == 2, f"expected two quoted counts, found {counts}"
+    metal_quoted, plugin_quoted = (int(c) for c in counts)
+
+    def _count(repo, pin, path, pattern):
+        # Non-recursive: the quoted commands are `ls <dir>` and `ls <dir>/*.py`,
+        # neither of which descends. `-r` would fold in tests/tt/ and report 42
+        # where the reader sees 30.
+        out = subprocess.run(
+            ["git", "ls-tree", "--name-only", f"{pin}:{path}"],
+            cwd=os.path.expanduser(repo), capture_output=True, text=True,
+        )
+        if out.returncode != 0:
+            return None  # tree not available in this checkout; skip silently
+        names = [n for n in out.stdout.split() if re.search(pattern, n)]
+        return len(names)
+
+    metal = _count(
+        _sibling_checkout("tt-metal"), _pinned_metal(readme),
+        "models/demos/audio/qwen3_asr/tests", r".",
+    )
+    if metal is not None:
+        assert metal == metal_quoted, (
+            f"the pinned tt-metal tree has {metal} files under qwen3_asr/tests, "
+            f"the README says {metal_quoted}"
+        )
+
+    plugin = _count(_sibling_checkout("vllm-tt-plugin"), _pinned_vllm(readme), "tests", r"\.py$")
+    if plugin is not None:
+        assert plugin == plugin_quoted, (
+            f"the pinned plugin tree has {plugin} .py files under tests/, "
+            f"the README says {plugin_quoted}"
+        )
+
+
+def test_commands_reference_repo_files_by_a_path_that_resolves():
+    """`sudo cp qwen3asr-supervisor.service ...` did not resolve from anywhere.
+
+    The unit file lives in scripts/qwen3_asr/, and no block in this runbook cds
+    there -- they all work from $TT_INFERENCE_SERVER. Following the Install
+    section verbatim gives "No such file or directory".
+
+    Generalised: every repo-relative file a command names must exist at the
+    path given, resolved from the repository root.
+    """
+    import re
+
+    root = get_repo_root_path()
+    readme = _readme()
+
+    # Arguments that look like paths in THIS repo. Deliberately narrow:
+    #  - tests/tt/... belongs to vllm-tt-plugin, which the runbook also drives;
+    #  - the extension must be a full suffix, or "....src.dev.Dockerfile"
+    #    truncates to a name that does not exist.
+    candidates = set(
+        re.findall(
+            r"(?:^|\s)(?:\$TT_INFERENCE_SERVER/)?"
+            r"((?:scripts|workflows|reference_config|evals|vllm-tt-metal)"
+            r"/[A-Za-z0-9_./-]+?\.(?:py|ya?ml|json|sh|service|Dockerfile|md))"
+            r"(?=[\s\\)`]|$)",
+            readme,
+            re.M,
+        )
+    )
+    assert candidates, "the runbook does name in-repo files; keep this meaningful"
+
+    missing = sorted(p for p in candidates if not (root / p).exists())
+    assert not missing, f"named in the runbook but absent from the repo: {missing}"
+
+
+# Paths that look like this repo's but belong to another of the three
+# repositories the runbook drives.
+#
+# Only one entry: vllm-tt-plugin's tests/tt is named as `pytest tests/tt ...`
+# and as `--deselect tests/tt/test_tt_penalties.py::Class::test`, and neither
+# form reaches the check -- the first has no extension, and the second is
+# followed by `::`, which the trailing delimiter excludes. Adding it here would
+# be dead weight that silently excuses a future tests/tt/*.py of ours.
+_FOREIGN_PATHS = ("docs/install-vllm-tt.sh",)  # vllm-tt-plugin's own installer
+
+
+def test_the_path_check_covers_every_directory_this_repo_has():
+    """The check above allowlisted five directories, and claimed "every".
+
+    That is not a spelling nit: asr_openai_benchmark.py was *moved* from
+    benchmarking/ to reference_config/ during this bring-up, and `benchmarking`
+    was not one of the five. Verified by mutation -- restoring the pre-move
+    command `python3 benchmarking/asr_openai_benchmark.py` left all 19 tests in
+    this file green, so the runbook could ship a command whose very first
+    argument does not exist.
+
+    Rather than extend the list by hand (the next moved file lands in the next
+    directory not on it), take the prefixes from the tree and subtract only the
+    paths that genuinely belong to the other two repositories.
+    """
+    root = get_repo_root_path()
+    readme = _readme()
+
+    directories = sorted(
+        entry.name
+        for entry in os.scandir(root)
+        if entry.is_dir() and not entry.name.startswith(".")
+    )
+    assert "benchmarking" in directories and "reference_config" in directories, (
+        "the move this test exists for is between these two directories"
+    )
+
+    candidates = set(
+        re.findall(
+            r"(?:^|\s)(?:\$TT_INFERENCE_SERVER/)?"
+            r"((?:" + "|".join(map(re.escape, directories)) + r")"
+            r"/[A-Za-z0-9_./-]+?\.(?:py|ya?ml|json|sh|service|Dockerfile|md))"
+            r"(?=[\s\\)`]|$)",
+            readme,
+            re.M,
+        )
+    )
+    assert candidates, "the runbook does name in-repo files; keep this meaningful"
+
+    missing = sorted(
+        path
+        for path in candidates
+        if not (root / path).exists()
+        and path not in _FOREIGN_PATHS
+    )
+    assert not missing, f"named in the runbook but absent from the repo: {missing}"
+
+
+def test_every_foreign_exemption_is_still_needed_and_still_foreign():
+    """The subtraction above is only honest while those paths are not ours.
+
+    If either lands in this repository the exemption must go, or a genuinely
+    broken path stays hidden behind it; if the runbook stops naming one, the
+    exemption is dead weight that will silently excuse a future file.
+
+    "Still needed" is checked by asking whether the exemption actually
+    suppresses something, not by looking for its text: an earlier version of
+    this list carried `tests/tt/`, which reads as load-bearing but suppressed
+    nothing, and a substring check on the runbook happily confirmed it.
+    """
+    root = get_repo_root_path()
+    readme = _readme()
+
+    for path in _FOREIGN_PATHS:
+        assert not (root / path).exists(), (
+            f"{path} is in this repository now; drop the exemption so the "
+            "path check applies to it"
+        )
+        assert path in readme, (
+            f"the runbook no longer names {path}; drop the stale exemption"
+        )
+
+    # and each one must be doing work: without the exemptions, exactly these
+    # paths are what the check would otherwise report.
+    directories = sorted(
+        entry.name
+        for entry in os.scandir(root)
+        if entry.is_dir() and not entry.name.startswith(".")
+    )
+    candidates = set(
+        re.findall(
+            r"(?:^|\s)(?:\$TT_INFERENCE_SERVER/)?"
+            r"((?:" + "|".join(map(re.escape, directories)) + r")"
+            r"/[A-Za-z0-9_./-]+?\.(?:py|ya?ml|json|sh|service|Dockerfile|md))"
+            r"(?=[\s\\)`]|$)",
+            readme,
+            re.M,
+        )
+    )
+    suppressed = {p for p in candidates if not (root / p).exists()}
+    assert suppressed == set(_FOREIGN_PATHS), (
+        "the exemption list must be exactly what the check would report: "
+        f"unused {sorted(set(_FOREIGN_PATHS) - suppressed)}, "
+        f"unexempted {sorted(suppressed - set(_FOREIGN_PATHS))}"
+    )
+
+
+def test_the_unit_file_is_copied_from_where_it_lives():
+    readme = _readme()
+    assert "scripts/qwen3_asr/qwen3asr-supervisor.service" in readme, (
+        "give the path the file is actually at; a bare filename resolves "
+        "nowhere the runbook has cd'd to"
+    )
+
+
+def test_the_patch_targets_files_that_exist():
+    """`git apply` fails on a path that is not in the tree.
+
+    The generic path check cannot catch a typo here: the Dockerfile name
+    appears four times in the patch (diff/---/+++/hunk context), so mutating
+    one leaves three valid and the set-based check still passes. Take the
+    targets from the diff headers, where each one must resolve.
+    """
+    import re
+
+    root = get_repo_root_path()
+    block = _patch_block(_readme())
+
+    targets = set(re.findall(r"^diff --git a/(\S+) b/(\S+)$", block, re.M))
+    assert targets, "the runbook patch must name the files it edits"
+
+    for a, b in sorted(targets):
+        assert a == b, f"the patch renames {a} -> {b}; that is not intended here"
+        assert (root / a).exists(), (
+            f"the patch edits {a}, which is not in the repository; git apply "
+            "would fail before the build starts"
+        )
+
+
+def _repo_beside(name):
+    """A sibling checkout of one of the pinned repositories, if present."""
+    path = os.path.join(os.path.dirname(__file__), "..", "..", name)
+    return path if os.path.isdir(os.path.join(path, ".git")) else None
+
+
+def _git(repo, *args):
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "-C", repo, *args], capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"git {' '.join(args)}: {result.stderr}"
+    return result.stdout
+
+
+def _pinned(kind):
+    """The commit OUR patch pins, by key name.
+
+    Scoped to the `git apply <<'PATCH'` block: the runbook also quotes the
+    pyannote/Qwen3.5 recipe from PR #4837, whose vllm_commit is a different
+    repository's commit entirely. Matching the first occurrence in the file
+    picked that one up.
+    """
+    import re
+
+    readme = _readme()
+    start = readme.index("git apply <<'PATCH'")
+    block = readme[start : readme.index("\nPATCH\n", start)]
+
+    match = re.search(rf'\+\s*{kind}: "([0-9a-f]+)"', block)
+    assert match, f"our patch block must pin {kind}"
+    return match.group(1)
+
+
+def test_each_pin_is_an_ancestor_of_the_branch_it_names():
+    """A pin the branch does not contain cannot be cloned from that branch.
+
+    The runbook says the clone checks out the pinned commit and the branch
+    only has to *contain* it. Nothing checked that it does -- a rebase or an
+    amended commit would leave the pin unreachable and the documented build
+    would fail at `git checkout`.
+    """
+    for repo_name, kind in (
+        ("tt-metal", "tt_metal_commit"),
+        ("vllm-tt-plugin", "vllm_commit"),
+    ):
+        repo = _repo_beside(repo_name)
+        if repo is None:
+            pytest.skip(f"{repo_name} is not checked out beside this repo")
+
+        import subprocess
+
+        pin = _pinned(kind)
+        result = subprocess.run(
+            ["git", "-C", repo, "merge-base", "--is-ancestor", pin, "HEAD"],
+            capture_output=True,
+        )
+        assert result.returncode == 0, (
+            f"{repo_name}: the pinned {pin} is not an ancestor of the branch "
+            f"head; the documented clone cannot reach it"
+        )
+
+
+# Paths that end up inside the image. Everything else in these repositories is
+# tests, docs or tooling that the Dockerfile never copies.
+IMAGE_PATHS = {
+    "tt-metal": ("models/demos/audio/qwen3_asr/tt/",),
+    "vllm-tt-plugin": ("src/",),
+}
+
+
+def _executable_diff(repo, pin, paths):
+    """Changed lines since ``pin`` under ``paths``, prose removed.
+
+    Compares the compiled code objects rather than filtering the diff by eye:
+    a module docstring edit shows up as ordinary changed lines, and this file
+    is about whether the image would *behave* differently. Falls back to a
+    line filter only for files that cannot be parsed.
+    """
+    import ast
+
+    changed = []
+    for path in paths:
+        names = _git(repo, "diff", "--name-only", f"{pin}..HEAD", "--", path)
+        for name in names.split():
+            if not name.endswith(".py"):
+                changed.append(name)
+                continue
+            before = _git(repo, "show", f"{pin}:{name}")
+            after = _git(repo, "show", f"HEAD:{name}")
+            if _stripped_ast(before) != _stripped_ast(after):
+                changed.append(name)
+    return changed
+
+
+def _stripped_ast(src):
+    """The module's AST with docstrings removed, as text.
+
+    Comments never reach the AST; docstrings do, so drop them explicitly.
+    Two modules with the same stripped AST run the same code.
+    """
+    import ast
+
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        if not isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            if isinstance(first.value.value, str):
+                body.pop(0)
+                if not body:
+                    body.append(ast.Pass())
+    return ast.dump(ast.fix_missing_locations(tree))
+
+
+def test_the_runbook_admits_the_heads_have_moved_past_the_pins():
+    """Silence here reads as "pin == head", which stopped being true.
+
+    Both branches carry commits the pinned images do not, and a reader
+    comparing `git log -1` against the pin needs to know that is expected.
+    """
+    readme = _readme()
+    assert "The branch heads have moved past the pins" in readme, (
+        "say that the heads are ahead of the pins, or the next rebuild reads "
+        "the difference as a mistake"
+    )
+
+
+def test_nothing_executable_reached_the_image_paths_since_the_pins():
+    """The claim the runbook now makes, checked against the trees.
+
+    tt-metal's post-pin change under tt/ is a comment; the plugin's is the
+    compilation-mode guard, which the runbook calls out by name. If anything
+    else executable lands there, the runbook's "leave the pin" advice stops
+    being true and this fails.
+    """
+    for repo_name, kind in (
+        ("tt-metal", "tt_metal_commit"),
+        ("vllm-tt-plugin", "vllm_commit"),
+    ):
+        repo = _repo_beside(repo_name)
+        if repo is None:
+            pytest.skip(f"{repo_name} is not checked out beside this repo")
+
+        changed = _executable_diff(repo, _pinned(kind), IMAGE_PATHS[repo_name])
+        if not changed:
+            continue
+
+        # The one exception the runbook documents, and only that one.
+        assert repo_name == "vllm-tt-plugin", (
+            f"{repo_name}: executable changes under {IMAGE_PATHS[repo_name]} "
+            f"since the pin: {changed[:6]}"
+        )
+        assert changed == ["src/vllm_tt_plugin/platform.py"], (
+            f"only the documented compilation-mode guard may differ from the "
+            f"pin; these do too: {changed}"
+        )
+
+        assert "compilation-mode guard" in _readme(), (
+            "the runbook must name the one executable change it tolerates"
+        )

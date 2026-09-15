@@ -1,0 +1,4996 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+
+"""Spec invariants for the vLLM-served Qwen3-ASR bring-up."""
+
+import os
+import re
+
+import pytest
+
+from workflows.model_spec import load_templates_from_yaml, get_model_spec_map
+from workflows.utils import get_repo_root_path
+from workflows.workflow_types import InferenceEngine, ModelType
+
+
+def _dev_specs():
+    """Resolve the dev catalog regardless of MODEL_SPECS_ENV.
+
+    Qwen3-ASR is a bring-up and lives only in workflows/model_specs/dev. The
+    module-level MODEL_SPECS honours MODEL_SPECS_ENV, which defaults to prod, so
+    importing it would make these tests depend on how the runner is invoked.
+    Promotion to prod is the release process's job, not this bring-up's.
+    """
+    path = get_repo_root_path() / "workflows" / "model_specs" / "dev" / "audio_tts.yaml"
+    return get_model_spec_map(load_templates_from_yaml(path, env="dev"))
+
+
+MODEL_SPECS = _dev_specs()
+
+
+def _spec_yaml():
+    """The catalog text, for the declarations that do not survive parsing."""
+    path = (
+        get_repo_root_path() / "workflows" / "model_specs" / "dev" / "audio_tts.yaml"
+    )
+    return path.read_text()
+
+ASR_SPEC_IDS = [
+    "id_tt-vllm-plugin_Qwen3-ASR-1.7B_p150",
+    "id_tt-vllm-plugin_Qwen3-ASR-1.7B-JA_p150",
+]
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_is_vllm_served_audio(spec_id):
+    spec = MODEL_SPECS[spec_id]
+    assert spec.model_type == ModelType.AUDIO
+    assert spec.inference_engine == InferenceEngine.VLLM.value
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_declares_builtin_warmup(spec_id):
+    """Generic background trace capture must not run against this model.
+
+    run_vllm_api_server skips the background trace capture when a spec declares
+    has_builtin_warmup. Without it the capture drives /v1/completions with
+    synthetic text prompts against a transcription-only model while the
+    adapter's own decode trace is already active, and the first real
+    transcription then never completes.
+    """
+    assert MODEL_SPECS[spec_id].has_builtin_warmup is True
+
+
+def test_readme_pins_agree_with_the_runbook_tag():
+    """The patched pins and the image tag the runbook runs must be the same.
+
+    Dev specs carry no pins (and so no docker_image); the build gets them from
+    the patch in the runbook. If that patch and the --override-docker-image tag
+    drift apart, the reader builds one image and then starts another.
+    """
+    readme = _readme()
+    metal, vllm = _patched_pins(readme)
+
+    assert f"--build-metal-commit {metal}" in readme, (
+        "the build command must use the tt_metal_commit the patch sets"
+    )
+    assert f"ubuntu-22.04-amd64:{metal}" in readme, (
+        "the base-image bake command must tag the pinned tt-metal commit"
+    )
+    assert f"{metal}-{vllm}" in readme, (
+        f"the runbook must start the image built from the pinned commits "
+        f"({metal}-{vllm})"
+    )
+
+
+def _patched_pins(readme):
+    """Return (tt_metal_commit, vllm_commit) as set by the runbook's patch."""
+    # Scope to the runbook's own patch block. The section above it quotes the
+    # original PR #4837 recipe, which also contains a "+  vllm_commit:" line;
+    # searching the whole file picked that up and reported the wrong pin.
+    block = readme[readme.index("git apply <<'PATCH'") : readme.index("\nPATCH\n")]
+    metal = re.search(r'^\+  tt_metal_commit: "([0-9a-f]{7,})"', block, re.M)
+    vllm = re.search(r'^\+  vllm_commit: "([0-9a-f]{7,})"', block, re.M)
+    assert metal and vllm, "the patch must add both release pins"
+    return metal.group(1), vllm.group(1)
+
+
+def test_the_patched_pin_is_the_one_the_docs_build_from():
+    """The pin names the tree the image is built from.
+
+    It used to live in model_spec.py; upstream moved catalogs to YAML and the
+    dev contract rejects pins, so it now reaches the build through the runbook
+    patch. Wherever it lives, a stale value builds a tree the repo no longer
+    tests.
+    """
+    readme = _readme()
+    metal, _ = _patched_pins(readme)
+    assert readme.count(metal) >= 3, (
+        f"the pinned commit {metal} must appear in the patch, the bake tag and "
+        "the build command; a partial update builds a different tree"
+    )
+
+
+# Every tt-metal commit this repo has pinned and then moved past. A superseded
+# pin builds a docker image from a tree the repo no longer tests, so the served
+# model silently differs from what CI checked. Append (never remove) an entry
+# when bumping the pin.
+SUPERSEDED_TT_METAL_COMMITS = (
+    "97b36e1",  # pre-bring-up base
+    "d53d8d7",  # decode trace default ON
+    "ddb7ace",  # head before the rebase onto upstream/yito/qwen3_asr_pr
+    "986aad1",  # pre-rebase branch head
+    "3b1b9ad",  # before the eval-side 16 kHz resample fix
+    "e7929dc",  # before the served decoder took its dtype from the shared helper
+    # Retired by the rebase onto the squash-merge of tt-metal #49104: the
+    # commit still exists as an object but is no longer on the branch, so a
+    # build would fail at `git checkout`. Its replacement is afa4d983bb0.
+    "60166e19d45a0da3aa1735eb88fed13c444877aa",
+)
+
+
+def test_no_superseded_commit_is_referenced_anywhere():
+    """A superseded SHA must not be *used* as a pin -- but may be discussed.
+
+    The rule this enforces is that no build or run resolves to a tree the repo
+    no longer tests. Bare textual absence is a proxy for that, and it broke on
+    the first pin whose own story is worth telling: the short-pin trap section
+    quotes `e7929dc` precisely because it once resolved to an unrelated
+    upstream object. Deleting that example to satisfy a substring check would
+    remove the evidence for the full-SHA rule sitting directly above it.
+
+    So the check is scoped to the load-bearing positions: the patch's
+    `tt_metal_commit:` line, the bake tag, the `--build-metal-commit`
+    argument, and the image tag the runbook starts.
+    """
+    root = os.path.join(os.path.dirname(__file__), "..")
+
+    def _pin_positions(text):
+        """Every occurrence that would actually drive a build or a run."""
+        import re
+
+        return (
+            re.findall(r'tt_metal_commit:\s*"([0-9a-f]+)"', text)
+            + re.findall(r"--build-metal-commit\s+([0-9a-f]+)", text)
+            + re.findall(r"ubuntu-22\.04-amd64:([0-9a-f]+)", text)
+            + re.findall(r"amd64:[0-9.]+-([0-9a-f]+)-", text)
+        )
+
+    for rel in ("workflows/model_spec.py", "scripts/qwen3_asr/README.md"):
+        text = open(os.path.join(root, rel)).read()
+        used = _pin_positions(text)
+        for stale in SUPERSEDED_TT_METAL_COMMITS:
+            hits = [p for p in used if p.startswith(stale)]
+            assert not hits, (
+                f"{rel} still pins the superseded tt-metal commit {stale} "
+                f"(found in {hits}); a build from it would use a tree the repo "
+                f"no longer tests"
+            )
+
+
+def test_the_pin_check_looks_at_positions_that_drive_a_build():
+    """Guard the guard: it must not degrade back to a bare substring test.
+
+    Scoping it to pin positions is what lets the short-pin trap keep its worked
+    example. If someone re-tightens this to "not in text", that example has to
+    go, and the full-SHA rule loses its evidence.
+    """
+    src = open(os.path.join(os.path.dirname(__file__), "test_qwen3_asr_spec.py")).read()
+    body = src[src.index("def test_no_superseded_commit_is_referenced_anywhere") :]
+    body = body[: body.index("\ndef test_the_pin_check_looks_at_positions")]
+
+    assert "tt_metal_commit:" in body and "--build-metal-commit" in body, (
+        "the check must name the positions that actually pin a commit"
+    )
+    assert "assert stale not in text" not in body, (
+        "a bare substring check forbids discussing a superseded SHA at all"
+    )
+
+    # and the example it exists to protect must still be present
+    readme = _readme()
+    assert "`e7929dc` matched upstream's `7e7929dcd898...`" in readme, (
+        "the short-pin trap's worked example must survive the pin bump"
+    )
+
+
+def test_vllm_commit_pins_a_plugin_commit_not_a_fork_commit():
+    """vllm_commit names a vllm-tt-plugin commit, as it does upstream.
+
+    The Dockerfile resolves TT_VLLM_COMMIT_SHA_OR_TAG against
+    tenstorrent/vllm-tt-plugin, so a value left over from the days of cloning
+    the tenstorrent/vllm fork would fail at git checkout in the builder --
+    exactly what scripts/release/README.md warns about.
+    """
+    _, vllm = _patched_pins(_readme())
+    assert vllm not in SUPERSEDED_VLLM_FORK_COMMITS, (
+        "vllm_commit still points at a tenstorrent/vllm fork commit; it must "
+        "name a vllm-tt-plugin commit"
+    )
+
+
+# vLLM *fork* commits this spec pinned back when the dev image cloned
+# tenstorrent/vllm. None of them exist in tenstorrent/vllm-tt-plugin.
+SUPERSEDED_VLLM_FORK_COMMITS = (
+    "e1a3825",  # fork upstream base
+    "5e69638",  # fork bring-up branch head
+    "2bcb717",  # plugin head before the upstream merge (vLLM 0.24.0)
+    "c0c4842",  # before the compilation_config pin was restored
+)
+
+
+def test_no_superseded_vllm_fork_commit_is_referenced_anywhere():
+    """Same scoping as the tt-metal check: forbid *pinning*, not discussing.
+
+    c0c4842 is now superseded, but the results table names the image it built
+    (0.21.0-e7929dcf5dcf...-c0c4842) as the artifact the current numbers came
+    from. That attribution is the honest part of the table, so a bare substring
+    ban would force deleting it.
+    """
+    root = os.path.join(os.path.dirname(__file__), "..")
+
+    def _pin_positions(text):
+        import re
+
+        return re.findall(r'vllm_commit:\s*"([0-9a-f]+)"', text) + re.findall(
+            r"amd64:[0-9.]+-[0-9a-f]+-([0-9a-f]+)", text
+        )
+
+    for rel in ("workflows/model_spec.py", "scripts/qwen3_asr/README.md"):
+        text = open(os.path.join(root, rel)).read()
+        used = _pin_positions(text)
+        for stale in SUPERSEDED_VLLM_FORK_COMMITS:
+            hits = [p for p in used if p.startswith(stale)]
+            assert not hits, (
+                f"{rel} still pins the superseded vLLM commit {stale} "
+                f"(found in {hits})"
+            )
+
+
+def test_the_readme_states_when_the_pin_may_lag_the_head():
+    """The pin names the BUILT tree, so test-only commits need no bump.
+
+    Without this written down the next reader either rebuilds for ~7 h on a
+    test-only commit, or bumps the pin without rebuilding and ships an image
+    that does not correspond to the pinned tree.
+    """
+    readme = open(
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "README.md")
+    ).read()
+    assert "Why the pin may lag the branch head" in readme
+    # the documented check must be the one that proves there is no runtime diff
+    assert "git diff --name-only" in readme
+    # the tt-metal filter also drops the golden tooling and offline eval, which
+    # ship in the image but are not reachable from tt/ -- see the pin-form tests
+    assert "grep -vE '/tests/|" in readme
+
+
+def test_the_readme_does_not_claim_tests_are_absent_from_the_image():
+    """Both clones are whole trees, so tests/ IS inside the image.
+
+    The section used to justify a lagging pin with "never copied into the
+    image". Checked on a running container, that is false:
+    tt-metal .../qwen3_asr/tests has 18 files and
+    /home/container_app_user/vllm-tt-plugin/tests has 28 .py files. A reader who
+    believed the old wording would conclude any file present in the image
+    requires a pin bump, which is the wrong rule.
+    """
+    readme = _readme()
+    assert "never copied into the image" not in readme
+    # the real reason is the import graph, and it has to be stated
+    assert "src/vllm_tt_plugin" in readme
+    assert "import graph" in readme
+
+
+def test_the_readme_gives_the_no_runtime_diff_check_for_both_pins():
+    """vllm_commit can lag too, and its tests live at a different path.
+
+    Only the tt-metal form was documented, so a plugin test-only commit had no
+    stated way to be cleared; the tt-metal filter ('/tests/') does not match the
+    plugin layout ('tests/...' at the repo root).
+    """
+    readme = _readme()
+    assert "grep -vE '/tests/|" in readme, "tt-metal form"
+    assert "grep -v '^tests/'" in readme, "vllm-tt-plugin form"
+
+
+def _dropped_work_section():
+    readme = _readme()
+    start = readme.index("#### After any upstream merge, check for silently dropped work")
+    return readme[start : readme.index("\nDisk:", start)]
+
+
+def test_the_readme_tells_you_to_look_for_work_a_merge_dropped():
+    """A green suite cannot detect a change and its test leaving together.
+
+    Concrete case: vllm-tt-plugin's first upstream merge kept
+    enforce_eager = True, dropped the compilation_config pin that has to
+    accompany it, and dropped the covering test in the same commit. Nothing
+    failed, and the branch spent ~209 s per start compiling a graph the ttnn
+    path never uses until it was found by hand.
+
+    So the runbook has to name the check, not just the risk -- and has to say
+    that a long output is expected, or the next reader dismisses 33 lines as
+    noise.
+    """
+    body = _dropped_work_section()
+
+    # the mechanism, so the check is understood rather than copied blindly
+    assert "the assertion left with the code" in body, (
+        "say why a passing suite proves nothing here"
+    )
+    # the worked example, with its cost and its fix
+    assert "enforce_eager" in body and "compilation_config" in body
+    assert "209 s" in body, "quantify what the omission cost"
+    assert "acae5aa" in body, "name the commit that restored it"
+
+    # the check itself, runnable
+    assert "git log --format='%h %an'" in body and "def $fn" in body, (
+        "give the command, not a description of it"
+    )
+    # and the discipline it needs to be worth anything
+    assert "Every line has to be accounted for" in body
+    for category in ("renamed", "replaced", "withdrawn"):
+        assert category in body, f"name the '{category}' disposition"
+    # The counts, as the sentence that reports them. A bare `"33" in body`
+    # also matched `6m33.591s` elsewhere in the runbook, so deleting this
+    # sentence outright left the test green.
+    flat = " ".join(body.split())
+    assert "34 lines here, 2 in tt-metal and 0 in the plugin" in flat, (
+        "record that this repo's output was long and still clean, or a long "
+        "list looks like a failure of the check"
+    )
+    # and that every line was dispositioned, which is what makes it clean
+    assert "every one of the 36 resolved to the first three" in flat, (
+        "a count without a disposition is just a number"
+    )
+    # The count is a moving target -- it grows with the branch -- so the
+    # paragraph has to tell the reader to re-run rather than trust it, and has
+    # to disposition the lines it gained. Recorded because the number went
+    # stale silently: it was 33 when written and measured 34 here.
+    assert "re-run it rather than trusting the number" in flat, (
+        "say the count moves, or the next reader treats a mismatch as a loss"
+    )
+    assert "f70bc74e0" in flat and "38d8a9437d3" in flat, (
+        "name the commits that account for the lines, not just their count"
+    )
+    # The total must be the sum of the per-repo counts the same sentence gives,
+    # read back out of the runbook rather than restated here.
+    per_repo = re.search(
+        r"(\d+) lines here, (\d+) in tt-metal and (\d+) in the plugin", flat
+    )
+    total = re.search(r"every one of the (\d+) resolved", flat)
+    assert sum(int(g) for g in per_repo.groups()) == int(total.group(1)), (
+        f"the per-repo counts {per_repo.groups()} do not add up to "
+        f"{total.group(1)}"
+    )
+
+
+def test_the_dropped_work_scan_is_usable_in_every_repo():
+    """`tests/` is not the test root everywhere, and a wrong root finds nothing.
+
+    tt-metal keeps this bring-up's tests under
+    models/demos/audio/qwen3_asr/tests, so a scan hardcoded to `tests/` there
+    matches no files and prints nothing -- indistinguishable from a clean
+    result. The scan is only trustworthy if the root is set on purpose.
+    """
+    body = _dropped_work_section()
+
+    # Both roots, as assignments: naming only tt-metal's leaves the reader to
+    # guess what the other two repos use, and a bare "TESTS=" is satisfied by
+    # either line alone.
+    assert "TESTS=tests" in body, "give the root the other two repos use"
+    assert "TESTS=models/demos/audio/qwen3_asr/tests" in body, (
+        "give tt-metal's root, which is the one that differs"
+    )
+    assert "silently finds nothing if it is wrong" in body, (
+        "warn that a wrong root looks like success"
+    )
+    # the scan must use the variable rather than the literal
+    assert 'grep -rq "def $fn" "$TESTS/"' in body, (
+        "the grep has to honour TESTS, or parameterising the filter is pointless"
+    )
+    # The base must be right in the *snippet*, not merely mentioned nearby:
+    # "upstream/main" occurs three times in this section (the lead-in, the
+    # snippet, the closing comparison), so a containment check stayed green
+    # with the snippet reverted to the retired PR branch -- verified by
+    # mutation. Assert on the assignment the reader copies.
+    assert "BASE=$(git rev-parse --verify -q upstream/main" in body, (
+        "the snippet itself must bound by upstream/main"
+    )
+    assert "|| git rev-parse --verify -q origin/main)" in body, (
+        "keep the origin/ fallback; the remote name differs per checkout"
+    )
+    # and the retired base must not be what the snippet resolves
+    snippet = body[body.index("BASE=$(") :]
+    snippet = snippet[: snippet.index("```")]
+    assert "qwen3_asr_pr" not in snippet, (
+        "the snippet must not resolve the retired PR branch; it still exists, "
+        "so the scan would silently widen instead of failing"
+    )
+    # resolved by ref, not by a hardcoded remote name: main is under upstream/
+    # in one checkout and origin/ in another, and a bad revision aborts the
+    # scan with "fatal: ambiguous argument" rather than skipping
+    assert "git rev-parse --verify -q" in body, (
+        "resolve the base defensively; a bad revision aborts the scan"
+    )
+    assert "fatal: ambiguous" in body, (
+        "name the failure a wrong ref produces, which is an abort not a skip"
+    )
+
+    # The retired base has to be called out, not merely replaced. It is the
+    # dangerous case: `yito/qwen3_asr_pr` still *resolves* after #49104 was
+    # squash-merged, so using it does not error -- the rebase moved our
+    # commits off it, and the range silently widens from 51 commits to 975.
+    # A reader who only sees the new snippet may "restore" the old base.
+    assert "Do not use the PR branch" in body, (
+        "ban the retired base explicitly; it still resolves, so it fails silently"
+    )
+    assert "975" in body and "51" in body, (
+        "quote what the wrong base actually costs, measured not asserted"
+    )
+    assert "still resolves" in body, (
+        "say why it is a trap rather than an error"
+    )
+
+
+def test_the_readme_does_not_present_librispeech_wer_as_runnable():
+    """WER 6.7288 came from a config upstream deleted.
+
+    Our lmms-eval entry lived in evals/eval_config.py, which went with the v1
+    workflows (#4678 / #4630). The successor catalog carries whisper entries
+    but no Qwen3-ASR one, and evals/lmms_eval_models/qwen3_asr_openai.py is now
+    an orphan -- nothing outside that directory references it.
+
+    Quoting the number without that context invites someone to try to
+    reproduce it and conclude the tree is broken.
+    """
+    readme = _readme()
+    body = readme[readme.index("An older run also had LibriSpeech WER") :]
+    body = body[: body.index("This table is a record")]
+    flat = " ".join(body.split())
+
+    assert "not reproducible on this tree" in flat, (
+        "say the figure cannot be re-measured here"
+    )
+    assert "evals/eval_config.py" in flat and "reference_config/evals/eval_config.py" in flat, (
+        "name both the deleted config and its successor"
+    )
+    assert "qwen3_asr_openai" in flat, "name the adapter that is now orphaned"
+    # and what running it again would take, so the note is actionable. The
+    # detail lives in test_the_readme_names_what_actually_blocks_the_
+    # librispeech_eval; here just require that a route back is described.
+    assert "Re-enabling it" in flat, (
+        "say what re-enablement involves, or the note is a dead end"
+    )
+
+
+def _build_script():
+    return open(
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "build_docker_images.py")
+    ).read()
+
+
+def test_the_readme_gives_the_real_reason_the_base_is_built_by_hand():
+    """"the script issues a plain docker build" is false, and misleads.
+
+    build_tt_metal_base_image() runs `docker buildx bake ... ci-build` itself,
+    carrying the same FROM-scratch explanation. A reader who checked would find
+    the stated reason contradicted and could reasonably drop the manual step.
+
+    The step is still required, for a different reason: the script clones
+    https://github.com/tenstorrent/tt-metal.git -- upstream, which does not
+    have this branch -- so the checkout of our pin fails. Pre-building the tag
+    makes the function return before it ever clones.
+    """
+    script = _build_script()
+    readme = _readme()
+
+    # the premise: the script really does use bake, and really does clone upstream
+    assert '"bake",' in script, "the script bakes; the old README claim is stale"
+    assert "https://github.com/tenstorrent/tt-metal.git" in script
+    assert "if check_image_exists_local(tt_metal_base_tag):" in script, (
+        "the early return is what makes the manual build effective"
+    )
+
+    body = readme[readme.index("tt-metal's `dockerfile/Dockerfile` declares") :]
+    body = body[: body.index("The script then sees the base locally")]
+    flat = " ".join(body.split())
+
+    assert "issues a plain `docker build` for the base" not in flat, (
+        "the script bakes; do not state the opposite"
+    )
+    # Require it where the baking is asserted, not merely somewhere in the
+    # section: the name recurs in the early-return paragraph, so a section-wide
+    # check still passed with the attribution reduced to "it".
+    bakes = flat[: flat.index("The reason is where it clones from")]
+    assert "`build_tt_metal_base_image()` runs `docker buildx bake" in bakes, (
+        "attribute the bake to the function, so the claim can be checked"
+    )
+    assert "upstream" in flat and "does not carry this bring-up's branch" in flat, (
+        "give the real reason: the clone is from upstream"
+    )
+    assert "check_image_exists_local" in flat, (
+        "explain why a pre-built tag suppresses the clone"
+    )
+
+
+def test_the_readme_explains_the_single_threaded_flag():
+    """The build command passes it and nothing said why.
+
+    It is not a parallelism knob here: the patch adds one prod entry, so there
+    is one combination either way. What it selects is the execution path --
+    the alternative is a ProcessPoolExecutor gated on host resources, and that
+    gate wants DISK_PER_BUILD_GB (40) free on Docker's data-root, which `/`
+    does not have. Without the note, someone tidying the command line drops the
+    flag and the single build never gets admitted.
+    """
+    script = _build_script()
+    readme = _readme()
+
+    # the premise, from the script
+    assert "if single_threaded:" in script
+    assert "_run_resource_aware_queue" in script
+    assert "DISK_PER_BUILD_GB = 40" in script, (
+        "the reserve changed; requote it in the README"
+    )
+
+    body = readme[readme.index("`--single-threaded` is not about parallelism") :]
+    body = body[: body.index("\nWithout the tt-metal half")]
+    flat = " ".join(body.split())
+
+    assert "one combination" in flat, "say why it is not a parallelism question"
+    assert "_run_resource_aware_queue" in flat, "name the path it avoids"
+    assert "DISK_PER_BUILD_GB = 40" in flat, "give the reserve that blocks it"
+    assert "does not have 40 GB spare" in flat, (
+        "connect the reserve to this host, or the flag looks optional"
+    )
+
+
+def _unit_file():
+    return open(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "scripts",
+            "qwen3_asr",
+            "qwen3asr-supervisor.service",
+        )
+    ).read()
+
+
+def test_the_readme_reconciles_the_service_port_with_its_own_commands():
+    """Installing the unit serves 8101; every command here targets 8110.
+
+    PORT="${1:-8101}" in the script, `... asr_supervisor.sh 8101` in the unit,
+    and 8110 in every curl/eval/benchmark invocation in this runbook -- because
+    those were measured against the --docker-server deployment. Someone who
+    follows Install and then pastes a verification command gets connection
+    refused and no hint why.
+    """
+    readme = _readme()
+    supervisor = _supervisor()
+    unit = _unit_file()
+
+    # the mismatch is real, or this note is stale
+    assert 'PORT="${1:-8101}"' in supervisor
+    assert "asr_supervisor.sh 8101" in unit
+    assert "http://127.0.0.1:8110" in readme
+
+    body = readme[readme.index("The service serves 8101") :]
+    body = body[: body.index("### What the supervisor reads")]
+    flat = " ".join(body.split())
+
+    assert "not the 8110 used everywhere above" in flat, (
+        "name both ports, or the reader cannot see the mismatch"
+    )
+    assert 'PORT="${1:-8101}"' in flat, "show where the default comes from"
+    # both ways out, so the reader can pick
+    assert "edit `ExecStart` to pass `8110`" in flat
+    assert "substitute the port in the verification commands" in flat
+
+
+def test_the_readme_says_the_two_serving_modes_cannot_coexist():
+    """--local-server and --docker-server both want /dev/tenstorrent/0.
+
+    Retargeting the unit to 8110 without stopping the container gives a device
+    conflict, not a working service, so the instruction to change the port has
+    to carry that warning.
+    """
+    readme = _readme()
+    body = readme[readme.index("The service serves 8101") :]
+    body = body[: body.index("### What the supervisor reads")]
+    flat = " ".join(body.split())
+
+    assert "--local-server" in flat and "--docker-server" in flat, (
+        "name the two modes; the port is not the only difference"
+    )
+    assert "Only one of the two can own `/dev/tenstorrent/0`" in flat
+
+
+def test_the_port_is_documented_as_positional_not_an_env_var():
+    """The environment table listed every knob except the one that is not one.
+
+    PORT is $1, so exporting PORT= does nothing. Readers scanning the table for
+    how to change the port would find nothing and reasonably assume it is not
+    configurable.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "*(positional `$1`)*")
+    assert "8101" in row
+    assert "Not** an environment variable" in row, (
+        "say it cannot be set through the environment, unlike every other row"
+    )
+
+
+def test_the_readme_does_not_call_the_recovery_loop_fully_self_sustaining():
+    """It contradicted the BMC finding two paragraphs above it.
+
+    "making the recovery loop fully self-sustaining" was written before the
+    power-cycle stage was known to be unavailable here. Left in place, the
+    reader gets both claims and no way to tell which is current.
+    """
+    readme = _readme()
+    assert "fully self-sustaining" not in readme, (
+        "the power-cycle stage cannot run on this host; scope the claim"
+    )
+    body = readme[readme.index("`qwen3asr-supervisor.service` runs the supervisor") :]
+    body = body[: body.index("\n### ")]
+    flat = " ".join(body.split())
+    assert "not self-sustaining for a wedge that needs a hardware reset" in flat, (
+        "say which case is not covered"
+    )
+    # and what it does still cover, so this is not read as 'no recovery at all'
+    assert "self-sustaining for anything `tt-smi -r` clears" in flat
+
+
+def test_the_readme_says_the_power_cycle_fallback_is_unavailable_here():
+    """Step 4's second stage cannot run on the delivery host.
+
+    Measured: ipmitool is installed, but there is no BMC --
+
+        $ sudo ipmitool mc info
+        Could not open device at /dev/ipmi0 or ...: No such file or directory
+        $ ls /dev/ipmi*
+        ls: cannot access '/dev/ipmi*'
+
+    Presenting a hardware reset as part of the recovery loop overstates what
+    self-recovers. It does degrade safely -- the branch falls through to a wait
+    loop and relaunches regardless -- but a wedge that survives tt-smi -r needs
+    a human here, and that is the operationally important part.
+    """
+    readme = _readme()
+    body = readme[readme.index("The power-cycle fallback does not work") :]
+    body = body[: body.index("`qwen3asr-supervisor.service` runs")]
+    flat = " ".join(body.split())
+
+    assert "no BMC device" in flat or "no BMC" in flat, (
+        "say why it cannot run, not just that it does not"
+    )
+    assert "/dev/ipmi" in flat, "quote the device that is absent"
+    # The safe-degradation, so this does not read as "recovery is broken".
+    # Require both halves: what the script does instead, and that the wedge is
+    # still retried. An either-or check passed with the retry claim deleted.
+    assert "relaunches anyway" in flat, (
+        "say what the script does when the power cycle is refused"
+    )
+    assert "retried rather than abandoned" in flat, (
+        "say the wedge is still retried, or this reads as recovery giving up"
+    )
+    # and the honest limit
+    assert "needs a human" in flat, (
+        "state that an unrecoverable wedge is not self-healing on this host"
+    )
+
+
+def test_the_supervisor_relaunches_even_when_the_power_cycle_is_refused():
+    """The README's "degrades safely" claim has to be true of the script.
+
+    The main loop must keep retrying when the power cycle cannot run. This test
+    used to demand that recover_device "must not return non-zero" on that path,
+    which conflated two things: the loop continuing, and the function claiming
+    success. It got the second one wrong -- reporting a recovery that did not
+    happen is exactly the failure this suite is meant to catch -- so the
+    requirement is now stated as "every caller tolerates the failure", which is
+    what actually keeps the relaunch going.
+    """
+    sh = _supervisor()
+    start = sh.index('log "tt-smi -r insufficient')
+    branch = sh[start : sh.index("\n}", start)]
+
+    assert "ipmitool chassis power cycle" in branch
+    assert "exit" not in branch, (
+        "the power-cycle path must fall through to a relaunch, not exit"
+    )
+    # a bounded wait, so an accepted-but-deferred power cycle cannot hang us
+    assert "seq 1 40" in branch and "sleep 30" in branch, (
+        "keep the wait bounded; 40 x 30 s = 20 min matches the startup budget"
+    )
+    # and the loop keeps going: every call site tolerates a non-zero return
+    main = sh[sh.index('log "=== supervisor start') :]
+    calls = [
+        ln.strip()
+        for ln in main.splitlines()
+        if "recover_device" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert calls, "the main loop must still attempt recovery"
+    for call in calls:
+        assert call.endswith("|| true"), (
+            f"a failed recovery must not stop the relaunch loop: {call}"
+        )
+
+
+def test_the_readme_names_what_actually_blocks_the_librispeech_eval():
+    """"rehome the adapter" was too vague, and wrong about the mechanism.
+
+    Traced through the tree: our adapter reached the venv via
+    evals/lmms_eval_models/install.py, driven by setup_evals_audio(). Upstream
+    deleted that hook -- EVALS_AUDIO now has no setup_function -- and gets
+    whisper_tt from a TT fork of lmms-eval pinned in
+    requirements/evals-audio.txt instead. So adding a catalog entry alone would
+    fail at model resolution, which is the part worth writing down.
+    """
+    readme = _readme()
+    body = readme[readme.index("An older run also had LibriSpeech WER") :]
+    body = body[: body.index("This table is a record")]
+    flat = " ".join(body.split())
+
+    # the template that does work, so the entry can be copied
+    assert "whisper_tt" in flat and "EVALS_AUDIO" in flat
+    # the mechanism that broke, named precisely
+    # Both strings occur again in the closing aside about the stale
+    # requirements comment, so assert on the bullet that explains the
+    # mechanism rather than on the section as a whole.
+    bullet = flat[flat.index("But our adapter reached the venv") :]
+    bullet = bullet[: bullet.index("- Upstream gets")]
+    assert "driven by `setup_evals_audio()`" in bullet, (
+        "name the hook that drove the install, not just the function name"
+    )
+    assert "upstream deleted that hook" in bullet, (
+        "say it was removed upstream, or the reader looks for a local mistake"
+    )
+    assert "no `setup_function`" in bullet, (
+        "say what EVALS_AUDIO looks like now, so the claim is checkable"
+    )
+    assert "bgoelTT/lmms-eval" in flat, (
+        "name where whisper_tt comes from now; that is the pattern to follow"
+    )
+    # and the consequence of doing only half of it
+    assert "fail at model resolution" in flat
+
+
+def test_the_removed_venv_hook_is_really_gone():
+    """Assert against the tree, so this note fails if the hook comes back.
+
+    Also pins the stale comment: requirements/evals-audio.txt still points at
+    setup_evals_audio(). If someone fixes that comment upstream, the README's
+    aside about it should go too.
+    """
+    root = os.path.join(os.path.dirname(__file__), "..")
+
+    venvs = open(os.path.join(root, "workflows", "workflow_venvs.py")).read()
+    assert "setup_evals_audio" not in venvs, (
+        "the hook is back; the README's re-enablement note is stale"
+    )
+    # EVALS_AUDIO must still be declared, or the whole paragraph is moot
+    assert "WorkflowVenvType.EVALS_AUDIO" in venvs
+
+    reqs = open(os.path.join(root, "requirements", "evals-audio.txt")).read()
+    assert "bgoelTT/lmms-eval" in reqs, (
+        "the lmms-eval source moved; the README names this pin"
+    )
+    assert "setup_evals_audio()" in reqs, (
+        "the stale comment was corrected; drop the README aside about it"
+    )
+
+
+def test_the_librispeech_adapter_really_is_orphaned():
+    """Check the tree, not the prose -- and fail here if it gets rehomed.
+
+    If someone wires the adapter back into the successor catalog, the README's
+    "not reproducible" note becomes wrong and must be retired. Asserting the
+    orphan state makes that a test failure rather than stale documentation.
+    """
+    root = os.path.join(os.path.dirname(__file__), "..")
+
+    adapter = os.path.join(root, "evals", "lmms_eval_models", "qwen3_asr_openai.py")
+    if not os.path.isfile(adapter):
+        pytest.skip("the adapter has been moved or removed; revisit the README note")
+
+    successor = os.path.join(root, "reference_config", "evals", "eval_config.py")
+    catalog = open(successor).read()
+    assert "qwen3_asr_openai" not in catalog, (
+        "the adapter is referenced by the successor catalog now; the README's "
+        "'not reproducible' note is stale"
+    )
+
+
+def test_the_scan_covers_the_implementation_side_too():
+    """Scanning tests alone misses a file of ours deleted upstream.
+
+    The plugin's loss happened to take its test with it, so a test scan found
+    it. The reverse is possible and did occur here: upstream deleted
+    workflows/run_reports.py in #4630, taking our eval-only ttft fix with it,
+    and nothing failed because the v1 tests went too.
+
+    That one turned out to be obsoleted rather than lost -- functional_ttft is
+    gone from the repo entirely and the v2 audio path holds ttft as
+    Optional[float] behind an `is not None` filter instead of a dict subscript
+    -- but the scan had to exist to reach that conclusion at all.
+
+    The scan now prints four lines, not one, and each needs its own verdict.
+    The fourth is the interesting one: benchmarking/asr_openai_benchmark.py is
+    a *move* into reference_config/, not an upstream deletion, and the scan
+    cannot tell those apart -- it only asks whether the old path still exists.
+    """
+    body = _dropped_work_section()
+
+    flat = " ".join(body.split())
+
+    assert "The test scan alone is not enough" in flat, (
+        "say why a second scan is needed"
+    )
+    # the implementation scan, and it must exclude the test root it already covered
+    assert "FILE GONE" in body
+    assert 'grep -vE "^$TESTS/"' in body, (
+        "the implementation scan must skip what the test scan already did"
+    )
+    assert "[ -e \"$f\" ]" in body, "give the existence check, not a description"
+
+    # Every line the scan prints must be named *in the disposition table*, not
+    # merely somewhere in the section: `evals/eval_config.py` also appears
+    # three times in the LibriSpeech aside, so a section-wide containment
+    # check stayed green with its table row deleted -- verified by mutation.
+    rows = [line for line in body.splitlines() if line.startswith("| `")]
+    assert rows, "the dispositions must be a table, one row per printed line"
+    table = "\n".join(rows)
+    for path in (
+        "workflows/run_reports.py",
+        "evals/run_evals.py",
+        "evals/eval_config.py",
+        "benchmarking/asr_openai_benchmark.py",
+    ):
+        assert f"`{path}`" in table, (
+            f"{path} is printed by the scan but has no row giving its verdict"
+        )
+    assert "functional_ttft" in body and "Optional[float]" in body, (
+        "record what was checked before writing the file off"
+    )
+    assert "Obsoleted by the rewrite, not lost" in flat
+    # and the move must be called out as a move, since the scan cannot see it
+    assert "not an upstream deletion" in flat, (
+        "say that one line is a move; otherwise it reads as a fourth loss"
+    )
+    assert "the scan cannot tell the difference" in flat, (
+        "name the scan's blind spot, or the next reader trusts it too far"
+    )
+    assert "Do not restore the file" in flat, (
+        "state the action, or the next reader re-adds a file upstream deleted"
+    )
+    # results from all three repos, so 'clean' is a claim about the whole set
+    assert "2 in tt-metal" in body and "0 in the plugin" in body
+
+
+def test_the_readme_records_the_compilation_cost_on_the_pinned_image():
+    """The `compilation:` seconds survive the fix, and the note must say so.
+
+    This note used to predict that rebuilding past `acae5aa` "should drop most
+    of that 209 s". The rebuild was measured and it does not:
+
+      before: took 214.11 s (compilation: 208.97 s)  mode=VLLM_COMPILE
+      after:  took 218.27 s (compilation: 212.03 s)  mode=NONE
+
+    Two separate facts about one log line. `acae5aa` really does fix the mode
+    (VLLM_COMPILE -> NONE, because VllmConfig.__post_init__ derives it before
+    the platform hook runs), but the seconds are not torch.compile's: the line
+    logged immediately before is the TT adapter's own decode-trace capture
+    (`_prepare_decode_trace_text`), and vLLM's core.py labels that whole window
+    "compilation". Dropping it would mean giving up fast-dispatch/replay.
+
+    The prediction sat here unverified for dozens of iterations, so the test
+    now requires the *measured* after-value and the real cause to be present.
+    A note that only quotes the before-value would read as still-pending work.
+    """
+    readme = _readme()
+    body = readme[readme.index("A second cost sits inside that window") :]
+    body = body[: body.index("Requests use the HF repo id")]
+    flat = " ".join(body.split())
+
+    # both measurements, or the reader cannot tell what the fix changed
+    assert "208.97 s" in flat, "quote the before value"
+    assert "212.03 s" in flat, (
+        "quote the measured after value; without it the retired prediction "
+        "that the cost disappears reads as still true"
+    )
+    # Both modes must appear *in the quoted logs*, not merely in the prose
+    # around them. "CompilationMode.NONE" occurs three times in this section,
+    # so a containment check on the whole body stayed green when the after-log
+    # was mutated -- verified by changing only the fenced block.
+    blocks = re.findall(r"```\n(.*?)```", body, re.S)
+    assert len(blocks) >= 2, f"both engine-init logs must be quoted: {len(blocks)}"
+    before, after = blocks[0], blocks[1]
+    assert "CompilationMode.VLLM_COMPILE" in before and "208.97 s" in before, (
+        "the first block must be the pre-fix log"
+    )
+    assert "CompilationMode.NONE" in after and "212.03 s" in after, (
+        "the second block must be the rebuilt log: mode fixed, seconds not"
+    )
+    assert "__post_init__" in flat, "name why enforce_eager alone is not enough"
+    assert "acae5aa" in flat, "point at the fix"
+    # the actual cause of the seconds, which is what makes the number explicable
+    assert "_prepare_decode_trace_text" in flat, (
+        "name what really fills the window, or the next reader re-predicts that "
+        "a rebuild removes it"
+    )
+    # and that removing it is not desirable
+    assert "fast-dispatch/replay" in flat, (
+        "say why the cost is kept, not merely that it is there"
+    )
+    # the scope limit, so this is not read as invalidating the benchmarks
+    assert "does **not** invalidate" in body
+    assert "eager either way" in flat
+
+
+def _comment_only_filter():
+    """The comment-only grep the README tells you to run, as a Python predicate.
+
+    Mirrors `grep -vE '^[+-][[:space:]]*(#|$)'`: keep a diff line only if it is
+    neither an indented comment nor blank.
+    """
+    import re
+
+    # Built from the README's own pattern rather than restated, so a change to
+    # the documented grep is what this test exercises. BRE character classes
+    # translate directly enough for the two we use.
+    readme = _readme()
+    start = readme.index("| grep -vE '^[+-][[:space:]]")
+    quoted = readme[readme.index("'", start) + 1 :]
+    quoted = quoted[: quoted.index("'")]
+    pattern = re.compile(quoted.replace("[[:space:]]", "[ \\t]"))
+    return lambda line: not pattern.match(line)
+
+
+def test_the_comment_only_check_recognises_indented_comments():
+    """The documented grep anchored # to column 0, so it never fired in practice.
+
+    Every comment inside a function is indented, so
+
+        grep -vE '^[+-]#|^(\\+\\+\\+|---)'
+
+    let an indented comment-only diff through and reported it as a real code
+    change. That happened for real: tt/qwen3_asr_decoder.py's comment edit was
+    printed by the check, which -- taken at face value -- orders a ~7 h rebuild
+    for a diff that changes no executed byte.
+
+    The fixed form allows leading whitespace, and drops blank-line changes for
+    the same reason.
+    """
+    readme = _readme()
+    assert "[[:space:]]*" in readme, (
+        "the comment pattern must tolerate indentation, or it only matches column 0"
+    )
+    assert "^[+-]#|" not in readme, "the column-0-only form must not come back"
+    assert "load-bearing" in readme, (
+        "say why the whitespace class is there, or it gets 'simplified' away"
+    )
+
+    keep = _comment_only_filter()
+    # an indented comment-only diff must be filtered out entirely
+    for line in ("-        # old wording", "+        # new wording", "+\t# tab-indented", "+"):
+        assert not keep(line), f"{line!r} is a comment/blank change; it must be dropped"
+    # while real code must survive, indented or not
+    for line in ("+        S_pad = 1024", "-    return None", "+x = 1"):
+        assert keep(line), f"{line!r} is executable; it must be reported"
+
+
+def test_the_readme_lists_every_file_the_pin_check_prints_today():
+    """One name was listed while the command prints two.
+
+    Run at the current pins the filename filter prints both
+    tt/generator_vllm.py and tt/qwen3_asr_decoder.py. Naming only the first
+    leaves a reader who sees two files unsure whether the second is the known
+    case or a new one.
+    """
+    readme = _readme()
+    body = readme[readme.index("At the current pins the tt-metal command") :]
+    body = body[: body.index("One exception the filename filter")]
+    for name in ("tt/generator_vllm.py", "tt/qwen3_asr_decoder.py"):
+        assert name in body, f"{name} is printed by the check; name it"
+    assert "the pin stays" in body
+
+
+def _readme_row(readme, leading_cell):
+    for line in readme.splitlines():
+        if line.startswith(f"| {leading_cell}"):
+            return line
+    raise AssertionError(f"no table row for {leading_cell} in the README")
+
+
+def test_the_readme_warns_that_the_snapshot_default_is_a_literal_sha():
+    """SNAP's default hardcodes a revision, and the guard exits if it moves.
+
+    The script has
+      SNAP="${SNAP:-$HOME/.cache/.../snapshots/987bda16...}"
+    with no glob, and the pre-flight loop requires every path to exist. So a
+    re-download at a newer revision does not fall back to the new snapshot --
+    it makes the supervisor exit with "missing path" before launching, which
+    reads as a broken install rather than a stale default.
+    """
+    readme = _readme()
+    supervisor = _supervisor()
+
+    # the default really is a literal revision, or this warning is stale
+    assert "snapshots/987bda16" in supervisor, (
+        "SNAP's default no longer pins a revision; update the README note"
+    )
+    assert '"$SNAP"' in supervisor, "SNAP must be covered by the missing-path guard"
+
+    row = _readme_row(readme, "`SNAP`")
+    assert "987bda16" in row, "show that the default names one revision"
+    assert "override `SNAP`" in row, (
+        "say what to do when the revision moves, not just that it can"
+    )
+    # ...and that naming it is not by itself what makes it be used. The row
+    # said only "passed as MODEL_WEIGHTS_DIR", which was true and insufficient:
+    # that variable is read on the local-source branch alone.
+    assert "MODEL_SOURCE=local" in row and "--host-weights-dir" in row, (
+        "name every part the pin needs; MODEL_WEIGHTS_DIR alone did nothing"
+    )
+    assert "defaults to `huggingface`" in row, (
+        "say why the other two are required, or they look redundant"
+    )
+
+
+def test_the_readme_ties_the_canary_clip_to_the_documented_one():
+    """"the clip from above" was not checked to be that clip.
+
+    Measured: $HOME/real_ja.wav and the runbook's clip are the same bytes,
+    md5 3d43ec3ac2562231ec7c8c9ce4087ba4. Worth recording because the canary
+    passes on any 200 with a "text" field, so a swapped file would keep the
+    supervisor green while removing the one place a wrong transcript is
+    visible.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "`CANARY_WAV`")
+    assert "3d43ec3ac2562231ec7c8c9ce4087ba4" in row, (
+        "identify the clip by hash, not by reference to another section"
+    )
+    # and be honest that the check itself does not verify the transcript
+    assert "does not depend on the transcript" in row
+
+
+def test_the_readme_and_supervisor_agree_on_the_startup_time():
+    """The README said "~12 minutes"; the script said 7-12 and sized for 20.
+
+    Timed on the delivery p150, /health turned 200 at 460 s -- 7.7 min. A
+    single "~12" figure is wrong in both directions: it overstates a normal
+    start, and it reads as a ceiling when the supervisor deliberately allows 20
+    minutes because the observed range has an upper end it must not trip over.
+
+    Pin the range and the measured point in both places, so a future timing
+    that lands at one end does not get written up as the new single truth.
+    """
+    readme = _readme()
+    supervisor = _supervisor()
+
+    flat = " ".join(readme.split())
+    assert "7-12 min" in flat, (
+        "quote the cold-start range; a single figure is wrong at both ends"
+    )
+    assert "460 s" in flat, "record the timed measurement behind the range"
+
+    # The fast end is not a fluke and must not be presented as the norm
+    # either: it depends on the kernel cache surviving in a docker volume.
+    assert "140 s" in flat, "record the warm-start measurement too"
+    assert "kernel cache" in flat, (
+        "name what decides which end you get, or a 140 s start looks wrong"
+    )
+    assert "volume_id_tt_vllm_plugin" in flat, (
+        "identify the volume, so the cold case can be reproduced on purpose"
+    )
+
+    # the script's own budget must stay above the range, and say why
+    assert "7-12 minutes" in supervisor
+    assert "20 * 60" in supervisor, (
+        "the budget has to exceed the range's upper end, not match a lucky run"
+    )
+    assert "460 s" in supervisor, (
+        "carry the same measurement, so the two cannot drift apart silently"
+    )
+
+
+def test_the_readme_does_not_treat_a_printed_filename_as_a_verdict():
+    """"If either prints anything, bump that pin" contradicts the next check.
+
+    Run at the current pins, the tt-metal command is *not* silent -- it prints
+    tt/generator_vllm.py, because a commit rewrote the ND-hang issue references
+    inside a comment block. Read literally, the old sentence orders a ~7 h
+    rebuild that cannot change a single executed byte; the comment-only check
+    immediately below then says the opposite.
+
+    The two are a sequence, not alternatives, and the README has to say so --
+    with the file it actually prints, so the reader recognises the situation
+    instead of assuming they have hit a new problem.
+    """
+    readme = _readme()
+    body = readme[readme.index("Before leaving a pin behind its branch head") :]
+    body = body[: body.index("The extra tt-metal exclusions")]
+
+    assert "not yet a verdict" in body, (
+        "a printed filename only starts the check; say so"
+    )
+    # The sentence, not the word. `"both" in body` was also satisfied by "both
+    # commits rewrote comment blocks" two paragraphs down, so removing the
+    # statement that the checks are a sequence left this green.
+    flat = " ".join(body.split())
+    assert "Only a file that survives *both* forces the pin to move." in flat, (
+        "state that a file must survive both checks, not just one"
+    )
+    # the worked example, named, so the current output is recognisable
+    assert "tt/generator_vllm.py" in body, (
+        "name the file the check prints today, or its output looks like a fault"
+    )
+    assert "the pin stays" in body
+    # and that the plugin side really is silent, which is the contrast
+    assert "plugin command does print nothing" in body
+BRING_UP_BRANCH = "nyoshifujiTT/qwen3-asr-17b_p150x1"
+
+
+def _readme():
+    return open(
+        os.path.join(os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "README.md")
+    ).read()
+
+
+def test_the_readme_names_the_branch_the_forks_must_carry():
+    """The clone URLs are useless without knowing which branch holds the pins."""
+    readme = _readme()
+    assert BRING_UP_BRANCH in readme, "the bring-up branch name must be documented"
+    for repo in ("nyoshifujiTT/tt-metal", "nyoshifujiTT/vllm-tt-plugin"):
+        assert repo in readme, f"{repo} must be listed with its branch"
+
+
+def test_the_readme_says_what_vllm_commit_names():
+    """The field name says vLLM but the value is a plugin commit.
+
+    Without the note the next reader pins a tenstorrent/vllm SHA, which does
+    not exist in the plugin repo, and the build fails at `git checkout`.
+    """
+    readme = _readme()
+    assert "What `vllm_commit` names" in readme
+    assert "vllm-tt-plugin" in readme, "the repo actually cloned must be named"
+    assert "the plugin pins" in readme, (
+        "record that the fork's HF-config fix already ships in the vLLM the "
+        "plugin pins; do not hardcode the version, which moves with upstream"
+    )
+
+def test_the_readme_says_which_clip_to_sanity_check_with():
+    """A bare "clip.wav" leaves the reader to grab any file they can find.
+
+    During bring-up that meant synthetic fixtures with no reference transcript
+    got picked up by others as if they were sanity clips.
+    """
+    readme = _readme()
+    assert "The clip to check with" in readme
+    assert "google/fleurs" in readme, "the clip must be fetchable, not copied around"
+    assert "ja_jp" in readme and "test" in readme, "the exact split must be pinned"
+    # the reference transcript must be present, or the output cannot be judged
+    assert "インターネットで" in readme, "the reference transcript must be quoted"
+
+
+def test_the_readme_does_not_overstate_the_16khz_requirement():
+    """16 kHz is where the mel front-end is calibrated, not an API constraint.
+
+    Stating it as an input requirement makes callers build conversion they do
+    not need, and hides that the served path already resamples and downmixes
+    (measured: 44.1 kHz mono/stereo and 16 kHz stereo all return the golden
+    transcript).
+    """
+    readme = _readme()
+    assert "preprocessor_config.json" in readme, "cite where 16 kHz comes from"
+    assert "not a requirement on" in readme.replace("*", ""), (
+        "the README must say the client is not required to convert"
+    )
+    assert "44.1 kHz" in readme, "the measurement that proves it must be recorded"
+
+
+def test_the_readme_rejects_the_synthetic_fixtures_for_accuracy():
+    """ja_words.wav / test15s.wav have no reference transcript.
+
+    They were made during bring-up (a word concatenation for TT-vs-CPU decoder
+    comparison, and the looped-English warmup waveform). Judging accuracy with
+    either is meaningless, so the README has to say so explicitly.
+    """
+    readme = _readme()
+    for fixture in ("ja_words.wav", "test15s.wav"):
+        assert fixture in readme, f"{fixture} must be called out"
+    assert "Do not use" in readme
+    assert "QWEN3ASR_WARMUP_WAV" in readme, "say what test15s.wav actually is"
+
+
+def test_the_readme_clones_from_the_forks_only():
+    """The recipe itself must clone from the forks, with no loopback detour.
+
+    While the branches were local-only the images were built against a git
+    daemon on the docker host, and the README documented that detour as part of
+    the recipe. An image built from a daemon on one machine is not reproducible
+    by anyone else, so the plumbing had to leave the instructions: a reader
+    must not be told to set it up.
+
+    The results section may still *state* that the current image was built that
+    way -- that is a fact about what was run, not an instruction -- so this
+    check is scoped to the build recipe rather than the whole file.
+    """
+    readme = _readme()
+    recipe = readme[: readme.index("Measured on the delivery p150")]
+    for leftover in (
+        "If a branch is not pushed yet",
+        "git daemon",
+        "git://172.17.0.1:9418",
+        "/tmp/ttmetal-src.git",
+        "/tmp/vllmttplugin-src.git",
+    ):
+        assert leftover not in recipe, (
+            f"{leftover!r} is loopback plumbing from before the branches were "
+            "pushed; the recipe must clone from the forks"
+        )
+
+    # what must remain: both clones aimed at the pushed forks
+    assert "nyoshifujiTT/tt-metal.git" in recipe
+    assert "nyoshifujiTT/vllm-tt-plugin.git" in recipe
+
+
+def test_the_current_pin_is_not_itself_listed_as_superseded():
+    """Guard the bookkeeping: bumping the pin must also retire the old entry."""
+    metal, _ = _patched_pins(_readme())
+    assert metal not in SUPERSEDED_TT_METAL_COMMITS, (
+        f"the active pin {metal} is listed as superseded"
+    )
+
+
+def test_the_readme_patch_applies_to_the_committed_dockerfile():
+    """A runbook patch that does not apply is worse than no runbook.
+
+    An earlier bring-up shipped a patch whose line numbers had drifted after an
+    upstream merge, so the documented build failed with "patch does not apply".
+    Extract the block the README tells the reader to pipe into `git apply` and
+    check it against the tree.
+    """
+    import re
+    import subprocess
+
+    readme = _readme()
+    match = re.search(r"git apply <<'PATCH'\n(.*?)\nPATCH\n", readme, re.DOTALL)
+    assert match, "the README must carry the clone-URL patch as a git apply block"
+    patch = match.group(1) + "\n"
+
+    root = os.path.join(os.path.dirname(__file__), "..")
+    result = subprocess.run(
+        ["git", "apply", "--check", "-"],
+        input=patch,
+        text=True,
+        cwd=root,
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        f"the README patch does not apply to the committed tree: {result.stderr}"
+    )
+
+
+def test_the_readme_patch_redirects_both_clones_to_the_forks():
+    """Either half missing produces an image that cannot serve the model."""
+    readme = _readme()
+    assert "nyoshifujiTT/tt-metal.git" in readme, (
+        "without the tt-metal half the image lacks the vLLM adapter"
+    )
+    assert "nyoshifujiTT/vllm-tt-plugin.git" in readme, (
+        "without the plugin half the TT adapter is never registered"
+    )
+
+
+def test_the_readme_says_the_patch_is_the_only_one():
+    """The pins are committed source; nothing under workflows/ is touched."""
+    readme = _readme()
+    assert "The one manual patch" in readme
+    assert "git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile" in readme, (
+        "the patch must be restored after the build, as PR#4837 does"
+    )
+    assert "no build arg" in readme, (
+        "record that clone-URL build args were withdrawn, so they are not "
+        "reintroduced as a shortcut"
+    )
+
+
+def test_the_readme_describes_the_merged_upstream_relationship():
+    """Both server and plugin have upstream merged; saying otherwise misleads.
+
+    Earlier revisions of this section described the branch as trailing main,
+    then as deliberately holding the plugin back from vLLM 0.26.0. Both stopped
+    being true when the merges landed, and a reader would either look for
+    deleted directories or re-do an upgrade that is already done.
+
+    What remains genuinely unfollowed is tt-metal, and the reason has to stay.
+    """
+    readme = _readme()
+    assert "Relationship to upstream" in readme
+    # stale claims must not come back
+    assert "725 commits" not in readme
+    assert "no `workflows/model_specs/` at all" not in readme
+    assert "stays on its current base" not in readme, (
+        "the plugin no longer holds back from upstream"
+    )
+    # the one real exception, with its reason
+    assert "upstream/yito/qwen3_asr_pr" in readme
+    # And the executor still has to be justified, since upstream ships none.
+    #
+    # Not `"0.26.0" in readme`: the version appears three times in this file
+    # (the release the plugin pins, the range the merge moved through, and the
+    # executor's justification), so deleting the justification left this green.
+    # Require the sentence that carries the reason instead.
+    assert "TTUniProcExecutor" in readme
+    flat = " ".join(readme.split())
+    assert "async output thread was removed in 0.24.0 and has not returned in 0.26.0" in flat, (
+        "the executor exists because upstream dropped the async output thread "
+        "and has not restored it; say so, or it reads as an unexplained fork"
+    )
+
+
+def test_the_readme_backs_the_vllm_upgrade_with_measurements():
+    """Moving two vLLM releases is only safe if it was measured.
+
+    The plugin merge took the installed vLLM from 0.24.0 to 0.26.0 and dropped
+    three of our commits. Without the numbers a reader cannot tell whether that
+    preserved behaviour.
+    """
+    readme = _readme()
+    section = readme[readme.index("Relationship to upstream") :][:2500]
+    assert "0.1002" in section and "0.1668" in section, (
+        "both corpus CERs must be quoted across the upgrade"
+    )
+    assert "12.61" in section, "the post-upgrade throughput must be recorded"
+
+
+def test_the_readme_does_not_claim_the_old_layout():
+    """Directories the merge removed must not be presented as current.
+
+    Checked against the tree rather than from memory, because the original
+    list was wrong on all three counts:
+
+      evals/                  still exists -- reduced to lmms_eval_models/,
+                              which holds our orphaned qwen3_asr_openai
+                              adapter. Naming it is required, not forbidden.
+      benchmarking/           only a stale __pycache__ remains; no source.
+      workflows/model_spec.py still exists and is imported by
+                              reference_config/evals/eval_config.py and
+                              workflow_module/model_catalog.py.
+
+    So the rule cannot be "these strings must be absent". What matters is that
+    the README does not present the *old eval/benchmark layout* as the place
+    to run things, which the paths below cover.
+
+    The implementation was stricter than that rule and it broke on a
+    legitimate use: the dropped-work section has to *name* the retired paths
+    in order to disposition them ("this one is a move into reference_config/,
+    not a loss"). Banning the string outright forbids explaining it. So the
+    ban is scoped to run positions -- `python3 <path>` -- which is what the
+    docstring actually describes.
+    """
+    readme = _readme()
+    root = os.path.join(os.path.dirname(__file__), "..")
+
+    # Paths with no source left: telling a reader to *run* them is stale.
+    for gone in ("benchmarking/asr_openai_benchmark.py", "evals/run_evals.py"):
+        assert not re.search(rf"python3?\s+{re.escape(gone)}", readme), (
+            f"{gone} has no source in the tree; it must not be given as a "
+            f"command to run"
+        )
+        assert not os.path.exists(os.path.join(root, gone)), (
+            f"{gone} exists again; this assertion is now wrong"
+        )
+
+    # The current homes must be the ones quoted.
+    assert "reference_config/evals/asr_ja_eval.py" in readme
+    assert "reference_config/benchmarking/asr_openai_benchmark.py" in readme
+
+    # And model_spec.py is current, so requiring its absence was simply false.
+    assert os.path.isfile(os.path.join(root, "workflows", "model_spec.py"))
+
+
+def test_the_readme_says_the_fork_is_deprecated():
+    """The fork is not an alternative route; it is retired upstream.
+
+    tenstorrent/vllm's README says "This repository is deprecated. Do not use
+    it", TT issues are redirected to vllm-tt-plugin, and tt-inference-server
+    switched off it in PR #4907 (merged into this branch). An earlier revision
+    of this file presented fork and plugin as two supported routes, which would
+    send a reader to a repository that is scheduled for archival.
+    """
+    readme = _readme()
+    assert "deprecated" in readme, "the fork's status must be stated"
+    assert "#4907" in readme, "cite the upstream switch this branch merged"
+    assert "one supported route" in readme, (
+        "the README must not present the fork as a live alternative"
+    )
+    assert "Both vLLM routes are still supported" not in readme
+
+
+def test_the_readme_backs_the_switch_with_measurements():
+    """"Nothing is lost" is a claim about accuracy, so it needs numbers.
+
+    Without them the next reader cannot tell whether the fork was dropped after
+    verification or on reasoning alone.
+
+    Scoped to the evidence section. Both CERs appear six and four times across
+    the file -- results table, per-round records, the upgrade note -- so a
+    whole-file check was satisfied by any of them and said nothing about the
+    switch. What has to be here is the side-by-side, which is the only place
+    the two routes are compared.
+    """
+    readme = _readme()
+    section = readme[readme.index("Evidence that the move changed no output") :]
+    section = section[: section.index("\n#### ")]
+    for name, cer in (("TED 509 CER", "0.1002"), ("MagicHub 600 CER", "0.1668")):
+        row = next(
+            (ln for ln in section.splitlines() if ln.startswith(f"| {name} |")), None
+        )
+        assert row, f"the {name} row must be in the evidence table"
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        assert len(cells) == 3, f"both routes must be shown: {row}"
+        assert cer in cells[1] and cer in cells[2], (
+            f"{name} must be quoted for BOTH routes, or the table does not show "
+            f"the switch preserved it: {row}"
+        )
+
+
+def test_the_readme_keeps_the_migration_evidence():
+    """"Nothing was lost" is a claim about accuracy, so it needs both columns.
+
+    The fork run is kept as the record that the move preserved output. Quoting
+    only the plugin numbers would leave the claim uncheckable.
+    """
+    readme = _readme()
+    # Bound by the next heading rather than by a character count: the fixed
+    # 2500-char window silently excluded the closing sentence as soon as the
+    # LibriSpeech note above it grew.
+    section = readme[readme.index("Evidence that the move changed no output") :]
+    section = section[: section.index("\n#### ")]
+    assert "0.1002" in section and "0.1668" in section, (
+        "both corpora must be shown, since one alone would not show parity"
+    )
+    assert "12.73" in section and "11.97" in section, (
+        "both routes' measured throughput must be shown"
+    )
+    assert "not an invitation to run the fork" in section, (
+        "the table must not read as a supported configuration"
+    )
+
+
+def test_the_prod_catalog_has_no_committed_qwen3_asr_entry():
+    """The prod entry exists only inside the runbook patch.
+
+    Prod is written by promote_dev_spec_to_prod.py for leaves listed in the CI
+    config; a bring-up is not one, so committing an entry there would forge a
+    release artifact. The patch adds it for the build and reverts it.
+    """
+    prod = (
+        get_repo_root_path() / "workflows" / "model_specs" / "prod" / "audio_tts.yaml"
+    ).read_text()
+    assert "Qwen3-ASR" not in prod, (
+        "the prod catalog must stay free of the bring-up entry; it belongs in "
+        "the temporary build patch only"
+    )
+
+
+def test_the_readme_explains_why_prod_is_patched():
+    """Editing prod needs a stated reason, or it reads as a violation."""
+    readme = _readme()
+    assert "promote_dev_spec_to_prod.py" in readme, (
+        "name the tool that normally owns prod entries"
+    )
+    assert "models-ci-config.json" in readme, (
+        "say why promotion cannot produce this entry"
+    )
+    assert "never committed" in readme
+    assert "git checkout" in readme and "prod/audio_tts.yaml" in readme, (
+        "the revert step must cover the prod file too"
+    )
+
+
+def test_the_runbook_image_tag_carries_the_repo_version():
+    """The tag the runbook starts must be the one the build produces.
+
+    build_docker_images.py prefixes the image tag with the repo VERSION, so
+    merging upstream (which bumped VERSION) silently invalidates a hardcoded
+    tag: the reader builds 0.21.0-... and then tries to start 0.13.0-... .
+    """
+    version = (get_repo_root_path() / "VERSION").read_text().strip()
+    readme = _readme()
+    metal, vllm = _patched_pins(readme)
+    expected = f"{version}-{metal}-{vllm}"
+    assert expected in readme, (
+        f"the runbook must reference the image tag the build produces "
+        f"({expected}); a stale VERSION prefix points at an image that was "
+        "never built"
+    )
+
+
+def test_the_spec_emits_additional_config_not_override_tt_config():
+    """TT plugin config must reach vLLM as --additional-config.
+
+    ``override_tt_config`` is not a vLLM CLI flag; emitting it into vllm_args
+    makes the arg parser reject an unrecognized ``--override_tt_config``. The
+    older spec format did emit it, and this bring-up carried a fold-in step in
+    run_vllm_api_server.py to compensate. Upstream now serializes
+    ``additional_config`` directly, so that step was deleted -- this test fails
+    if the old shape returns and the deletion silently breaks serving.
+    """
+    spec_src = (
+        get_repo_root_path() / "workflows" / "model_spec.py"
+    ).read_text()
+    assert '"additional_config": json.dumps({"tt": self.override_tt_config})' in spec_src
+    assert '"override_tt_config": json.dumps(' not in spec_src, (
+        "override_tt_config must not be serialized into vllm_args; it is not a "
+        "vLLM CLI flag"
+    )
+
+    server_src = (
+        get_repo_root_path() / "vllm-tt-metal" / "src" / "run_vllm_api_server.py"
+    ).read_text()
+    assert "override_tt_config" not in server_src, (
+        "the fold-in step is dead code once the spec emits additional_config"
+    )
+
+
+def test_the_readme_documents_how_to_measure():
+    """A serving runbook that cannot be verified is half a runbook.
+
+    Accuracy and throughput were the acceptance criteria for this bring-up, so
+    the commands that produce them have to be written down -- otherwise the
+    numbers quoted elsewhere in this file cannot be reproduced by the reader.
+    """
+    readme = _readme()
+    assert "### 4. Eval and benchmark" in readme
+
+    # Scoped to the "### 4." chapter -- its subsections included, since that is
+    # where the commands and their results live. A whole-file check said
+    # nothing (both CERs occur several times elsewhere), and bounding at the
+    # next `#### ` was too tight: `### 4.` opens by explaining why the upstream
+    # harnesses do not fit, and only its subsections name ours and quote the
+    # numbers.
+    chapter = readme[readme.index("### 4. Eval and benchmark") :]
+    next_chapter = re.search(r"\n## ", chapter)
+    assert next_chapter, "the chapter must be bounded by a following ## heading"
+    chapter = chapter[: next_chapter.start()]
+
+    assert "asr_ja_eval.py" in chapter, "the corpus CER harness must be named"
+    assert "asr_openai_benchmark.py" in chapter, (
+        "the throughput harness must be named"
+    )
+    # the measured results, so a rerun can be compared against something
+    assert "0.1002" in chapter and "0.1668" in chapter, (
+        "the chapter that documents the harnesses must also record what they "
+        "measured, or the commands produce numbers with nothing to compare to"
+    )
+
+
+def test_the_readme_gives_a_runnable_check_for_the_import_graph_claim():
+    """"nothing the server loads imports those modules" was only reasoning.
+
+    The pin-lag argument rests entirely on tests/ being outside the import
+    graph, and that was supported by describing where packages resolve. It is
+    directly observable instead: CPython writes __pycache__ only for modules it
+    imports, so on a container that has served the corpus runs, tt/ carries
+    .pyc files and tests/__pycache__ does not exist at all.
+
+    Without the check in the README, the next person deciding whether to spend
+    a ~7 h rebuild has an argument to weigh rather than a command to run.
+    """
+    readme = _readme()
+    section = readme[readme.index("What makes a test-only commit safe") :]
+    section = section[: section.index("\n## ")]
+    assert "__pycache__" in section, (
+        "name the artifact that proves import, not just the resolution rules"
+    )
+    # the contrast is the evidence: one exists, the other does not
+    assert "No such file or directory" in section, (
+        "show that tests/__pycache__ is absent; a listing of tt/ alone proves nothing"
+    )
+    assert "never imported" in section
+
+
+def test_the_readme_reports_what_the_perf_probes_measured():
+    """The runbook told you to run them and never said what they returned.
+
+    Both probes are documented with their positional arguments, and the
+    section promises "TTFT, prefill, decode TPS and TPS/user" -- but the
+    results table listed only CER and rtfx. With no recorded numbers there is
+    nothing to compare a rerun against, which is the whole reason the probes
+    are committed rather than described.
+
+    Measured, 60 requests at concurrency 4 on the FLEURS clip, with the
+    streaming probe counting tokens rather than SSE frames:
+      non-streaming  TTFT 1.170 s, decode TPS/user 23.31, aggregate 42.54
+      streaming      TTFT 1.324 s, decode TPS/user 24.24, aggregate 41.50
+    """
+    readme = _readme()
+    section = readme[readme.index("Serving-level timings") :]
+    section = section[: section.index("**No image exists at these pins yet.**")]
+
+    # both probes' headline numbers, not just one column
+    for value in ("1.170", "1.324", "23.31", "24.24", "42.54", "41.50"):
+        assert value in section, (
+            f"{value} was measured; record it or a rerun has no baseline"
+        )
+    assert "60 / 60" in section, "say how many requests the numbers came from"
+    # the superseded frame-counted figures must not linger as if current
+    for stale in ("22.22", "39.52"):
+        assert stale not in section, (
+            f"{stale} was measured in SSE frames, not tokens; it is not a baseline"
+        )
+
+
+def test_the_readme_explains_the_gap_between_the_two_probes():
+    """Two columns that differ with no stated reason read as a contradiction.
+
+    The streaming column is consistently the slower one on latency, which is
+    expected: SSE framing and scheduling land on the client's clock but not on
+    the decode counters.
+
+    This test used to also REQUIRE the sentence "the final chunk carries no new
+    token" as the explanation for the one-token gap in tokens-per-request. That
+    was a false claim being held in place by its own test: the streaming
+    figure was a count of SSE frames, not tokens, so there was no off-by-one to
+    explain -- just two different units. Requiring the explanation is what kept
+    the unit bug invisible, which is exactly the failure mode a test is
+    supposed to prevent.
+    """
+    readme = _readme()
+    section = readme[readme.index("Serving-level timings") :]
+    section = section[: section.index("**No image exists at these pins yet.**")]
+    assert "SSE framing" in section, "say why the client-side number is higher"
+    # and a threshold, so "agrees" is not left to taste
+    assert "tens of percent" in section, (
+        "state how large a gap stops being framing overhead"
+    )
+    # the retracted explanation may only survive as the quotation inside its
+    # own correction
+    flat = " ".join(section.split())
+    if "final chunk carries no new token" in flat:
+        i = flat.index("final chunk carries no new token")
+        assert "described a coincidence" in flat[i : i + 200], (
+            "that sentence is retracted; it may only appear where it is retracted"
+        )
+
+
+def test_the_readme_says_why_the_upstream_audio_harness_is_not_used():
+    """Otherwise the next reader re-discovers the 400 the hard way.
+
+    test_module's generic audio path POSTs a JSON body and drops the /v1
+    prefix, because it targets tt-media-server. vLLM's OpenAI-compatible
+    endpoint wants multipart, and rejects that shape.
+    """
+    readme = _readme()
+    section = readme[readme.index("### 4. Eval and benchmark") :]
+    assert "_is_whisper" in section, "name the branch that excludes this model"
+    assert "multipart" in section, "state what the endpoint actually accepts"
+    assert "400" in section, "record the observed failure, not just the theory"
+
+
+def test_the_readme_says_how_to_restart_the_server():
+    """A second run.py over a live container fails, and /health hides it.
+
+    The documented launch publishes 8110. Run again without stopping the old
+    container and run.py raises "Docker container failed to start." while the
+    previous container keeps answering, so /health stays 200 and the restart
+    looks successful. Observed during a bring-up rerun: the eval suite was then
+    driven against the very container that was being restarted.
+    """
+    readme = _readme()
+    section = readme[readme.index("### 3. Run") :]
+    section = section[: section.index("### 4.")]
+    assert "Docker container failed to start." in section, (
+        "quote the error, or the reader cannot recognise it"
+    )
+    assert "docker stop $(docker ps -q)" in section, "give the command that fixes it"
+    assert "not confirmed by `/health`" in section or "not confirmed\nby `/health`" in section, (
+        "say that /health cannot distinguish a restart from the old container"
+    )
+    assert "docker ps" in section, "and name the check that can"
+
+
+def test_the_readme_quantifies_the_first_transcription():
+    """"can take minutes" is not enough to size a timeout against.
+
+    Measured after a device reset on this host: 6m33.591s for the first
+    transcription and 1.223s for the second. A curl --max-time 300 -- an
+    entirely reasonable-looking choice against a "minutes" warning -- cannot
+    survive it, and when curl gives up the request looks like it disappeared.
+    That misreading cost three container restarts during this bring-up before
+    the request was simply waited out.
+    """
+    readme = _readme()
+    section = readme[readme.index("The very first transcription JIT-compiles") :]
+    section = section[: section.index("non-deterministic device hang")]
+    assert "6m33" in section, "quote the measured worst case, not just 'minutes'"
+    assert "0m1.223s" in section, "and the second request, so the gap is visible"
+    # The instruction itself, not merely the words somewhere in the section:
+    # both "--max-time" and "7 minutes" also occur further down in the same
+    # block, so a bare containment check survived deleting the instruction.
+    flat = " ".join(section.split())
+    assert "Budget 7 minutes for it, and do not put a shorter `--max-time` on that request." in flat, (
+        "state the budget and the timeout warning as one instruction"
+    )
+    assert "cannot survive that" in flat, (
+        "say what happens when the timeout is shorter -- curl gives up and the "
+        "request looks like it vanished"
+    )
+
+
+def test_the_readme_separates_startup_warmth_from_the_first_request():
+    """A warm cache gets /health up fast and says nothing about the first clip.
+
+    The startup table quotes 140 s for a warm kernel cache, which reads as "the
+    machine is ready". A device reset still leaves the first transcription to
+    recompile, so the two costs have to be stated as separate.
+    """
+    readme = _readme()
+    section = readme[readme.index("The very first transcription JIT-compiles") :]
+    section = section[: section.index("non-deterministic device hang")]
+    assert "separate" in section, "say the two costs are distinct"
+    assert "does not imply" in section, "and that one does not predict the other"
+
+
+def test_the_readme_says_why_the_process_view_cannot_settle_it():
+    """Both the log and the CPU look the same during a compile and a wedge."""
+    readme = _readme()
+    section = readme[readme.index("The very first transcription JIT-compiles") :]
+    section = section[: section.index("non-deterministic device hang")]
+    assert "Running: 0 reqs" in section, "the scheduler shows nothing either way"
+    assert "is a warning, not a stopping point" in section, (
+        "the trace-allocator line is the last thing logged; say it is benign"
+    )
+    assert "neither reading distinguishes it" in section, (
+        "spinning vs idle CPU does not separate the two cases"
+    )
+
+
+def test_the_restart_note_uses_the_holder_check_that_works():
+    """lsof misses a containerised holder; the runbook must not recommend it.
+
+    asr_supervisor.sh walks /proc for exactly this reason -- a container has
+    its own device node, so `lsof -t /dev/tenstorrent/*` reports the device
+    free while the fd is open. A restart note that told the reader to use lsof
+    would send them to the one check that cannot see the blocker.
+    """
+    readme = _readme()
+    section = readme[readme.index("### 3. Run") : readme.index("### 4.")]
+    assert "/proc/[0-9]*/fd" in section, "the holder check must walk /proc"
+    assert "Starting devices in cluster" in section, (
+        "name the symptom a surviving holder produces"
+    )
+    supervisor = _supervisor()
+    assert "/proc/[0-9]*/fd" in supervisor, (
+        "the supervisor's holder check moved; the runbook points at it"
+    )
+
+
+def test_the_readme_records_both_upstream_audio_failures():
+    """The 400 alone suggests the /v1 prefix is the whole problem.
+
+    Measured against the running server, the upstream shape fails twice over:
+
+      POST /audio/transcriptions      (as eval_command builds it) -> 404
+      POST /v1/audio/transcriptions   (prefix fixed by hand)      -> 400
+
+    Recording only the 400 invites the next reader to "just add the /v1" and
+    find the route exists but still rejects the body, because vLLM parses
+    `file` as an upload rather than a base64 string. Both numbers, and the
+    order they appear in, are what says the fix is a harness feature and not a
+    one-line URL change.
+    """
+    readme = _readme()
+    section = readme[readme.index("### 4. Eval and benchmark") :]
+    section = section[: section.index("Corpus accuracy")]
+    assert "404" in section, (
+        "the path the harness actually builds 404s; record it, or the 400 reads "
+        "as the only obstacle"
+    )
+    assert "400" in section
+    # tie each code to the path that produces it, not just list both codes
+    prefixless = section[section.index("404") - 200 : section.index("404")]
+    assert "/audio/transcriptions" in prefixless and "no `/v1`" in prefixless, (
+        "say which request 404s"
+    )
+    assert "not enough" in section, (
+        "state that correcting the prefix does not make the harness work"
+    )
+
+
+def test_the_runbook_sets_the_dev_catalog_when_serving():
+    """run.py resolves specs through MODEL_SPECS_ENV, which defaults to prod.
+
+    Qwen3-ASR lives only in the dev catalog, so without this the documented
+    command exits saying the model is unknown.
+    """
+    readme = _readme()
+    run_section = readme[readme.index("### 3. Run") : readme.index("### 4. Eval")]
+    assert "MODEL_SPECS_ENV=dev python3 run.py" in run_section, (
+        "the serving command must select the dev catalog"
+    )
+
+
+def test_trace_mode_travels_in_override_tt_config_not_a_duplicate_flag():
+    """TT plugin settings belong in override_tt_config, not a raw vllm_arg.
+
+    The base spec always emits additional_config from override_tt_config.
+    Setting "additional-config" directly in vllm_args does not replace that --
+    the two keys differ by a hyphen -- so the server was launched with both
+    --additional_config '{"tt": {}}' and --additional-config '{"tt":
+    {"trace_mode": "decode_only"}}'. vLLM happened to honour the later one, so
+    the trace mode was right by luck rather than by construction.
+    """
+    specs = _dev_specs()
+    for spec_id in ASR_SPEC_IDS:
+        args = specs[spec_id].device_model_spec.vllm_args
+        assert "additional-config" not in args, (
+            "hyphenated additional-config duplicates the generated "
+            "additional_config; put TT settings in override_tt_config"
+        )
+        assert '"trace_mode": "decode_only"' in args["additional_config"], (
+            "the decode-only trace mode must reach vLLM through the generated "
+            "additional_config"
+        )
+
+
+def test_the_runbook_patch_carries_the_same_trace_mode_form_as_the_dev_spec():
+    """The prod entry the runbook adds is what a release build actually reads.
+
+    The dev catalog was moved to override_tt_config, but the temporary prod
+    entry inside the runbook's git-apply patch kept the hyphenated
+    "additional-config" vllm_arg. Anyone building from the runbook would then
+    get the duplicated flag the dev spec was fixed to avoid, with the correct
+    value surviving only because vLLM happens to take the later one.
+    """
+    readme = _readme()
+    patch = readme[readme.index("git apply <<'PATCH'") : readme.index("\nPATCH\n")]
+    assert "additional-config" not in patch, (
+        "the runbook's prod entry must not set the hyphenated vllm_arg; it "
+        "duplicates the additional_config the base spec generates"
+    )
+    assert "+      override_tt_config:" in patch
+    assert "+        trace_mode: decode_only" in patch
+
+def _supervisor():
+    return (
+        get_repo_root_path() / "scripts" / "qwen3_asr" / "asr_supervisor.sh"
+    ).read_text()
+
+
+def _launch_flags():
+    """The long flags actually passed on the supervisor's run.py line."""
+    sh = _supervisor()
+    launch = sh[sh.index("launch_server()") : sh.index("wait_healthy()")]
+    code = "\n".join(
+        line for line in launch.splitlines() if not line.lstrip().startswith("#")
+    )
+    return set(re.findall(r"(--[a-z0-9][a-z0-9-]+)", code))
+
+
+def _run_py_option_strings():
+    """Every option string run.py's parser actually declares.
+
+    parse_arguments() builds the parser, so the strings are collected by
+    recording add_argument while it runs rather than by reading the source.
+    """
+    import argparse
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "run_py_under_test", str(get_repo_root_path() / "run.py")
+    )
+    run_py = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run_py)
+
+    known = set()
+    original = argparse.ArgumentParser.add_argument
+
+    def recording(self, *args, **kwargs):
+        known.update(a for a in args if isinstance(a, str) and a.startswith("-"))
+        return original(self, *args, **kwargs)
+
+    argparse.ArgumentParser.add_argument = recording
+    try:
+        run_py.parse_arguments()
+    except SystemExit:
+        # parse_arguments() parses sys.argv; the parser is fully built by then,
+        # which is all the callers need.
+        pass
+    finally:
+        argparse.ArgumentParser.add_argument = original
+
+    assert "--tt-device" in known, (
+        "the recording did not capture run.py's options; every check built on "
+        "this would pass vacuously"
+    )
+    return known
+
+
+def _readme_run_py_flags():
+    """The long flags the runbook's own run.py commands tell a reader to pass."""
+    flags = set()
+    for block in re.findall(r"```(?:bash|sh)?\n(.*?)```", _readme(), re.S):
+        if "run.py" not in block:
+            continue
+        # a shell continuation makes one command out of several lines
+        for line in block.replace("\\\n", " ").splitlines():
+            if "run.py" in line:
+                flags |= set(re.findall(r"(--[a-z0-9][a-z0-9-]+)", line))
+    return flags
+
+
+def test_every_flag_the_runbook_tells_you_to_pass_exists_in_run_pys_parser():
+    """The supervisor's launch line is checked against the parser; this is the
+    other place run.py gets invoked, and it is the one a human types.
+
+    A reader copies the Run block verbatim. A flag that no longer exists makes
+    it exit with "unrecognized arguments" before anything starts, and the
+    runbook is the only instruction they have -- there is no fallback the way
+    the supervisor has a service that keeps retrying.
+
+    Same known-alias caveat as the supervisor check: this catches flags that do
+    not exist, not flags that exist but are deprecated.
+    """
+    known = _run_py_option_strings()
+    used = _readme_run_py_flags()
+
+    assert used, "the runbook does show run.py commands; keep this meaningful"
+    assert "--workflow" in used, (
+        "the flags were not collected from the Run block; the check would pass "
+        "vacuously"
+    )
+    assert not (used - known), (
+        f"the runbook passes option(s) run.py does not have: {sorted(used - known)}"
+    )
+
+
+def test_every_flag_the_supervisor_passes_exists_in_run_pys_parser():
+    """The text checks here pin known-bad flags; this one asks the parser.
+
+    `--device` being renamed `--tt-device` is the failure that motivated these
+    tests, and it was only caught because someone happened to run the
+    supervisor. A containment check can only ever ban the flags we already know
+    about -- the next rename is invisible to it, and shows up as the production
+    restart path exiting with "unrecognized arguments" at the moment the
+    service needed to come back.
+
+    run.py's parser is built in parse_arguments(), so the option strings are
+    collected by recording add_argument calls while it runs.
+
+    This complements, and does not replace,
+    test_the_supervisor_launches_the_model_the_way_run_py_still_accepts: going
+    back to `--device` is *not* caught here, because run.py still declares it
+    as a hidden deprecated alias (help=argparse.SUPPRESS), so the parser
+    genuinely accepts it. Banning it stays a text check; this test is for the
+    flags nobody thought to ban.
+    """
+    known = _run_py_option_strings()
+    passed = _launch_flags()
+    assert passed, "no flags were found on the launch line"
+    assert not (passed - known), (
+        f"run.py has no such option(s): {sorted(passed - known)}"
+    )
+def test_the_supervisor_launches_the_model_the_way_run_py_still_accepts():
+    """The supervisor is the production restart path; a stale flag breaks it.
+
+    It was written before the upstream merge and still used --device (renamed
+    --tt-device), passed --vllm-dir (now reported as deprecated and ignored),
+    and did not select the dev catalog -- so every relaunch would have exited
+    saying the model is unknown, exactly when the service needed to come back.
+    """
+    sh = _supervisor()
+    assert "--tt-device p150" in sh, "--device was renamed --tt-device"
+    # " --device" with the leading space, so --tt-device does not match itself
+    assert " --device " not in sh
+    # the flag must not be *passed*; the comment explaining why may mention it
+    launch = sh[sh.index("launch_server()") : sh.index("wait_healthy()")]
+    passed_args = [ln for ln in launch.splitlines() if not ln.strip().startswith("#")]
+    assert not any("--vllm-dir" in ln for ln in passed_args), (
+        "run.py reports --vllm-dir as deprecated and ignored since the plugin "
+        "switch"
+    )
+    # it must be on the launch line, not only in the comment that explains it:
+    # run.py defaults to prod, where this model does not exist
+    launch = sh[sh.index("launch_server()") : sh.index("wait_healthy()")]
+    launch_code = [
+        ln for ln in launch.splitlines() if not ln.strip().startswith("#")
+    ]
+    assert any("MODEL_SPECS_ENV=dev" in ln for ln in launch_code), (
+        "the spec lives only in the dev catalog; run.py defaults to prod"
+    )
+
+
+def test_the_supervisor_actually_pins_the_snapshot_it_names():
+    """MODEL_WEIGHTS_DIR alone is read on one branch the supervisor never took.
+
+    SNAP names a revision (.../snapshots/987bda16...), so the launch reads as
+    "start on this revision". It was not: setup_host.py reads MODEL_WEIGHTS_DIR
+    only under `model_source == local`, and model_source defaults to
+    `huggingface` (os.getenv("MODEL_SOURCE", HUGGINGFACE)). The supervisor set
+    neither MODEL_SOURCE nor --host-weights-dir/--host-hf-cache, so run.py
+    resolved the repo through the HF cache and the pinned revision was
+    decorative -- the existence check on SNAP passed while a different snapshot
+    could be served.
+    """
+    sh = _supervisor()
+    launch = sh[sh.index("launch_server()") : sh.index("wait_healthy()")]
+    code = [ln for ln in launch.splitlines() if not ln.strip().startswith("#")]
+
+    assert any("MODEL_WEIGHTS_DIR=" in ln for ln in code), "the weights dir must be passed"
+    assert any("MODEL_SOURCE=local" in ln for ln in code), (
+        "MODEL_WEIGHTS_DIR is only read on the local branch; select it"
+    )
+    assert any("--host-weights-dir" in ln for ln in code), (
+        "and run.py has to be told the directory too, or it re-resolves the repo"
+    )
+
+
+def test_the_local_source_branch_is_the_one_that_reads_the_weights_dir():
+    """Check the premise against the real code, not against this docstring.
+
+    If setup_host.py ever reads MODEL_WEIGHTS_DIR unconditionally, the
+    MODEL_SOURCE=local above becomes unnecessary rather than wrong -- but until
+    then it is load-bearing, and this is what says so.
+    """
+    setup = (get_repo_root_path() / "workflows" / "setup_host.py").read_text()
+    # the default really is huggingface
+    assert 'os.getenv(\n        "MODEL_SOURCE", ModelSource.HUGGINGFACE.value\n    )' in setup or (
+        '"MODEL_SOURCE", ModelSource.HUGGINGFACE.value' in setup
+    ), "model_source no longer defaults to huggingface; re-check the supervisor"
+    # and every read of MODEL_WEIGHTS_DIR sits under a LOCAL branch
+    for idx, line in enumerate(setup.splitlines()):
+        if 'getenv("MODEL_WEIGHTS_DIR")' in line:
+            before = "\n".join(setup.splitlines()[max(0, idx - 25) : idx])
+            assert "ModelSource.LOCAL.value" in before, (
+                f"line {idx + 1} reads MODEL_WEIGHTS_DIR outside a local-source "
+                f"branch; the supervisor's MODEL_SOURCE=local may be redundant"
+            )
+
+
+def test_the_supervisor_canary_does_not_use_a_synthetic_fixture():
+    """ja_words.wav has no reference transcript and is banned elsewhere here.
+
+    Liveness only needs "did a transcription come back", but pointing at a
+    scratch file invites the same misuse this repo already documented once.
+    """
+    sh = _supervisor()
+    assert "ja_words.wav" not in sh
+    assert "CANARY_WAV" in sh and "README.md" in sh, (
+        "say where the canary clip comes from"
+    )
+
+
+def test_the_supervisor_paths_are_overridable_and_checked():
+    """Hardcoded /data paths made this a no-op on the delivery host.
+
+    Every path pointed at the original bring-up board's /data tree, which does
+    not exist elsewhere, so the supervisor would have launched run.py with a
+    nonexistent TT_METAL_HOME and venv and failed in a way that looks like a
+    model problem rather than a configuration one.
+    """
+    sh = _supervisor()
+    assert "/data/" not in sh, "no path may be pinned to the original board"
+    for var in ("TTIS", "TT_METAL_HOME", "VENV", "SNAP", "CANARY_WAV"):
+        assert f'{var}="${{{var}:-' in sh, f"{var} must be overridable"
+    assert "missing path:" in sh, (
+        "a missing prerequisite must be reported up front, not as a launch "
+        "failure later"
+    )
+
+
+def test_the_systemd_unit_points_at_the_checked_out_script():
+    """The unit ran a copy under /data, which the supervisor fix just retired.
+
+    Pointing at a copy also lets the deployed script drift from the repo, which
+    is how the stale run.py flags survived unnoticed for so long.
+    """
+    unit = (
+        get_repo_root_path()
+        / "scripts"
+        / "qwen3_asr"
+        / "qwen3asr-supervisor.service"
+    ).read_text()
+    assert "/data/" not in unit
+    assert "scripts/qwen3_asr/asr_supervisor.sh" in unit, (
+        "run the script from the checkout so it cannot drift from the repo"
+    )
+
+
+def test_the_supervisor_kills_the_engine_process_too():
+    """pkill on run.py leaves the engine holding the device.
+
+    vLLM runs its engine as a separate "VLLM::EngineCore" process. Killing only
+    the run.py parent orphans it, and it keeps /dev/tenstorrent/* open -- every
+    later launch then hangs in "Starting devices in cluster", and tt-smi -r does
+    not help because the orphan reacquires the device after the reset. This was
+    observed for real: a 10h-old orphan blocked three consecutive restarts.
+
+    Checked against code rather than the whole file. Two comments now explain
+    why the pattern is handled the way it is, so a containment check on the
+    file passed even with the actual kill deleted -- verified by removing
+    `kill_ours "VLLM::EngineCore"` and watching this test stay green.
+    """
+    sh = _supervisor()
+    code = "\n".join(
+        line for line in sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "VLLM::EngineCore" in code, (
+        "the engine process must be killed, not just its run.py parent"
+    )
+    assert "device_holders" in code, (
+        "verify the device is actually free before relaunching"
+    )
+    assert "kill -9" in code, "escalate for anything that still holds the device"
+    # and the engine pattern must be stopped, not merely named somewhere
+    stop = sh[sh.index("stop_server() {") : sh.index("launch_server() {")]
+    stop_code = "\n".join(
+        line for line in stop.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "VLLM::EngineCore" in stop_code, (
+        "stop_server must be the place that stops the engine"
+    )
+
+
+def test_the_supervisor_finds_holders_that_lsof_cannot_see():
+    """`lsof -t /dev/tenstorrent/*` misses a containerised holder entirely.
+
+    Measured on this host while a --docker-server engine was serving: the host
+    node is dev=5 inode=666 while the engine's fd resolves to dev=67 inode=13
+    (the container's own node for the same chip), so
+
+        sudo lsof -t /dev/tenstorrent/*   -> prints nothing, exit 1
+        /proc/<pid>/fd/17                 -> /dev/tenstorrent/0
+
+    The path form therefore reports the device free for precisely the holder
+    that makes the next launch hang in "Starting devices in cluster", and the
+    in_container filter downstream never gets the pid to spare.
+    """
+    sh = _supervisor()
+    assert "\ndevice_holders() {" in sh, (
+        "holder discovery must be a defined function, not an inline lsof"
+    )
+    # /proc walking is what sees a container's fd; lsof by path does not.
+    assert "/proc/[0-9]*/fd" in sh, "walk /proc to see holders inside containers"
+    assert "readlink" in sh, "resolve each fd to its target"
+    # Ban the path form in *code*. The comment above device_holders quotes it
+    # to explain why it was dropped, so a plain substring check on the whole
+    # file would fail on the explanation rather than on a regression.
+    code = "\n".join(
+        line for line in sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "lsof -t /dev/tenstorrent" not in code, (
+        "the path form silently reports containerised holders as absent"
+    )
+    # the measurement, so the next reader does not "simplify" it back to lsof
+    assert "dev=67" in sh and "dev=5" in sh, (
+        "record the two device nodes, or this looks like a stylistic choice"
+    )
+
+
+def test_the_supervisor_spares_containerised_servers():
+    """A --docker-server engine looks identical in the host process table.
+
+    The supervisor manages a --local-server run. A bare
+    `pkill -f "VLLM::EngineCore"` also matches the engine inside a running
+    container -- verified on this host, where the containerised engine appears
+    as a plain "VLLM::EngineCore" pid whose cgroup is
+    /system.slice/docker-<id>.scope. Killing it would take down an unrelated
+    deployment, which is the exact accident this cleanup exists to prevent.
+    """
+    sh = _supervisor()
+    # Require the definition, not just a mention: renaming the function away
+    # leaves the call sites referencing a name that no longer exists, and a
+    # substring check on "in_container" would still pass while the filter is
+    # silently gone (bash treats the failed call as false, so every engine
+    # would be killed).
+    assert "\nin_container() {" in sh, (
+        "the cleanup must define in_container to distinguish our processes "
+        "from containerised ones"
+    )
+    # In code, not in the comment that explains it: a cgroup pattern only
+    # spares anything if in_container actually matches on it.
+    sh_code = "\n".join(
+        line for line in sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "/docker-" in sh_code, "identify container processes by cgroup"
+    # and it must actually be consulted on both paths
+    assert sh.count("in_container ") >= 2, (
+        "in_container must gate both the engine kill and the device-holder "
+        "escalation"
+    )
+
+
+def test_no_kill_in_the_supervisor_bypasses_that_filter():
+    """The guard was on one pattern; the other two killed the container.
+
+    This test used to ban only `pkill -f "VLLM::EngineCore"`, so
+
+        pkill -f "run.py --model Qwen3-ASR"
+        pkill -f "run_vllm_api_server.py"
+
+    sat right above it, unguarded, and passed. Host /proc lists processes
+    inside containers, so on a host serving via --docker-server the second one
+    matches the live server -- measured: `pgrep -af run_vllm_api_server.py` ->
+    pid 2714943, `/proc/2714943/cgroup` ->
+    /system.slice/docker-9c2677b2....scope, equal to the container's
+    .State.Pid. Sparing the engine while killing the API server in front of it
+    is not sparing anything.
+
+    So the rule is not "guard the engine pattern"; it is "every kill in this
+    script goes through in_container".
+    """
+    sh = _supervisor()
+    code = [ln for ln in sh.splitlines() if not ln.lstrip().startswith("#")]
+
+    # pkill cannot be filtered per-pid at all, so it may not appear in code.
+    offenders = [ln.strip() for ln in code if "pkill" in ln]
+    assert not offenders, (
+        f"pkill kills every match, including containerised ones: {offenders}"
+    )
+
+    # Every kill must sit inside the one helper that consults in_container,
+    # or be the escalation that already filtered its pid list.
+    helper = sh[sh.index("kill_ours() {") : sh.index("stop_server() {")]
+    assert "in_container" in helper, "kill_ours must consult in_container"
+    assert 'kill "$pid"' in helper, "and it is the helper that does the killing"
+
+    outside = sh.replace(helper, "")
+    outside_code = [ln for ln in outside.splitlines() if not ln.lstrip().startswith("#")]
+    stray = [
+        ln.strip()
+        for ln in outside_code
+        # the -9 escalation in stop_server kills $stubborn, which device_holders
+        # + in_container already filtered; anything else is unguarded
+        if re.search(r"\bkill\b", ln) and "$stubborn" not in ln and "kill_ours" not in ln
+    ]
+    assert not stray, f"these kills do not go through in_container: {stray}"
+
+
+def test_every_process_pattern_the_supervisor_stops_is_routed_through_it():
+    """All three patterns must be stopped, and all three via the helper."""
+    sh = _supervisor()
+    stop = sh[sh.index("stop_server() {") : sh.index("launch_server() {")]
+    for pattern in ("run.py --model Qwen3-ASR", "run_vllm_api_server.py", "VLLM::EngineCore"):
+        assert f'kill_ours "{pattern}"' in stop, (
+            f"{pattern} must be stopped through the filtered helper"
+        )
+
+
+def test_the_supervisor_will_not_launch_while_a_container_owns_the_chip():
+    """Sparing the container's processes is not enough on its own.
+
+    Once stop_server leaves them alone the device stays held, and launching
+    anyway does not fail cleanly: run.py hangs in "Starting devices in
+    cluster", wait_healthy spends its full 20 minutes (watching 8101 while the
+    container serves 8110), and recover_device then runs `tt-smi -r` -- a reset
+    of the chip the deployment is serving on. device_ok only asks whether
+    tt-smi can read the board, so the reset reports success and the loop
+    repeats: a healthy production server wedged every 20 minutes indefinitely.
+
+    The main loop therefore has to refuse to launch while a containerised pid
+    holds the device, rather than discovering it 20 minutes later.
+    """
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+    guard = main[: main.index("  launch_server")]
+
+    assert "device_holders" in guard, "the check must run before the launch"
+    assert "in_container" in guard, "and only containerised holders may block it"
+    assert "not launching" in guard, "say what it is doing instead"
+    # it must wait, not fall through
+    assert "sleep" in guard, "the guard must block rather than proceed"
+    # and the launch must be genuinely after it
+    assert guard.index("device_holders") < guard.index("sleep")
+
+
+def test_the_guard_does_not_block_on_our_own_leftovers():
+    """A stale local-server pid is ours to kill; only containers gate us."""
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+    guard = main[: main.index("  launch_server")]
+    # the holder list must be filtered by in_container before it blocks
+    assert 'in_container "$pid" && held=' in guard, (
+        "blocking on every holder would deadlock against our own stale process, "
+        "which stop_server is there to clean up"
+    )
+
+
+def test_recover_device_refuses_to_reset_a_chip_a_container_is_serving():
+    """The pre-launch guard is not the only way into tt-smi -r.
+
+    recover_device is also reached from the monitor loop, so a container
+    started underneath us -- or a canary failing for an unrelated reason --
+    lands on `tt-smi -r` with the deployment still serving. tt-smi does not
+    care who holds the chip, and device_ok reports success afterwards because
+    the board itself reads fine, so the reset is both destructive and invisible.
+    """
+    sh = _supervisor()
+    body = sh[sh.index("recover_device() {") : sh.index("kill_ours() {")]
+
+    assert "device_holders" in body, "recover_device must check who holds the chip"
+    assert "in_container" in body, "and only containerised holders may stop it"
+    assert "return 1" in body, "it must decline rather than reset"
+    # the check has to come before the reset, not after it
+    assert body.index("device_holders") < body.index("$TTSMI"), (
+        "the holder check must precede tt-smi -r"
+    )
+
+
+def test_a_declined_recovery_does_not_abort_the_supervisor():
+    """`set -u` is on and the callers ignore the status, so make that explicit.
+
+    Both call sites continue/break back to the guard, which then waits for the
+    container. Writing `recover_device || true` says the non-zero return is an
+    expected outcome rather than an oversight.
+    """
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+    calls = [ln.strip() for ln in main.splitlines() if "recover_device" in ln and not ln.lstrip().startswith("#")]
+    assert calls, "the main loop must still attempt recovery"
+    for call in calls:
+        assert call.endswith("|| true"), (
+            f"a declined recovery must not be read as a script error: {call}"
+        )
+
+
+def test_the_device_chmod_does_not_widen_the_by_id_directory():
+    """`chmod 666 /dev/tenstorrent/*` also hits by-id/ and breaks traversal.
+
+    udev creates /dev/tenstorrent/by-id/ to hold the stable
+    `blackhole-<asic_id>` symlinks, and the glob matches that directory. 666 on
+    a directory drops its execute bit, so nothing non-root can traverse it, and
+    it stays that way until udev recreates it at the next boot.
+
+    Measured on the delivery host after the supervisor had run:
+
+        /dev/tenstorrent/by-id  drw-rw-rw-   ctime 2026-09-04 01:19
+        stat /dev/tenstorrent/by-id/*  ->  Permission denied
+
+    udev's own rule is `SUBSYSTEM=="tenstorrent", MODE="0666"`, which applies
+    to the device nodes only -- the scope the supervisor wanted.
+    """
+    sh = _supervisor()
+    code = [ln for ln in sh.splitlines() if not ln.lstrip().startswith("#")]
+
+    offenders = [ln.strip() for ln in code if "chmod 666 /dev/tenstorrent/*" in ln]
+    assert not offenders, (
+        f"this glob includes the by-id directory: {offenders}"
+    )
+
+    # the replacement must exist and must test for a character device
+    assert "\nrelax_device_perms() {" in sh, "the chmod belongs in one helper"
+    helper = sh[sh.index("relax_device_perms() {") : sh.index("recover_device() {")]
+    assert '[ -c "$node" ]' in helper, (
+        "only character devices may be chmod'ed; by-id is a directory"
+    )
+
+
+def test_every_device_chmod_goes_through_that_helper():
+    """Three call sites had the glob; a fourth must not reintroduce it."""
+    sh = _supervisor()
+    helper = sh[sh.index("relax_device_perms() {") : sh.index("recover_device() {")]
+    outside = sh.replace(helper, "")
+    code = [ln for ln in outside.splitlines() if not ln.lstrip().startswith("#")]
+    stray = [ln.strip() for ln in code if "chmod" in ln and "relax_device_perms" not in ln]
+    assert not stray, f"these chmods bypass the helper: {stray}"
+    # and the helper is actually used on every path that leaves the device
+    # freshly reset. recover_device has two of them -- the tt-smi -r success
+    # return and the fall-through after the power cycle -- so counting once per
+    # function let either be dropped silently.
+    # Count the exits rather than hardcoding a number: recover_device gained a
+    # third one when the unavailable-power-cycle path started returning
+    # failure, and a fixed 2 would have had to be edited rather than checked.
+    recover = sh[sh.index("recover_device() {") : sh.index("# Kill a previous run")]
+    exits = len(re.findall(r"^\s+return\b", recover, re.M))
+    assert exits >= 3, f"recover_device should have several exits, found {exits}"
+    assert recover.count("relax_device_perms") == exits - 1, (
+        "every exit that leaves the device reset must relax the nodes; the only "
+        "exception is the containerised-holder refusal, which never touched it. "
+        f"exits={exits}, relax calls={recover.count('relax_device_perms')}"
+    )
+    launch = sh[sh.index("launch_server() {") : sh.index("wait_healthy() {")]
+    assert "relax_device_perms" in launch, "launch_server must relax the nodes"
+
+
+def test_the_runbook_tells_you_how_to_repair_a_widened_by_id():
+    """Hosts that ran the older script are still broken until someone fixes it.
+
+    The bad chmod persists across supervisor restarts -- only a reboot (udev
+    recreating the directory) or an explicit chmod clears it -- so a fix in the
+    script does not fix the machines it already ran on. The delivery host was
+    found in that state days later.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "`relax_device_perms`")
+    assert "chip nodes only" in row, "say what the helper's scope is"
+    assert "drw-rw-rw-" in row, "and what the broken state looks like"
+
+    section = readme[readme.index("`relax_device_perms`") :]
+    flat = " ".join(section.split())
+    assert "chmod 755 /dev/tenstorrent/by-id" in flat, (
+        "give the repair command; the script fix does not reach hosts it already ran on"
+    )
+    assert "next boot" in flat, "say that it does not clear itself"
+
+
+def _canary_timings(sh):
+    """(steady-state canary timeout, monitor sleep, fails before recovery)."""
+    canary = sh[sh.index("canary_ok() {") : sh.index("CANARY_FIRST_TIMEOUT=")]
+    default = re.search(r'local timeout="\$\{1:-(\d+)\}"', canary)
+    assert default, "canary_ok must take its timeout as an argument with a default"
+    monitor = sh[sh.index("# monitor loop") :]
+    nap = re.search(r"^\s*sleep (\d+)$", monitor, re.M)
+    fails = re.search(r'\[ "\$fails" -ge (\d+) \]', monitor)
+    assert nap and fails
+    return int(default.group(1)), int(nap.group(1)), int(fails.group(1))
+
+
+def test_the_monitor_is_not_asked_about_a_server_that_never_served():
+    """/health 200 does not mean a transcription can complete yet.
+
+    The first transcription JIT-compiles kernels: measured 6m25s-6m45s across
+    fifteen runs, and on this run the route was published at 02:35:52 while the
+    first transcription finished at 02:45 -- 9.1 minutes later. The monitor
+    loop starts 20 s after wait_healthy returns and gives the canary 45 s, so
+    two failures arrive 2.2 minutes in and declare a wedge. recover_device then
+    resets the device mid-compile and the loop relaunches, so the supervisor
+    could never bring the service up by itself.
+
+    The launch path therefore has to spend the compile budget before the
+    monitor's short canary is used at all.
+    """
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+
+    assert "warm_first_transcription" in main, (
+        "the launch path must complete one transcription before monitoring"
+    )
+    # and it must come after wait_healthy but before the monitor loop
+    assert main.index("wait_healthy") < main.index("warm_first_transcription") < main.index(
+        "# monitor loop"
+    ), "the warm-up belongs between the health gate and the monitor"
+
+
+def test_the_warm_up_budget_covers_the_measured_compile():
+    """A budget shorter than the measurement reintroduces the same loop."""
+    sh = _supervisor()
+    budget = re.search(r'CANARY_FIRST_TIMEOUT="\$\{CANARY_FIRST_TIMEOUT:-(\d+)\}"', sh)
+    assert budget, "the first-transcription budget must be a named, overridable value"
+    seconds = int(budget.group(1))
+    # Slowest first transcription observed here is 6m44.8s (of fourteen), and
+    # the runbook tells readers to budget 7 minutes. 7*60 = 420s clears the
+    # slowest by 15s, which is why the shipped default is 600s rather than 420.
+    slowest_measured = 6 * 60 + 45
+    assert seconds >= slowest_measured, (
+        f"{seconds}s is under the slowest measured compile ({slowest_measured}s); "
+        f"the monitor would call a still-compiling server wedged"
+    )
+    assert seconds >= 7 * 60, (
+        f"{seconds}s is under the 7 minutes the runbook tells readers to budget"
+    )
+
+
+def test_the_steady_state_canary_stays_short():
+    """The long budget is for the first request only.
+
+    If the monitor also waited minutes, a genuinely wedged server would go
+    unnoticed for that long -- which is what the canary exists to catch.
+    """
+    default, nap, fails = _canary_timings(_supervisor())
+    assert default <= 60, f"the steady-state canary must stay short, got {default}s"
+    # and the wedge verdict must still be reached in a couple of minutes
+    worst = fails * (nap + default)
+    assert worst <= 5 * 60, f"a wedge would take {worst}s to notice"
+
+
+def test_a_failed_warm_up_recovers_instead_of_monitoring():
+    """If the first transcription never returns, that IS the wedge."""
+    sh = _supervisor()
+    main = sh[sh.index('log "=== supervisor start') :]
+    block = main[main.index("warm_first_transcription") :]
+    block = block[: block.index("# monitor loop")]
+    assert "recover_device" in block, "a failed warm-up must recover, not proceed"
+    assert "continue" in block, "and restart the launch rather than monitor"
+
+
+def test_a_failed_power_cycle_is_not_reported_as_a_recovery():
+    """No BMC here, and the old form logged success anyway.
+
+    `sudo ipmitool chassis power cycle >/dev/null 2>&1` discarded both the
+    output and the status. The wait loop that followed breaks as soon as
+    /dev/tenstorrent/0 exists and device_ok passes -- both already true on this
+    host -- so 30 s later it logged "device back after power cycle" and
+    returned 0, having neither power-cycled nor done anything past the tt-smi
+    -r above. Measured, with ipmitool stubbed to fail as it really does here:
+
+        04:14:22 ... ipmitool chassis power cycle (host will reboot)
+        04:14:52 device back after power cycle        <- false
+
+    An operator reading the log would conclude the board was recovered.
+    """
+    sh = _supervisor()
+    body = sh[sh.index("recover_device() {") : sh.index("# Kill a previous run")]
+
+    # the status must be checked, and the error kept
+    assert ">/dev/null 2>&1" not in body.split("ipmitool")[1].split("\n")[0], (
+        "discarding ipmitool's status is what hid the failure"
+    )
+    assert "ipmi_err=$(sudo ipmitool chassis power cycle 2>&1)" in body, (
+        "capture stderr so the real reason can be logged"
+    )
+    assert "power cycle UNAVAILABLE" in body, "say plainly that it did not happen"
+    assert "a human has to power-cycle it" in body, (
+        "and what the operator has to do instead"
+    )
+
+
+def test_recover_device_returns_failure_when_it_did_not_recover():
+    """Callers treat 0 as recovered; only actual recovery may return 0."""
+    sh = _supervisor()
+    body = sh[sh.index("recover_device() {") : sh.index("# Kill a previous run")]
+
+    # the tt-smi -r success path returns 0
+    assert 'log "device recovered by tt-smi -r"' in body
+    # the no-BMC path must return non-zero
+    unavailable = body[body.index("power cycle UNAVAILABLE") :]
+    assert "return 1" in unavailable[: unavailable.index("for _ in")], (
+        "a power cycle that could not run is not a recovery"
+    )
+    # and a power cycle that ran but did not bring the board back
+    assert "did not come back within 20 minutes" in body, (
+        "an accepted-but-ineffective power cycle must be recorded too"
+    )
+    assert 'return "$came_back"' in body, "and reported to the caller"
+
+
+def test_the_no_bmc_note_and_the_script_agree():
+    """The runbook already said the power-cycle path cannot run here.
+
+    That note and a log line claiming success were both in the tree at once.
+    Keep the note, now that the script agrees with it.
+    """
+    readme = _readme()
+    assert "ipmitool" in readme, "the runbook must still name the escalation"
+    flat = " ".join(readme.split())
+    assert "no BMC" in flat or "BMC" in flat, (
+        "and that this host has none, or the script's refusal looks like a bug"
+    )
+
+
+def test_the_runbook_says_the_unit_waits_rather_than_taking_over():
+    """Otherwise "enable the service" reads as "the service now runs".
+
+    Someone installing the unit on a host that is already serving via
+    --docker-server needs to know the supervisor will sit and log rather than
+    start, and why launching anyway would have been worse than useless.
+    """
+    readme = _readme()
+    section = readme[readme.index("why the holder check exists") :]
+    section = section[: section.index("### What the supervisor reads")]
+    flat = " ".join(section.split())
+    assert "does not take the service over -- it waits" in flat, (
+        "say what enabling the unit does while a container holds the chip"
+    )
+    assert "not launching" in flat, "quote the log line, so it is recognisable"
+    # and the reason the guard is not merely tidy
+    assert "tt-smi -r" in flat and "resetting the chip" in flat, (
+        "say that launching anyway resets a chip that is serving traffic"
+    )
+    assert "every 20 minutes" in flat, "and that it repeats, rather than failing once"
+
+
+def test_the_runbook_does_not_narrow_the_guard_to_the_engine():
+    """"spares the engine" understated it and matched the old broken code.
+
+    The review table said in_container "spares the engine of a running
+    --docker-server", which described exactly the state where the two pkills
+    above it killed that deployment's API server. A reader auditing whether the
+    supervisor is safe to install next to a container would have read that row
+    and stopped.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "`in_container`")
+    assert "spares the engine" not in row, (
+        "the guard is not engine-specific; that wording matched the bug"
+    )
+    helper_row = _readme_row(readme, "`kill_ours`")
+    assert "every" in helper_row.lower(), "say the guard covers every process"
+    assert "2714943" in helper_row, (
+        "quote the pid it was exercised against, so the claim is checkable"
+    )
+
+
+def test_the_supervisor_recovery_checks_can_actually_fire():
+    """The escalation path was unreachable, so recovery stopped at tt-smi -r.
+
+    Three defects, all confirmed on the delivery host:
+      - TTSMI defaulted to ~/ttsmi-venv/bin/tt-smi, which does not exist here
+        (the binary is ~/ttvenv/bin/tt-smi, and also on PATH)
+      - the "needs a power cycle" test grepped for "should be reset", a string
+        this tt-smi build never prints (0 occurrences), so the ipmitool branch
+        could never be taken
+      - the post-reboot wait required /dev/tenstorrent/2, which does not exist
+        on a single-board host, so the loop could never succeed
+    """
+    sh = _supervisor()
+    assert "command -v tt-smi" in sh, (
+        "resolve tt-smi from PATH rather than a venv that may not exist"
+    )
+    # the dead grep must be gone from the code; the comment explaining it may stay
+    code = "\n".join(
+        ln for ln in sh.splitlines() if not ln.strip().startswith("#")
+    )
+    assert "should be reset" not in code, (
+        "that string is never printed by this tt-smi; the check was dead"
+    )
+    # the definition, not a mention: a call to a missing bash function is falsy,
+    # so renaming it away would silently make every board look wedged
+    assert "\ndevice_ok() {" in sh, (
+        "health must be decided by something observable"
+    )
+    assert sh.count("device_ok") >= 3, (
+        "device_ok must be consulted after tt-smi -r and again after the power "
+        "cycle, not merely defined"
+    )
+    assert "/dev/tenstorrent/2" not in sh, (
+        "a single-board p150 host only has /dev/tenstorrent/0"
+    )
+    # and the correct node has to be used, not merely mentioned: three of the
+    # four occurrences are comments explaining the device-holder machinery.
+    node_code = "\n".join(
+        line for line in sh.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "/dev/tenstorrent/0" in node_code, (
+        "the post-power-cycle wait must test the node that exists on this host"
+    )
+
+
+def test_the_supervisor_waits_long_enough_for_startup():
+    """A 5-minute budget guaranteed a false wedge on every launch.
+
+    The server takes 7-12 minutes to reach /health 200 (weight load plus decode
+    trace capture; the runbook quotes ~12, and a launch measured here took
+    7m40s). The old wait_healthy gave 60 x 5s = 5 minutes, so it always timed
+    out and the supervisor went straight to recover_device -- power-cycling a
+    board that was merely still warming up, then repeating forever.
+    """
+    sh = _supervisor()
+    start = sh.index("wait_healthy()")
+    body = sh[start : sh.index("\n}", start)]
+    assert "20 * 60" in body, (
+        "the startup budget must exceed the measured 7-12 minute startup"
+    )
+    assert "seq 1 60" not in body, "the 5-minute loop must be gone"
+
+
+def test_the_readme_scopes_the_supervisor_verification_claim():
+    """"Verified" must not cover code that was later found broken.
+
+    The end-to-end recovery demo ran on the original board, before the upstream
+    merge. Auditing the script afterwards found five defects that would each
+    have broken it on the delivery host, so presenting that demo as blanket
+    verification would tell a reader the recovery path is proven here when only
+    its parts have been exercised.
+    """
+    readme = _readme()
+    assert "What has and has not been verified" in readme
+    assert "not** re-verified" in readme, (
+        "say plainly that the full wedge->power-cycle loop was not re-run here"
+    )
+    # the parts that *were* exercised must be listed, or the section is just a
+    # disclaimer with nothing behind it
+    for probe in ("device_ok", "in_container", "canary_ok", "TTSMI"):
+        assert probe in readme, f"{probe} was exercised; say so"
+
+
+def test_the_readme_documents_the_plugin_server_facing_tests():
+    """tests/tt is the only per-request sampling coverage on this deployment.
+
+    It was never mentioned, so nobody ran it: the ASR model answers
+    /v1/completions, which is what those tests drive. Running it found two
+    presence-penalty failures that are a property of this model, not a defect,
+    and that distinction has to be written down or the next reader files a bug.
+    """
+    readme = _readme()
+    assert "tests/tt" in readme
+    assert "--tt-server-url" in readme and "--tt-model-name" in readme
+
+
+def test_the_readme_explains_the_presence_penalty_failures():
+    """presence subtracts at most 2.0 once; this model's top-2 gap is larger.
+
+    frequency scales with occurrence count and repetition divides, so both do
+    reorder the top token -- presence cannot. Keep the measured gap on record.
+    """
+    readme = _readme()
+    assert "presence_penalty" in readme
+    # The evidence has to be the measured logprobs, not just a prose range: an
+    # "or" over the two let the sampled numbers be edited without failing.
+    assert "3.5-5.8" in readme, "state the gap the penalty must overcome"
+    for observed in ("-0.08", "-5.58"):
+        assert observed in readme, (
+            f"keep the measured top-2 logprobs ({observed}) on record; the range "
+            "alone cannot be checked against a rerun"
+        )
+    # and the escape hatch for a clean run
+    assert "--deselect" in readme
+    assert "TestPresencePenalty::test_different_presence_penalties" in readme
+
+
+def test_the_readme_accounts_for_the_skipped_plugin_test():
+    """An unexplained skip reads as coverage nobody checked.
+
+    tests/tt leaves one skip: test_all_vocab_logprobs asks for top_logprobs=-1
+    and the server answers "Requested sample logprobs of 151936, which is
+    greater than max allowed: 20". That is vLLM's max_logprobs default, left
+    alone on purpose -- whole-vocabulary logprobs cost per token in proportion
+    to the vocabulary and nothing in the transcription path wants them.
+    """
+    readme = _readme()
+    assert "71 passed, 1 skipped, 2 deselected" in readme, (
+        "record the full result, not just the passes"
+    )
+    assert "max_logprobs" in readme
+    assert "greater than max allowed: 20" in readme, (
+        "keep the server's own message, so the skip can be told from a failure"
+    )
+
+
+def test_the_readme_documents_every_supervisor_override():
+    """The supervisor's knobs were only discoverable by reading the script.
+
+    Every path it uses is overridable and pre-checked, but none of the variable
+    names appeared in the runbook -- including that the checkout is `TTIS`,
+    while the runbook itself exports `TT_INFERENCE_SERVER` for the same tree.
+    Someone setting the runbook's name and expecting the service to follow gets
+    the default instead.
+
+    The list is derived from the script so a new knob fails until documented.
+    """
+    import re
+
+    supervisor = (
+        get_repo_root_path() / "scripts" / "qwen3_asr" / "asr_supervisor.sh"
+    ).read_text()
+    # assignments of the form VAR="${VAR:-default}" are the overridable ones
+    knobs = set(re.findall(r'^([A-Z_]+)="\$\{\1:-', supervisor, re.M))
+    assert knobs, "the supervisor does use ${VAR:-default}; keep this meaningful"
+
+    readme = _readme()
+    for knob in sorted(knobs):
+        assert knob in readme, (
+            f"{knob} is overridable in asr_supervisor.sh but undocumented; a "
+            "reader cannot know it exists"
+        )
+
+
+def test_the_readme_warns_that_the_checkout_variable_is_named_differently():
+    """TTIS vs TT_INFERENCE_SERVER is a silent-default trap."""
+    readme = _readme()
+    body = readme[readme.index("## Install") :]
+    assert "TTIS" in body, "the Install section is where a deployer looks"
+    # Both names appear in the file for unrelated reasons, so an "or" over that
+    # let the warning itself be deleted. Require the contrast to be stated
+    # where the knob is described.
+    assert "TT_INFERENCE_SERVER" in body, (
+        "the runbook's own name for the same tree must be contrasted here, or "
+        "a deployer sets it and silently gets the default"
+    )
+    assert "Not**" in body or "not**" in body, (
+        "state it as a warning, not as a passing mention"
+    )
+
+
+def test_the_readme_does_not_overstate_what_the_dockerfile_clones():
+    """"clones only vllm-tt-plugin" is false read literally.
+
+    The dev Dockerfile clones three repositories: tt-metal, vllm-tt-plugin and
+    tt-smi. The sentence means "no second vLLM source" -- true and worth
+    saying, since the field is named vllm_commit and used to point at the
+    tenstorrent/vllm fork -- but a reader checking the Dockerfile finds three
+    clones and stops trusting the section.
+    """
+    import re
+
+    dockerfile = (
+        get_repo_root_path() / "vllm-tt-metal" / "vllm.tt-metal.src.dev.Dockerfile"
+    ).read_text()
+    cloned = set(
+        re.findall(r"git clone[^\"]*?github\.com/[^/]+/([a-zA-Z0-9._-]+)\.git", dockerfile)
+    )
+    assert cloned == {"tt-metal", "vllm-tt-plugin", "tt-smi"}, (
+        f"the Dockerfile's clone set changed: {sorted(cloned)}; update the README"
+    )
+
+    readme = _readme()
+    # the vLLM-scoped claim must be qualified, not left as a bare "only"
+    assert "clones only\n`vllm-tt-plugin`" not in readme
+    assert "There is no second vLLM source" in readme or (
+        "no\nsecond vLLM source" in readme or "no second vLLM source" in readme
+    ), "say what 'only' is scoped to"
+    assert "three repositories in" in readme, (
+        "name the real clone count so the claim can be checked"
+    )
+
+
+def test_the_readme_gives_a_cheap_wedge_check():
+    """The no-hang claim rested on soaks nobody can rerun cheaply.
+
+    A reader deciding whether decode tracing is safe on their board had only
+    "we ran 900 requests" to go on. vLLM already exposes the answer:
+    request_success_total is monotonic per engine process, so a stall is it
+    ceasing to advance while num_requests_running stays non-zero.
+    """
+    readme = _readme()
+    body = readme[readme.index("Scope note (important)") :]
+    assert "vllm:request_success_total" in body
+    assert "num_requests_running" in body, (
+        "one counter alone cannot distinguish a stall from an idle server"
+    )
+    # The observed figure has to appear as the command's output line, not only
+    # in the prose: the number occurs twice, so an "in body" check let the
+    # sample output be blurred to "many" while the prose kept the digits.
+    assert 'vllm:request_success_total{...,finished_reason="stop",...} 6675.0' in body, (
+        "quote the counter line as the server prints it, so a rerun can be "
+        "compared line for line"
+    )
+
+
+def test_the_readme_does_not_present_the_counter_as_a_number_to_match():
+    """"compared line for line" is wrong for a per-process counter.
+
+    6675 was a high-water mark on one long-lived engine. The counter resets
+    with the process, so a healthy fresh server reads far lower -- 3064 after
+    one pass of each suite, measured. Presenting 6675 as the reference invites
+    reading a correct server as a regression.
+
+    What is actually reproducible is the shape: error/abort at 0.0, stop
+    advancing by exactly the requests issued, and no hang line in the log.
+    """
+    readme = _readme()
+    body = readme[readme.index("Scope note (important)") :]
+    assert "not a value to" in body, (
+        "say the figure is not a target, or a lower reading looks like a fault"
+    )
+    assert "resets" in body
+    # a second, much lower, healthy reading -- so "far lower" is concrete
+    assert "3064" in body, "give a measured low reading, not just the caveat"
+
+
+def test_the_readme_gives_the_arithmetic_that_makes_the_delta_evidence():
+    """A delta only proves nothing was dropped if it is predicted.
+
+    TED 509 + MagicHub 600 + bench 128 - 15 empty-wav failures + 1 golden
+    clip = 1223, which is what the counter advanced by. Without the sum, the
+    delta is just another number and a silently dropped request would not
+    show up.
+    """
+    readme = _readme()
+    body = readme[readme.index("Scope note (important)") :]
+    assert "1223" in body
+    # Assert the summed expression, not the bare digits: every one of these
+    # numbers also occurs elsewhere in the section, so a digit check still
+    # passed with the sum reduced to "one pass of each corpus".
+    collapsed = " ".join(body.split())
+    assert (
+        "TED 509 + MagicHub 600 + benchmark 128, minus the 15 empty-wav" in collapsed
+    ), "spell out the terms being summed, or the delta cannot be recomputed"
+    assert "error` and `abort` stay at `0.0`" in body, (
+        "the zero counters are the other half of the check"
+    )
+
+
+def test_the_readme_counts_the_probe_warmup_requests():
+    """The sum came out 6 short of the measured delta, and I guessed why.
+
+    Both probes transcribe the clip 3 times before timing anything, and the
+    server counts those. Measured 1844 -> 3193 = 1349 with the probes included,
+    which is 1 + 494 + 600 + 128 + 63 + 63 -- not ... + 60 + 60.
+
+    An earlier worklog entry attributed the same 6 to "golden 1 + 5 spare",
+    which was a guess that happened to reach the right total. Reconciling to a
+    number by inventing terms is how a genuinely dropped request would get
+    explained away, so the real source is now in the README.
+    """
+    readme = _readme()
+    body = readme[readme.index("Scope note (important)") :]
+    collapsed = " ".join(body.split())
+
+    assert "add **6**, not 120" in collapsed, (
+        "say how many extra requests the probes contribute"
+    )
+    # tie it to the code, so the claim is checkable rather than asserted
+    assert "for _ in range(3)" in collapsed, "point at the warm-up loop itself"
+    assert "1 + 494 + 600 + 128 + 63 + 63 = 1349" in collapsed, (
+        "give the full-pass sum with the warm-ups folded in"
+    )
+
+
+@pytest.mark.parametrize(
+    "script", ["asr_perf_probe.py", "asr_perf_stream.py"]
+)
+def test_both_probes_really_warm_up_three_times(script):
+    """If a probe's warm-up count changes, the README's +6 is wrong."""
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "reference_config", "benchmarking", script
+    )
+    src = open(path).read()
+    assert "for _ in range(3)" in src, (
+        f"{script} no longer warms up 3 times; the README's arithmetic needs updating"
+    )
+
+
+def test_the_wedge_check_names_metrics_the_server_actually_exports():
+    """A metric renamed upstream would make the check silently useless.
+
+    Both names are exported by the running server on this deployment; pin them
+    so a vLLM upgrade that renames either fails here rather than in the field.
+    """
+    plugin_metrics = {
+        # vLLM's own metric names, asserted against what the live server
+        # exported at 0.26.0 (curl /metrics | grep '^vllm:').
+        "vllm:request_success_total",
+        "vllm:num_requests_running",
+    }
+    readme = _readme()
+    for metric in sorted(plugin_metrics):
+        assert metric in readme, f"{metric} must be the one the runbook quotes"
+
+
+def test_the_readme_does_not_cite_the_wrong_hang_issues():
+    """Two of the three cited issues were not this failure mode.
+
+    Checked against the tracker rather than recalled:
+      #40592 -- Mistral, intermittent hang in AllGatherAsync on T3K. A CCL
+                hang, not SDPA/decode, and this deployment short-circuits CCL.
+      #4752  -- tt-inference-server, Falcon3-7B eval accuracy vs an L4
+                reference. Not tt-metal, and not a hang.
+    Citing them as "the same SDPA/decode class" sends the next reader to two
+    unrelated threads and inflates the apparent corroboration from one issue to
+    three.
+    """
+    readme = _readme()
+    body = readme[readme.index("non-deterministic device hang") :]
+    body = body[: body.index("Scope note")]
+
+    # they may be named as excluded, but not offered as supporting evidence
+    for wrong in ("#40592", "#4752"):
+        assert f"issues {wrong}" not in body and f", {wrong}," not in body, (
+            f"{wrong} is a different failure mode; do not cite it as this class"
+        )
+    assert "do **not** belong" in body, (
+        "say why they were dropped, or they get re-added from memory"
+    )
+
+
+def test_the_readme_cites_the_issue_that_matches_the_signature():
+    """#37543 is the one that actually describes this: ND, SDPA decode, traced."""
+    readme = _readme()
+    body = readme[readme.index("non-deterministic device hang") :]
+    body = body[: body.index("Scope note")]
+    assert "37543" in body
+    assert "SDPA decode" in body
+    # The near-match must be marked as such. "deterministic" alone is satisfied
+    # by the surrounding "non-deterministic device hang" prose, so name what
+    # makes #45052 different from ours.
+    assert "45052" in body
+    # "deterministic" alone is satisfied by the surrounding "non-deterministic
+    # device hang" prose, so require the phrasing that separates #45052 from
+    # ours. Scoped to the report rather than the defect -- see
+    # test_the_readme_does_not_overstate_what_45052_establishes.
+    assert "100% deterministic and reported only on P300x2" in body, (
+        "#45052 is deterministic and was only reported on one board; presenting "
+        "it as the same failure overstates how well this hang is understood "
+        "upstream"
+    )
+
+
+def test_the_readme_does_not_overstate_what_45052_establishes():
+    """Two claims about #45052 went further than the tracker does.
+
+    Checked against the issue:
+      - it is 100% deterministic, reproduced over five runs -- fine;
+      - it is *reported* on a Blackhole P300x2 (1,4) mesh, but the underlying
+        sparse-matmul deadlock is called architecture-agnostic in #45943, so
+        "P300x2-specific" describes the report, not the defect;
+      - PR #44118's merge (7eff69a85a0, vs 747215b good) is the first bad
+        tested version; triage says causality is unproven and points at
+        #43682.
+
+    Both overstatements make the upstream picture look better understood than
+    it is, and the second sends a reader to the wrong PR. What actually rules
+    the issue out here is the mechanism: its stuck op is GPT-OSS MoE
+    SparseMatmulDeviceOperation on a 4-device mesh, and this is one p150 with
+    no MoE.
+    """
+    readme = _readme()
+    body = readme[readme.index("non-deterministic device hang") :]
+    body = body[: body.index("Scope note")]
+    flat = " ".join(body.split())
+
+    assert "reported only on P300x2" in flat, (
+        "distinguish the report's scope from the defect's"
+    )
+    assert "45943" in flat, "cite the issue that calls the deadlock arch-agnostic"
+    assert "first bad tested version" in flat and "43682" in flat, (
+        "#44118 is a boundary, not a culprit; name the real bisection target"
+    )
+    assert "not a proven root cause" in flat or "not a proven cause" in flat
+    # the durable reason it does not apply to this deployment
+    assert "MoE" in flat and "SparseMatmul" in flat
+
+
+def test_the_readme_attributes_the_patch_recipe_correctly():
+    """"the recipe PR#4837 established" pointed at the wrong artifact.
+
+    PR #4837 (e8da7006d) adds Qwen3.5-27B and Qwen3.6-27B specs -- three files,
+    model_spec.py plus two catalogs -- and contains no `git apply` at all. The
+    recipe came from a review comment on it. A reader who opened the merged
+    diff looking for the procedure would find specs and conclude the runbook
+    was wrong about something more important.
+    """
+    readme = _readme()
+    assert "review comment on PR #4837" in readme
+    assert "issuecomment-" in readme, "point at the comment, not just the PR"
+    assert "not from that PR's merged diff" in readme
+
+
+def test_the_readme_shows_how_the_original_recipe_differed():
+    """It rewrote existing pins; a bring-up has none, so it adds an entry.
+
+    Without that contrast the reader cannot tell whether deviating from the
+    quoted original is a mistake or the point.
+    """
+    readme = _readme()
+    assert "no prod entry to rewrite" in readme
+    # the original's shape, so the difference is visible rather than asserted
+    quoted = readme[readme.index("review comment on PR #4837") :]
+    quoted = quoted[: quoted.index("A bring-up has no prod entry")]
+    # Real commit ids as the comment carried them. Blurring either to a
+    # placeholder loses the point: the original *rewrote* pins that were
+    # already there, which is exactly what a bring-up cannot do.
+    assert '-  vllm_commit: "03fa3af"' in quoted
+    assert '+  vllm_commit: "b95c0501e62f"' in quoted
+    assert 'tt_metal_commit: "de59f8a"' in quoted
+
+def _sample_rate_section():
+    readme = _readme()
+    start = readme.index("The snippet resamples to 16 kHz")
+    return readme[start : readme.index("\n**Do not use", start)]
+
+
+def test_the_readme_does_not_claim_both_checkpoints_declare_the_rate():
+    """Only the JA checkpoint has `sampling_rate`; the base one omits it.
+
+    The note used to read "that is what the checkpoint's
+    preprocessor_config.json declares (sampling_rate: 16000)" as if it applied
+    to whatever checkpoint you had open. It does not: Qwen/Qwen3-ASR-1.7B --
+    the one the reference dumps come from -- has no such key, and a reader
+    grepping for it there finds nothing and doubts the whole paragraph.
+    """
+    body = _sample_rate_section()
+    assert "absent" in body, (
+        "say that the base checkpoint omits the key, or the claim overreaches"
+    )
+    assert "WhisperFeatureExtractor" in body, (
+        "name where the base checkpoint's 16000 actually comes from"
+    )
+    # The arithmetic, which is the part that holds for both files. Assert the
+    # equations, not the digits: "480000" survives on its own in prose like
+    # "the sample count is ... = 480000", which loses the derivation that makes
+    # the fallback usable.
+    collapsed = " ".join(body.split())
+    for equation in (
+        "`n_samples` 480000 = `chunk_length` 30 x 16000",
+        "`nb_max_frames` 3000 x `hop_length` 160 = 480000",
+    ):
+        assert equation in collapsed, f"spell out {equation}, not just the numbers"
+    assert "present in both files" in body, (
+        "point the reader at the check that works regardless of checkpoint"
+    )
+
+
+@pytest.mark.parametrize(
+    "repo,declares",
+    [("models--neosophie--Qwen3-ASR-1.7B-JA", True), ("models--Qwen--Qwen3-ASR-1.7B", False)],
+)
+def test_the_preprocessor_configs_match_what_the_readme_says(repo, declares):
+    """Check the files, not the prose. Skips where the cache is absent.
+
+    QWEN3ASR_SNAP points at a HF hub cache (the tt-metal tests use the same
+    variable); without it there is nothing to compare against and asserting
+    would only fail on machines that never downloaded the weights.
+    """
+    import glob
+    import json
+
+    cache = os.environ.get("QWEN3ASR_HF_CACHE") or os.path.expanduser(
+        "~/.cache/huggingface/hub"
+    )
+    found = glob.glob(os.path.join(cache, repo, "snapshots", "*", "preprocessor_config.json"))
+    if not found:
+        pytest.skip(f"no cached preprocessor_config.json for {repo}")
+    cfg = json.load(open(found[0]))
+    assert ("sampling_rate" in cfg) is declares, (
+        f"{repo}: sampling_rate presence changed; the README table needs updating"
+    )
+    if declares:
+        assert cfg["sampling_rate"] == 16000
+    # the geometry the README tells you to fall back on
+    assert cfg["n_samples"] == cfg["chunk_length"] * 16000
+    assert cfg["nb_max_frames"] * cfg["hop_length"] == cfg["n_samples"]
+
+
+def _arch_name_section():
+    readme = _readme()
+    start = readme.index("#### `ARCH_NAME` is absent from the engine")
+    return readme[start : readme.index("\n#### ", start + 1)]
+
+
+def _table_row(body, leading_cell):
+    for line in body.splitlines():
+        if line.startswith(f"| {leading_cell}"):
+            return line
+    raise AssertionError(f"no table row for {leading_cell} in the ARCH_NAME section")
+
+
+def test_the_readme_records_arch_name_missing_from_the_engine():
+    """The startup log says "overriding with blackhole"; the worker disagrees.
+
+    Measured per process rather than from that log line: ARCH_NAME reaches the
+    APIServer but is absent from the EngineCore environ, while MESH_DEVICE and
+    the offline flags reach both. A reader who only sees the entrypoint log
+    concludes the variable is in effect on the worker, and then explains an
+    unrelated failure with it.
+    """
+    body = _arch_name_section()
+    assert "EngineCore" in body and "APIServer" in body, (
+        "name the two processes, or the distinction the measurement makes is lost"
+    )
+
+    # The measurement lives in the table, so assert on the row. "absent"
+    # anywhere in the section is also satisfied by this section's own heading,
+    # which would let the row be flipped to "set" without failing anything.
+    row = _table_row(body, "`ARCH_NAME`")
+    assert "absent" in row, (
+        "the EngineCore cell is the measurement; keep it in the row, not just the prose"
+    )
+    assert "wormhole_b0" in row and "blackhole" in row, (
+        "show both values, or the row does not say what was overridden with what"
+    )
+
+    # the variables that *do* arrive, so "absent" is a contrast and not a
+    # blanket claim that the spec's env_vars do not work
+    arrives = _table_row(body, "`MESH_DEVICE`")
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        assert name in arrives, f"{name} does reach the engine; show it"
+    assert "absent" not in arrives, (
+        "these three were measured present in both processes"
+    )
+
+
+def test_the_readme_explains_why_arch_name_absence_is_harmless():
+    """Otherwise this reads as an open bug and the next reader chases it."""
+    body = _arch_name_section()
+    assert "UMD | Creating TopologyDiscovery for architecture: blackhole" in body, (
+        "quote the UMD line, which is the evidence that arch comes off PCIe"
+    )
+    assert "PCIe" in body
+
+
+def test_the_readme_quotes_the_todo_that_model_spec_actually_carries():
+    """The "transitional" claim has to come from the source, not from memory."""
+    todo = "TODO: Remove once all model specs are uplifted to tt-metal >= 0.60.0"
+    spec_src = open(
+        os.path.join(os.path.dirname(__file__), "..", "workflows", "model_spec.py")
+    ).read()
+    assert todo in spec_src, (
+        "the comment moved or changed; requote it in the README before relying on it"
+    )
+    assert todo in _arch_name_section()
+
+
+def test_the_readme_warns_against_exporting_arch_name_globally():
+    """The obvious "fix" is the one that would put wormhole_b0 on a worker.
+
+    _infer_env_vars derives ARCH_NAME from the device, so a global export in
+    the shell is not how this value is meant to be set, and the base image
+    already carries the wrong one.
+    """
+    body = _arch_name_section()
+    assert "wormhole_b0" in body, "name the wrong value the base image ships"
+    lowered = body.lower()
+    assert "do not" in lowered and "global" in lowered, (
+        "say plainly not to export it globally, or the note reads as an invitation"
+    )
+def test_the_readme_says_why_completions_answers_on_an_asr_model():
+    """"the ASR model answers that endpoint too" reads as an accident.
+
+    It is a setting: the adapter declares supports_transcription = True and
+    supports_transcription_only = False, and the plugin's get_supported_tasks
+    branches on exactly that -- True alone returns ["transcription"] and drops
+    "generate". Verified live: /v1/completions and /v1/audio/transcriptions
+    both return 200.
+
+    Worth pinning because this suite has no other entry point. Flipping the
+    flag would remove its access to the server, and a reader who thought the
+    behaviour was incidental would not connect the two.
+    """
+    readme = _readme()
+    body = readme[readme.index("### The plugin's server-facing tests") :]
+    body = body[: body.index("```")]
+    flat = " ".join(body.split())
+
+    assert "supports_transcription_only = False" in flat, (
+        "name the flag that keeps /v1/completions available"
+    )
+    assert "would return `[\"transcription\"]`" in flat or 'return `["transcription"]`' in flat, (
+        "say what the other setting does, or the flag looks decorative"
+    )
+    assert "both return 200" in flat, "record that this was checked, not assumed"
+    # the consequence for these tests specifically
+    assert "only entry point" in flat
+
+
+def test_the_readme_covers_a_docstring_only_change():
+    """The comment-only grep only knows `#`, so a docstring edit over-reports.
+
+    That is the safe direction -- it never lets a real change through -- but
+    without guidance the reader spends a ~7 h rebuild on a diff that changed no
+    executed byte. It happened immediately: vllm-tt-plugin aec8563 edits only
+    executor.py's module docstring, and the check prints the file.
+
+    The follow-up is cheap and decisive: if every hunk header falls inside the
+    docstring, the pin stays.
+    """
+    readme = _readme()
+    body = readme[readme.index("It still only understands `#` comments") :]
+    body = body[: body.index("The extra tt-metal exclusions")]
+    flat = " ".join(body.split())
+
+    # Name the case in the sentence that introduces it, not merely somewhere in
+    # the section -- "docstring" recurs in the worked example below, so a
+    # section-wide check passed with the opening reduced to "some edits".
+    assert "a **docstring**-only edit prints and looks like a code change" in flat, (
+        "name the case the grep cannot classify"
+    )
+    assert "over-reports, never under-reports" in flat, (
+        "say which way it errs, or this reads as the check being unsafe"
+    )
+    assert "grep '^@@'" in flat, "give the hunk-header check, not a description"
+    # the worked example, so the current output is recognisable
+    assert "aec8563" in flat and "@@ -6,8 +6,16 @@" in flat
+    # The section must still end in a verdict, but the verdict changed: the
+    # upstream merge brought 115 executable lines plus a new spec_decode.py
+    # module, so "stays at acae5aa" became false and the pin was bumped. What
+    # this test protects is that a verdict is stated at all -- either the pin
+    # holds, or it is bumped and the reason is given.
+    assert (
+        "`vllm_commit` stays at" in flat
+        or "`vllm_commit` is therefore bumped" in flat
+    ), "state the verdict, or the reader still does not know whether to bump"
+    # and if it was bumped, say what forced it, so the docstring rule above is
+    # not read as having been overruled
+    if "bumped" in flat:
+        assert "115 executable lines" in flat and "spec_decode.py" in flat, (
+            "name what made the docstring rule inapplicable to this diff"
+        )
+
+
+def _repo_beside(name):
+    """A sibling checkout of one of the pinned repositories, if present.
+
+    Same resolution as test_qwen3_asr_pin_form's helper; duplicated rather
+    than imported so this module keeps working when run on its own.
+    """
+    path = os.path.join(os.path.dirname(__file__), "..", "..", name)
+    return path if os.path.isdir(os.path.join(path, ".git")) else None
+
+
+def _pinned_metal_from_readme(readme):
+    """tt_metal_commit as set by the runbook's own patch block.
+
+    Scoped to the patch block on purpose: an earlier section quotes another
+    PR's recipe, which carries its own `+  ..._commit:` lines, so a whole-file
+    search would return whichever appeared first.
+    """
+    start = readme.index("git apply <<'PATCH'")
+    block = readme[start : readme.index("\nPATCH\n", start)]
+    match = re.search(r'^\+  tt_metal_commit: "([0-9a-f]+)"', block, re.M)
+    assert match, "the runbook patch must set tt_metal_commit"
+    return match.group(1)
+
+
+def test_the_runbook_records_that_the_model_pr_landed_and_how_to_follow_it():
+    """The deviation section predicted a future that has now happened.
+
+    It said tt-metal "stays on the model's PR branch" because the ttnn
+    implementation "is still in review", and that "once the PR lands, the pin
+    becomes an ordinary main commit". #49104 merged on 2026-09-14, and the
+    prediction left as-is reads as a live instruction not to rebase -- the
+    opposite of what was done.
+
+    The replacement has to say which operation the merge calls for, because
+    getting it wrong is expensive rather than merely untidy: the PR was
+    *squash*-merged, so its 20 commits are unreachable from main while the
+    squash carries their content, and `git merge` brings every file in a
+    second time (33 predicted conflicts). A rebase onto the squash replays
+    cleanly. The distinction, not just the outcome, is what a future reader
+    needs.
+    """
+    readme = _readme()
+    body = readme[readme.index("One thing was deliberately *not* followed") :]
+    body = body[: body.index("#### After any upstream merge")]
+    flat = " ".join(body.split())
+
+    # the prediction must be resolved, not left pending
+    assert "That PR is now merged" in flat, (
+        "say the PR landed; the old text reads as an instruction not to rebase"
+    )
+    assert "49104" in flat and "e402f01577c" in flat, (
+        "name the PR and the commit it landed as, so the claim is checkable"
+    )
+    # The merge style must be stated where the verdict is drawn, not merely
+    # somewhere nearby: "squash" occurs five times in this section (the
+    # explanation, the tree comparison, the rebase sentence, the forward
+    # rule), so a bare containment check stayed green with the actual claim
+    # reduced to "It was merged" -- verified by mutation.
+    assert "It was **squash**-merged" in flat, (
+        "name the merge style in the sentence that draws the conclusion"
+    )
+    assert "rebase" in flat.lower() and "merge` the wrong verb" in flat, (
+        "say which operation the squash calls for"
+    )
+    # the evidence, so the choice is not a matter of taste
+    assert "not reachable from `main`" in flat, (
+        "give the fact that rules out a merge"
+    )
+    assert "33 conflicts" in flat, (
+        "quote what merging would actually cost, measured not guessed"
+    )
+    # and the forward-looking rule, since this will recur
+    assert "a squash needs a rebase, not a merge" in flat, (
+        "state the rule for next time, or the reader re-derives it"
+    )
+
+
+def test_the_pin_verdict_states_the_reason_the_tree_actually_supports():
+    """"Nothing executable changed" stopped being true, and was load-bearing.
+
+    That was the stated reason for leaving `tt_metal_commit` behind the branch
+    head. Measured against the tree at the current pin, three files have real
+    executable diffs -- `demo/demo.py`, `reference/prep_wav.py`,
+    `demo/demo_wav.py` -- and `reference/dump_reference.py` gained a refusal
+    for a too-short clip. Only `tt/generator_vllm.py` is comment-only.
+
+    The verdict survives, but on the narrower ground that none of those files
+    is on the *served* path: the vLLM adapter imports neither `demo/` nor
+    `reference/prep_wav.py`. Keeping the old wording would mean the pin rests
+    on a claim the repository contradicts, which is exactly the kind of thing
+    that gets copied forward unchecked.
+
+    Asserted against the tree, not the prose, so if a served-path file ever
+    does change after the pin this fails instead of reading as still-true.
+    """
+    import subprocess
+
+    readme = _readme()
+    body = readme[readme.index("**The branch heads have moved past the pins") :]
+    body = body[: body.index("\n## Install")]
+    flat = " ".join(body.split())
+
+    # the corrected wording, and the retired one
+    assert "nothing on the *served* path changed" in flat, (
+        "state the reason the tree supports"
+    )
+    assert "no longer" in flat and "Nothing executable changed" in flat, (
+        "say that the earlier reason was retired, or the change looks cosmetic"
+    )
+    # the adapter must be named as the thing that does not import them
+    assert "generator_vllm.py`) imports neither" in flat, (
+        "name what makes them off-path, not just that they are"
+    )
+
+    # and the premise, checked against tt-metal itself
+    repo = _repo_beside("tt-metal")
+    if repo is None:
+        pytest.skip("tt-metal is not checked out beside this repo")
+
+    pin = _pinned_metal_from_readme(readme)
+    adapter = "models/demos/audio/qwen3_asr/tt/generator_vllm.py"
+    changed = subprocess.run(
+        ["git", "-C", repo, "diff", "--name-only", pin, "HEAD", "--",
+         "models/demos/audio/qwen3_asr"],
+        capture_output=True, text=True,
+    )
+    if changed.returncode != 0:
+        pytest.skip("the pinned commit is not in this checkout")
+
+    files = [f for f in changed.stdout.split() if f]
+    # the served path is the adapter plus tt/ generally; a change there would
+    # invalidate the verdict outright
+    served = [
+        f
+        for f in files
+        if f.startswith("models/demos/audio/qwen3_asr/tt/") and f != adapter
+    ]
+    assert not served, (
+        f"served-path files changed after the pin, so the verdict is wrong: {served}"
+    )
+
+    # and the adapter itself must still be comment-only
+    diff = subprocess.run(
+        ["git", "-C", repo, "diff", pin, "HEAD", "--", adapter],
+        capture_output=True, text=True,
+    ).stdout
+    executable = [
+        line
+        for line in diff.splitlines()
+        if line[:1] in "+-"
+        and not line.startswith(("+++", "---"))
+        and line[1:].strip()
+        and not line[1:].lstrip().startswith("#")
+    ]
+    assert not executable, (
+        "the adapter is no longer comment-only; the table says it is:\n"
+        + "\n".join(executable[:10])
+    )
+
+    # Every non-test file that changed after the pin must be named in the row.
+    # Without this the list can go stale silently: dropping a filename leaves
+    # the prose self-consistent, so the mutation survives -- verified by
+    # removing `reference/dump_reference.py` and watching the rest pass.
+    row = next(
+        line for line in readme.splitlines() if line.startswith("| `tt-metal` |")
+    )
+    for path in files:
+        if "/tests/" in path:
+            continue
+        name = path.split("models/demos/audio/qwen3_asr/", 1)[-1]
+        assert name in row, (
+            f"{name} changed after the pin but the table does not list it: {row}"
+        )
+
+
+def test_the_results_table_does_not_credit_the_unbuilt_image():
+    """"Measured ... with the image above" became false when the pin moved.
+
+    The pins name a commit no image has been built from, so attributing the
+    numbers to "the image above" credits an artifact that does not exist. The
+    table has to name the image that actually produced them.
+
+    That image is now `0.21.0-60166e19d45a...-acae5aa`: it was built from the
+    pin as it stood before tt-metal PR #49104 was squash-merged and this branch
+    was rebased, and it is still what serves on the host. The earlier wording
+    named `e7929dcf5dcf...`, which the rebuild superseded.
+    """
+    readme = _readme()
+    body = readme[readme.index("Measured on the delivery p150") :]
+    body = body[: body.index("| TED 509 clips")]
+    flat = " ".join(body.split())
+
+    assert "with the image above" not in flat or "Not with the image" in flat, (
+        "the pins above name an image that has not been built"
+    )
+    assert "60166e19d45a" in flat, "name the image the numbers came from"
+    # and say why it is not the pinned one, so the mismatch is explained rather
+    # than looking like an oversight
+    assert "#49104" in flat and "rebased" in flat, (
+        "say why the measuring image and the pin differ"
+    )
+
+
+def test_the_readme_admits_no_image_exists_at_the_current_pins():
+    """The pin moved, so the measurements predate it -- and this time it matters.
+
+    Earlier pin moves were "moves no default" cases: the delta was our own
+    code and could be reasoned about. This one is a rebase onto the
+    squash-merge of tt-metal PR #49104, which also pulls in upstream's
+    rewritten models/tt_transformers -- the base class this model subclasses.
+    That code runs under every request, so the figures cannot be waved through
+    as unaffected; they are unverified until a rebuild reproduces them.
+
+    The section therefore has to say three things: which image the numbers came
+    from, that the new pin cannot be built until the rebased branch is
+    force-pushed, and that the numbers are not yet confirmed at it.
+    """
+    readme = _readme()
+    body = readme[readme.index("**No image exists at these pins yet.**") :]
+    body = body[: body.index("\n## Install")]
+    flat = " ".join(body.split())
+
+    assert "No image exists at these pins yet" in flat
+    # which image the numbers actually came from
+    assert "60166e19d45a" in flat, (
+        "name the image the measurements were taken on, or 'predates' is "
+        "unfalsifiable"
+    )
+    # why the pin moved at all, so the SHA change does not look arbitrary
+    assert "#49104" in flat and "rebase" in flat.lower(), (
+        "say why the pin moved; a bare new SHA reads as an unexplained edit"
+    )
+    # the blocker on rebuilding, in the right direction
+    assert "force-push" in flat, (
+        "the rebuild depends on the push; say so"
+    )
+    # and the honest status of the figures -- this is the part that changed
+    assert "unverified at the new pin" in flat, (
+        "upstream's tt_transformers rewrite is in the image and runs under "
+        "every request, so the figures may not carry over; do not imply they do"
+    )
+    # The "moves no default" reasoning applied to our own code and must not be
+    # reused for an upstream rewrite of the base class. The phrase may still
+    # appear -- but only in the sentence that retires it, never as the verdict.
+    if "moves no default" in flat:
+        assert 'is **not** a "moves no default" case' in flat, (
+            "that reasoning applied to our own code, not to an upstream "
+            "rewrite of the base class; it may only appear as retired"
+        )
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_serves_the_batch_width_the_comment_measured(spec_id):
+    """max_concurrency was the one declaration nothing asserted.
+
+    The comment beside it justifies 4 with a throughput sweep (1->2->4 scales
+    2.56 -> 4.59 -> 7.60 audio-s/s, and 8 regresses to 3.06 because prefill is
+    run one user at a time), and it is also the customer's ASR_CONCURRENCY. It
+    reaches vLLM as max_num_seqs, so changing it changes the operating point
+    every number in the runbook was taken at -- and the harness defaults are
+    pinned to it by tests/test_asr_harness_defaults_agree.py.
+    """
+    assert MODEL_SPECS[spec_id].device_model_spec.max_concurrency == 4
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_caps_the_context_at_the_kv_budget_it_was_sized_for(spec_id):
+    """max_context reaches vLLM as max_model_len and sizes the KV allocation.
+
+    The adapter's get_max_tokens_all_users() returns max_model_len *
+    max_num_seqs; at 2048 x 4 / block 64 that is the 128 (+padding) blocks the
+    device is given. Before that method existed the plugin fell back to 131072
+    tokens and overrode the block count to 2052 -- a 15x over-allocation, all
+    of it written to the device as zeros at startup, i.e. pure start-up time.
+    Raising max_context here scales that allocation linearly.
+    """
+    assert MODEL_SPECS[spec_id].device_model_spec.max_context == 2048
+
+
+def test_the_multi_weight_template_still_pins_its_display_name():
+    """Both weights must resolve to one display name, and it must be pinned.
+
+    The template lists two weights, and without an explicit
+    model_display_name the name is derived from whichever weight happens to be
+    first -- so reordering the list would rename the model. The comment in the
+    spec says exactly this; assert it rather than trusting the comment.
+    """
+    names = {MODEL_SPECS[spec_id].model_name for spec_id in ASR_SPEC_IDS}
+    assert names == {"Qwen3-ASR-1.7B", "Qwen3-ASR-1.7B-JA"}, names
+
+    spec_text = _spec_yaml()
+    qwen = spec_text[spec_text.index("Qwen3-ASR served through the TT vLLM backend") :]
+    assert "model_display_name: Qwen3-ASR-1.7B" in qwen, (
+        "the display name is no longer pinned; it would follow the weight order"
+    )
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_declares_both_offline_switches(spec_id):
+    """HF_HUB_OFFLINE alone does not stop transformers from reaching the hub.
+
+    The weights are staged by the runbook and the container has no business
+    contacting huggingface.co at start-up; the two variables cover the two
+    libraries that would. Only HF_HUB_OFFLINE was ever asserted, so dropping
+    the transformers one would have gone unnoticed.
+    """
+    env_vars = MODEL_SPECS[spec_id].env_vars
+    assert env_vars["HF_HUB_OFFLINE"] == "1"
+    assert env_vars["TRANSFORMERS_OFFLINE"] == "1"
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_states_its_own_footprint(spec_id):
+    """min_disk_gb / min_ram_gb must be declared, not inferred.
+
+    ModelSpec derives them from param_count when they are absent, and
+    infer_param_count() truncates "1.7B" to 1 -- so an inferred budget would be
+    computed from a 1-billion-parameter model. The declarations are what keep
+    that wrong number out of the disk and RAM guards.
+    """
+    spec = MODEL_SPECS[spec_id]
+    assert spec.min_disk_gb == 15
+    assert spec.min_ram_gb == 6
+
+
+def test_the_footprint_is_declared_because_the_inference_would_be_wrong():
+    """Guard the premise of the test above.
+
+    If infer_param_count() ever learns to read 1.7, the declarations stop being
+    load-bearing and this test says so instead of leaving the reasoning stale.
+    """
+    from workflows.model_spec import ModelSpec
+
+    assert ModelSpec.infer_param_count("neosophie/Qwen3-ASR-1.7B-JA") == 1, (
+        "the inference no longer truncates 1.7B to 1; revisit why the spec "
+        "declares min_disk_gb / min_ram_gb explicitly"
+    )
+
+
+@pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)
+def test_asr_spec_is_the_default_impl_for_p150(spec_id):
+    """Nothing else serves Qwen3-ASR, so it has to be the default.
+
+    Without default_impl the resolver has no leaf to pick for P150 and the
+    documented run command cannot name the model by weight alone.
+    """
+    assert MODEL_SPECS[spec_id].device_model_spec.default_impl is True
+
+
+def _supervisor_env_reads():
+    """Every ${VAR:-default} the supervisor script expands, with its default."""
+    import re
+
+    found = {}
+    for var, default in re.findall(
+        r"\$\{([A-Z_][A-Z0-9_]*):-([^}]*)\}", _supervisor()
+    ):
+        # first expansion wins; later ones reuse the resolved value
+        found.setdefault(var, default)
+    return found
+
+
+def _supervisor_env_table():
+    readme = _readme()
+    start = readme.index("| variable | default | note |")
+    table = readme[start:]
+    return table[: table.index("\n\n")]
+
+
+def test_the_runbook_documents_every_variable_the_supervisor_reads():
+    """The table is the only place an operator learns what can be overridden.
+
+    It listed nine of the ten and there was no test that it listed any
+    particular number, so HF_TOKEN -- which the script exports into run.py's
+    environment -- was absent with nothing to notice. Scan the script instead
+    of restating its variables, so the eleventh cannot be missed either.
+    """
+    reads = _supervisor_env_reads()
+    assert reads, "the scan found no ${VAR:-default} expansions; pattern is stale"
+
+    table = _supervisor_env_table()
+    missing = [var for var in sorted(reads) if f"`{var}`" not in table]
+    assert not missing, (
+        f"the supervisor reads {missing} but the runbook table does not list them"
+    )
+
+
+def test_the_supervisor_table_has_one_row_per_variable():
+    """Two rows for one variable let a stale one survive beside a correct one."""
+    table = _supervisor_env_table()
+    for var in sorted(_supervisor_env_reads()):
+        rows = [line for line in table.splitlines() if f"`{var}`" in line.split("|")[1]]
+        assert len(rows) == 1, f"{var} has {len(rows)} rows in the table"
+
+
+def test_the_first_transcription_range_covers_every_run_we_recorded():
+    """The quoted range is a claim about our own measurements.
+
+    It read "6m27s-6m35s over five runs" long after fourteen had been taken,
+    two of which (6m40.0s and 6m44.8s) fell outside it -- the second measured
+    in the very session that left the sentence alone. A range narrower than
+    the observations tells the reader 6m36s is abnormal when it is not, and it
+    is the stated basis for CANARY_FIRST_TIMEOUT.
+
+    The runbook's own numbers are the evidence here: the worked example quotes
+    6m33.591s, and the range has to contain it with room for the spread.
+    """
+    readme = _readme()
+    row = _readme_row(readme, "`CANARY_FIRST_TIMEOUT`")
+
+    bounds = re.search(r"measured (\d+)m(\d+)s[\u2013-](\d+)m(\d+)s", row)
+    assert bounds, f"the row must state a measured range: {row[:200]}"
+    low = int(bounds.group(1)) * 60 + int(bounds.group(2))
+    high = int(bounds.group(3)) * 60 + int(bounds.group(4))
+    assert low < high, (low, high)
+
+    # the worked example elsewhere in the runbook must sit inside the range
+    example = re.search(r"real (\d+)m([\d.]+)s` for the\s*\n?first transcription", readme)
+    assert example, "the runbook no longer quotes a first-transcription time"
+    example_s = int(example.group(1)) * 60 + float(example.group(2))
+    assert low <= example_s <= high, (
+        f"the worked example {example_s}s is outside the quoted range "
+        f"{low}-{high}s"
+    )
+
+    # and every run named in the row must be inside it, at BOTH ends. The
+    # upper bound was the one that had drifted, so only it was checked -- and
+    # the very next measurement (6m25.8s) fell off the *bottom* instead.
+    named = [
+        int(m.group(1)) * 60 + float(m.group(2))
+        for m in re.finditer(r"(\d+)m([\d.]+)s", row)
+    ]
+    assert named, row
+    assert max(named) <= high, (
+        f"the row names {max(named)}s but claims the range tops out at {high}s"
+    )
+    assert min(named) >= low, (
+        f"the row names {min(named)}s but claims the range starts at {low}s"
+    )
+
+
+def test_the_first_transcription_budget_clears_the_quoted_range():
+    """CANARY_FIRST_TIMEOUT is justified by that range, so it must exceed it.
+
+    Reading the bound out of the README rather than restating it means
+    widening the range without revisiting the budget fails here.
+    """
+    row = _readme_row(_readme(), "`CANARY_FIRST_TIMEOUT`")
+    bounds = re.search(r"measured \d+m\d+s[\u2013-](\d+)m(\d+)s", row)
+    assert bounds, row[:200]
+    high = int(bounds.group(1)) * 60 + int(bounds.group(2))
+
+    budget = re.search(
+        r'CANARY_FIRST_TIMEOUT="\$\{CANARY_FIRST_TIMEOUT:-(\d+)\}"', _supervisor()
+    )
+    assert budget, "the budget must stay a named, overridable value"
+    assert int(budget.group(1)) > high, (
+        f"the budget {budget.group(1)}s does not clear the quoted worst case {high}s"
+    )
+
+
+def test_the_supervisor_is_valid_shell():
+    """Every other check here reads the script as text; none runs a parser.
+
+    It is 374 lines started by systemd with Restart=always, so a syntax error
+    does not surface as a broken test -- ExecStart fails immediately, systemd
+    retries every RestartSec=15, and the service never comes up while every
+    text assertion in this file still passes. `git apply --check` is already
+    shelled out to below, so there is no reason not to.
+    """
+    import subprocess
+
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "scripts", "qwen3_asr", "asr_supervisor.sh"
+    )
+    result = subprocess.run(
+        ["bash", "-n", path], capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"asr_supervisor.sh is not valid bash: {result.stderr}"
+    )
+
+
+def test_the_unit_file_is_parsed_by_systemd_with_nothing_ignored():
+    """The script gets `bash -n`; the unit beside it got two string checks.
+
+    A unit is only as good as what systemd makes of it, and systemd *ignores*
+    what it cannot understand rather than refusing. Measured with
+    systemd-analyze 255 on this host:
+
+        Restart=always -> Resart=always   "Unknown key name ... ignoring"  exit 0
+        RestartSec=15  -> RestartSec=abc  "Failed to parse sec value"      exit 0
+        relative ExecStart / no [Service] / missing binary                 exit 1
+
+    So the two directives that make this a *supervisor* -- restart on exit and
+    the delay between attempts -- can both be typo'd into nothing while the
+    exit code stays 0 and every containment check in this file still passes.
+    The assertion is therefore on the diagnostics, not only on the status.
+    """
+    import shutil
+    import subprocess
+
+    analyze = shutil.which("systemd-analyze")
+    if analyze is None:
+        pytest.skip("systemd-analyze is not available")
+
+    path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "scripts",
+        "qwen3_asr",
+        "qwen3asr-supervisor.service",
+    )
+    # systemd-analyze resolves a bare name against the unit search path, so
+    # pass a path it cannot mistake for an installed unit name.
+    result = subprocess.run(
+        [analyze, "verify", os.path.abspath(path)],
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    # ExecStart names a path that only exists on a deployed host; that is the
+    # one diagnostic this checkout cannot satisfy.
+    noise = ("is not executable", "Failed to open", "Unit configuration has no")
+    complaints = [
+        line
+        for line in output.splitlines()
+        if line.strip() and not any(skip in line for skip in noise)
+    ]
+    assert not complaints, "systemd rejected or ignored part of the unit:\n" + "\n".join(
+        complaints
+    )
+
+
+def test_the_unit_keeps_the_directives_that_make_it_a_supervisor():
+    """systemd ignoring a typo'd key is exactly why these are asserted here.
+
+    Without Restart= the supervisor dies with its first crash and the service
+    is worse than no unit at all; without a RestartSec= the retries are the
+    default 100 ms, which on a wedged board is a hot loop against a device
+    reset. Both are only meaningful if systemd actually parsed them, which the
+    check above is what establishes.
+    """
+    unit = _unit_file()
+    directives = dict(
+        line.split("=", 1)
+        for line in unit.splitlines()
+        if "=" in line and not line.startswith(("#", "[", ";"))
+    )
+    assert directives.get("Restart") == "always", (
+        "the supervisor must be restarted whenever it exits, for any reason"
+    )
+    assert directives.get("RestartSec", "").rstrip("s").isdigit(), (
+        f"RestartSec must be a number systemd can parse: {directives.get('RestartSec')!r}"
+    )
+    assert int(directives["RestartSec"].rstrip("s")) >= 5, (
+        "a sub-second retry loop against a device reset is not a supervisor"
+    )
+    # Type=simple + no start timeout: the script's own wait_healthy budget is
+    # 20 minutes, so a systemd start timeout would kill it mid-warmup.
+    assert directives.get("TimeoutStartSec") == "0", (
+        "startup takes 7-12 minutes; systemd must not time it out"
+    )
+
+
+def test_the_unit_file_points_at_a_script_that_parses():
+    """The unit names an absolute path; check the file it would actually run.
+
+    Only the checked-out copy exists here, but the unit's ExecStart has to
+    name the script this test just parsed -- otherwise a valid script sits
+    beside a unit pointing somewhere else.
+    """
+    unit = _unit_file()
+    exec_start = [
+        line for line in unit.splitlines() if line.startswith("ExecStart=")
+    ]
+    assert len(exec_start) == 1, exec_start
+    assert exec_start[0].endswith("asr_supervisor.sh 8101"), exec_start[0]
+    assert "scripts/qwen3_asr/asr_supervisor.sh" in exec_start[0], (
+        "the unit must run the checked-out script, not a copy"
+    )
+
+
+def test_the_supervisor_does_not_set_e():
+    """-e would abort the recovery loop, which uses non-zero exits as control.
+
+    Stating this keeps someone from "hardening" the script into one that dies
+    the first time a canary times out -- which is the situation it exists to
+    handle. `set -u` is there and is what catches the typo'd variable.
+    """
+    sh = _supervisor()
+    set_lines = [
+        line.strip() for line in sh.splitlines() if line.strip().startswith("set ")
+    ]
+    assert set_lines == ["set -u"], (
+        f"expected only `set -u`; found {set_lines}. -e/pipefail would abort "
+        f"the monitor loop on the failures it is written to recover from"
+    )
+    # and the control flow that depends on it must still be there
+    assert "if ! " in sh or "|| true" in sh, (
+        "the loop no longer uses non-zero exits as control flow; revisit -e"
+    )
+
+
+ADAPTER = os.path.join(
+    os.path.dirname(__file__), "..", "evals", "lmms_eval_models", "qwen3_asr_openai.py"
+)
+
+
+def _adapter_fn(name, namespace=None):
+    """Compile one function out of the lmms-eval adapter.
+
+    The module imports lmms_eval, which is not installed here (it is pulled
+    into a workflow venv by setup_evals_audio), so it cannot be imported. The
+    two functions below are plain numpy/wave code and can be extracted.
+    """
+    import ast
+
+    with open(ADAPTER) as fh:
+        tree = ast.parse(fh.read())
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            module = ast.Module(body=[node], type_ignores=[])
+            ns = dict(namespace or {})
+            exec(compile(module, ADAPTER, "exec"), ns)  # noqa: S102 - our own source
+            return ns[name]
+    raise AssertionError(f"{name} not found in qwen3_asr_openai.py")
+
+
+def test_the_adapter_encodes_audio_as_the_wav_the_server_expects():
+    """Nothing has ever run the code that builds the request body.
+
+    Every test around this file checks that it is orphaned; none calls into
+    it. _wav_bytes turns a float waveform into the bytes posted to
+    /v1/audio/transcriptions, and each way it can break produces a valid WAV
+    carrying the wrong audio -- an HTTP 200 and a bad transcript, visible only
+    in CER.
+    """
+    import io
+    import numpy as np
+    import wave
+
+    wav_bytes = _adapter_fn("_wav_bytes", {"np": np, "io": io, "wave": wave})
+
+    audio = np.array([0.0, 0.5, -0.5, 1.0, -1.0], dtype=np.float32)
+    data = wav_bytes(None, audio, 16000)
+
+    with wave.open(io.BytesIO(data), "rb") as handle:
+        assert handle.getnchannels() == 1, "the server is sent mono"
+        assert handle.getsampwidth() == 2, "16-bit PCM"
+        assert handle.getframerate() == 16000, "the sample rate must be carried through"
+        assert handle.getnframes() == len(audio)
+        frames = handle.readframes(handle.getnframes())
+
+    decoded = np.frombuffer(frames, dtype="<i2")
+    assert decoded.tolist() == [0, 16383, -16383, 32767, -32767], (
+        f"the sample values changed: {decoded.tolist()}"
+    )
+
+
+def test_the_adapter_clips_instead_of_wrapping_around():
+    """Out-of-range samples must saturate, not overflow.
+
+    Without the clip, 1.5 * 32767 does not fit in int16 and wraps to a large
+    negative number -- silence turns into a loud click and the transcript
+    degrades with no error anywhere.
+    """
+    import io
+    import numpy as np
+    import wave
+
+    wav_bytes = _adapter_fn("_wav_bytes", {"np": np, "io": io, "wave": wave})
+
+    loud = np.array([1.5, -1.5], dtype=np.float32)
+    with wave.open(io.BytesIO(wav_bytes(None, loud, 16000)), "rb") as handle:
+        decoded = np.frombuffer(handle.readframes(handle.getnframes()), dtype="<i2")
+
+    assert decoded.tolist() == [32767, -32767], (
+        f"samples outside [-1, 1] must saturate, got {decoded.tolist()}"
+    )
+
+
+def test_the_adapter_writes_little_endian_samples():
+    """WAV is little-endian; a byte-swapped file is valid and wrong.
+
+    Checked on the raw bytes rather than through numpy's dtype, so the
+    assertion cannot be satisfied by reading back with the same wrong dtype.
+    """
+    import io
+    import numpy as np
+    import wave
+
+    wav_bytes = _adapter_fn("_wav_bytes", {"np": np, "io": io, "wave": wave})
+
+    with wave.open(io.BytesIO(wav_bytes(None, np.array([1.0], np.float32), 16000)), "rb") as handle:
+        frames = handle.readframes(1)
+
+    assert frames == b"\xff\x7f", f"32767 must be written little-endian, got {frames!r}"
+
+
+def test_the_adapter_skips_resampling_when_the_rate_already_matches():
+    """The equal-rate short circuit is what keeps librosa off the hot path.
+
+    Asserting `out is audio` is not enough: librosa.resample returns its
+    input unchanged when the rates match, so deleting the guard leaves that
+    identity intact and the clip still goes through librosa on every call.
+    Check the guard itself, and that no resampler runs behind it.
+    """
+    import ast
+    import numpy as np
+
+    downsample = _adapter_fn("_downsample", {"np": np})
+
+    audio = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+    out = downsample(audio, 16000, 16000)
+
+    assert out is audio, "an unchanged rate must return the same array untouched"
+
+    # ...and it must get there without calling a resampler at all. Compile the
+    # function against a librosa that fails if touched.
+    class _Boom:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"librosa.{name} was called for an unchanged sample rate"
+            )
+
+    import sys
+
+    guarded = _adapter_fn("_downsample", {"np": np})
+    saved = sys.modules.get("librosa")
+    sys.modules["librosa"] = _Boom()
+    try:
+        assert guarded(audio, 16000, 16000) is audio
+    finally:
+        if saved is None:
+            del sys.modules["librosa"]
+        else:
+            sys.modules["librosa"] = saved
+
+    # and the short circuit must be the first thing in the body, so it cannot
+    # be reached only after some other work has already happened
+    with open(ADAPTER) as fh:
+        tree = ast.parse(fh.read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_downsample":
+            first = node.body[0]
+            assert isinstance(first, ast.If), (
+                "the equal-rate short circuit must be the first statement"
+            )
+            assert "orig_sr == target_sr" in ast.unparse(first.test), (
+                f"unexpected guard: {ast.unparse(first.test)}"
+            )
+            break
+    else:
+        raise AssertionError("_downsample not found")
+
+
+def test_the_adapter_defers_the_librosa_import():
+    """librosa is only needed when a rate conversion actually happens.
+
+    A module-level import would make the adapter unimportable wherever
+    librosa is absent -- which is most places, since it is installed into the
+    evals workflow venv rather than the server environment.
+    """
+    with open(ADAPTER) as fh:
+        source = fh.read()
+
+    module_level = [
+        line
+        for line in source.splitlines()
+        if line.startswith("import librosa") or line.startswith("from librosa")
+    ]
+    assert not module_level, f"librosa must stay a local import: {module_level}"
+    assert "    import librosa" in source, "the deferred import must still be there"
+
+
+def _compile_ranges(text):
+    """Every "NmMs-NmMs" compile-time range stated in ``text``, as seconds."""
+    import re
+
+    found = []
+    for match in re.finditer(r"(\d+)m(\d+)s\s*[\u2013-]\s*(\d+)m(\d+)s", text):
+        low = int(match.group(1)) * 60 + int(match.group(2))
+        high = int(match.group(3)) * 60 + int(match.group(4))
+        found.append((low, high))
+    return found
+
+
+def test_every_place_that_states_the_compile_range_agrees():
+    """One measurement, three places that quote it -- they must not drift.
+
+    Widening the range to 6m25s-6m45s updated the runbook and this file's own
+    docstrings, and left the supervisor's canary_ok comment saying
+    "6m27s-6m35s across five runs" -- the very comment that justifies
+    CANARY_FIRST_TIMEOUT. The correction missed the copy that a reader
+    debugging the supervisor would find first.
+    """
+    readme_ranges = _compile_ranges(_readme_row(_readme(), "`CANARY_FIRST_TIMEOUT`"))
+    assert readme_ranges, "the runbook row must state the measured range"
+
+    supervisor_ranges = _compile_ranges(_supervisor())
+    assert supervisor_ranges, (
+        "the supervisor must keep stating the range its timeout is sized from"
+    )
+
+    assert set(supervisor_ranges) <= set(readme_ranges), (
+        f"the supervisor states {supervisor_ranges} but the runbook states "
+        f"{readme_ranges}; one of them is stale"
+    )
+
+
+def test_the_run_count_agrees_with_the_range_everywhere():
+    """"across five runs" outlived the five runs; pin the count too.
+
+    A stale count is what let the stale range hide: the sentence still read
+    plausibly, so nobody re-derived the bounds from it.
+    """
+    import re
+
+    readme_row = _readme_row(_readme(), "`CANARY_FIRST_TIMEOUT`")
+    readme_count = re.search(r"over (\w+) runs", readme_row)
+    assert readme_count, f"the runbook must say how many runs: {readme_row[:160]}"
+
+    supervisor = _supervisor()
+    supervisor_count = re.search(r"across (\w+) runs", supervisor)
+    if supervisor_count is None:
+        return  # the supervisor need not repeat the count, only not contradict it
+
+    assert supervisor_count.group(1) == readme_count.group(1), (
+        f"the supervisor says {supervisor_count.group(1)!r} runs, the runbook "
+        f"says {readme_count.group(1)!r}"
+    )
+
+
+def _run_supervisor_fn(body, procfs=None):
+    """Source one supervisor function and run ``body`` against it.
+
+    Extracts the named functions verbatim rather than restating them, so the
+    shell under test is the shell that ships. PORT and the other globals the
+    script reads at load time are not needed for the pure ones.
+    """
+    import re
+    import subprocess
+
+    source = _supervisor()
+    wanted = re.findall(r"^([a-z_]+)\(\) \{", source, re.M)
+
+    extracted = []
+    for name in wanted:
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}", source, re.M | re.S)
+        if match:
+            extracted.append(match.group(0))
+
+    script = "set -u\n" + "\n".join(extracted) + "\n" + body
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=procfs or ".",
+    )
+
+
+def _fake_procfs(tmp_path, pids):
+    """A /proc-shaped tree: {pid: cgroup_contents}."""
+    root = tmp_path / "proc"
+    for pid, cgroup in pids.items():
+        (root / str(pid)).mkdir(parents=True)
+        (root / str(pid) / "cgroup").write_text(cgroup)
+    return root
+
+
+# The two shapes measured on the delivery host, from /proc/<pid>/cgroup:
+#   container: 0::/system.slice/docker-fb8c01e7f609...scope
+#   host:      0::/user.slice/user-1000.slice/session-65134.scope
+CONTAINER_CGROUP = (
+    "0::/system.slice/"
+    "docker-fb8c01e7f609ba9c039278252737dc6cb29db2955e13782c4888e3671fcab74e.scope\n"
+)
+HOST_CGROUP = "0::/user.slice/user-1000.slice/session-65134.scope\n"
+
+
+def test_in_container_recognises_the_shapes_this_host_produces(tmp_path):
+    """The guard that keeps the supervisor off the container's server.
+
+    Twelve supervisor functions are named by tests in this file and none was
+    ever executed -- bash -n only proves it parses. This one is pure string
+    work on /proc/<pid>/cgroup, and it is what kill_ours consults before
+    killing anything; when it was absent the supervisor killed the production
+    server inside the container.
+
+    The two literals are the real formats read off the delivery host, not
+    invented ones.
+    """
+    proc = _fake_procfs(tmp_path, {111: CONTAINER_CGROUP, 222: HOST_CGROUP})
+
+    result = _run_supervisor_fn(
+        f'''
+        in_container() {{ grep -qE '/docker-|/docker/' "{proc}/$1/cgroup" 2>/dev/null; }}
+        in_container 111 && echo "111=container" || echo "111=host"
+        in_container 222 && echo "222=container" || echo "222=host"
+        in_container 999 && echo "999=container" || echo "999=host"
+        '''
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.split()
+    assert lines == ["111=container", "222=host", "999=host"], lines
+
+
+def test_in_container_matches_both_cgroup_layouts():
+    """cgroup v1 writes /docker/<id>, v2 writes /docker-<id>.scope.
+
+    The pattern carries both spellings; dropping either makes the guard
+    silently answer "not a container" on that layout, which is the failing
+    direction -- it kills rather than spares.
+    """
+    source = _supervisor()
+    match = re.search(r"in_container\(\) \{.*?\}", source, re.S)
+    assert match, "in_container must stay a shell function"
+
+    body = match.group(0)
+    assert "/docker-" in body, "cgroup v2 (docker-<id>.scope) must be matched"
+    assert "/docker/" in body, "cgroup v1 (/docker/<id>) must be matched"
+
+
+def test_kill_ours_spares_containerised_pids_and_kills_host_ones(tmp_path):
+    """The behaviour, not the presence, of the guard.
+
+    kill_ours is the function that once killed the container's server. Run it
+    with pgrep and kill stubbed so the decision is observable: a pid whose
+    cgroup says container must be logged and left alone, a host pid must be
+    killed, and the supervisor's own pid must never be touched.
+    """
+    proc = _fake_procfs(tmp_path, {111: CONTAINER_CGROUP, 222: HOST_CGROUP})
+    killed = tmp_path / "killed"
+
+    result = _run_supervisor_fn(
+        f'''
+        LOG=/dev/null
+        log() {{ echo "LOG: $*"; }}
+        in_container() {{ grep -qE '/docker-|/docker/' "{proc}/$1/cgroup" 2>/dev/null; }}
+        pgrep() {{ echo 111; echo 222; echo $$; }}
+        kill() {{ echo "$1" >> "{killed}"; }}
+        kill_ours "run.py"
+        '''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "leaving containerised pid 111 alone" in result.stdout, result.stdout
+
+    actually_killed = killed.read_text().split() if killed.exists() else []
+    assert actually_killed == ["222"], (
+        f"only the host pid may be killed, killed: {actually_killed}"
+    )
+
+
+def test_kill_ours_never_kills_the_supervisor_itself(tmp_path):
+    """$$ is in pgrep's output because the pattern matches the script too.
+
+    Without the skip the supervisor kills itself on the first recovery, and
+    systemd restarts it into the same situation.
+    """
+    proc = _fake_procfs(tmp_path, {333: HOST_CGROUP})
+    killed = tmp_path / "killed"
+
+    result = _run_supervisor_fn(
+        f'''
+        LOG=/dev/null
+        log() {{ :; }}
+        in_container() {{ grep -qE '/docker-|/docker/' "{proc}/$1/cgroup" 2>/dev/null; }}
+        pgrep() {{ echo $$; }}
+        kill() {{ echo "$1" >> "{killed}"; }}
+        kill_ours "run.py"
+        '''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not killed.exists(), (
+        f"the supervisor's own pid was killed: {killed.read_text()}"
+    )
+
+
+def test_relax_device_perms_widens_only_the_character_devices(tmp_path):
+    """The runbook says this was "exercised both ways on the host" -- do that here.
+
+    The earlier `chmod 666 /dev/tenstorrent/*` matched the by-id directory
+    udev creates and dropped its execute bit, leaving it untraversable until
+    the next boot; it sat that way on the delivery host for days. The fix is
+    the `[ -c "$node" ]` test, and until now only its presence in the source
+    was asserted.
+
+    Creating a character device needs root, so chmod is stubbed and the
+    helper's decisions are recorded: what it chose to widen is the thing
+    under test. /dev/null stands in for the chip node -- it is a character
+    device on every Linux -- and a real directory for by-id.
+    """
+    import os
+    import re
+    import subprocess
+
+    log = tmp_path / "chmodded"
+    helper = re.search(r"relax_device_perms\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    assert helper, "relax_device_perms must stay a shell function"
+
+    # Feed the loop the two real entry kinds by name, via a stubbed glob.
+    body = helper.group(0).replace(
+        "/dev/tenstorrent/*", '/dev/null "%s/by-id"' % tmp_path
+    )
+    (tmp_path / "by-id").mkdir()
+
+    script = (
+        "set -u\n"
+        f'sudo() {{ shift; echo "$2" >> "{log}"; }}\n'
+        f"{body}\nrelax_device_perms\n"
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert not result.stderr, result.stderr
+
+    widened = log.read_text().split() if log.exists() else []
+    assert widened == ["/dev/null"], (
+        f"only the character device may be chmod'ed; the helper chose {widened}"
+    )
+    assert str(tmp_path / "by-id") not in widened, (
+        "the by-id directory must never be chmod'ed -- 666 drops its x bit"
+    )
+
+
+def test_the_old_glob_really_did_break_the_directory(tmp_path):
+    """Guard the premise: without the -c test the directory does lose x.
+
+    If a future chmod becomes harmless on directories, the test above stops
+    being load-bearing and this says so rather than leaving dead reasoning.
+    """
+    import os
+    import stat
+    import subprocess
+
+    devdir = tmp_path / "tenstorrent"
+    devdir.mkdir()
+    (devdir / "by-id").mkdir()
+    os.chmod(devdir / "by-id", 0o755)
+
+    result = subprocess.run(
+        ["bash", "-c", f"chmod 666 {devdir}/*"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+    mode = stat.S_IMODE(os.stat(devdir / "by-id").st_mode)
+    assert not mode & stat.S_IXUSR, (
+        f"the unguarded glob no longer drops the execute bit ({oct(mode)}); "
+        f"revisit why relax_device_perms tests for a character device"
+    )
+
+
+def test_no_caller_depends_on_relax_device_perms_exit_status():
+    """Its status is the last `[ -c ]` test, which is normally false.
+
+    /dev/tenstorrent/by-id sorts after the numbered nodes, so the loop's last
+    iteration fails the character-device test and the function returns 1 on a
+    perfectly healthy host. That is fine only because nothing reads it and the
+    script does not run under set -e; both of those have to stay true.
+    """
+    sh = _supervisor()
+
+    consumed = [
+        line.strip()
+        for line in sh.splitlines()
+        if "relax_device_perms" in line
+        and any(
+            token in line
+            for token in ("if ", "&&", "||", "! ", "while ", "until ")
+        )
+    ]
+    assert not consumed, (
+        f"these read a status that is normally 1: {consumed}"
+    )
+
+    set_lines = [ln.strip() for ln in sh.splitlines() if ln.strip().startswith("set ")]
+    assert set_lines == ["set -u"], (
+        f"set -e would abort on relax_device_perms' normal exit: {set_lines}"
+    )
+
+
+def test_the_old_glob_really_did_break_the_directory(tmp_path):
+    """Guard the premise: without the -c test the directory does lose x.
+
+    If a future chmod becomes harmless on directories, the test above stops
+    being load-bearing and this says so rather than leaving dead reasoning.
+    """
+    import os
+    import stat
+    import subprocess
+
+    devdir = tmp_path / "tenstorrent"
+    devdir.mkdir()
+    (devdir / "by-id").mkdir()
+    os.chmod(devdir / "by-id", 0o755)
+
+    result = subprocess.run(
+        ["bash", "-c", f"chmod 666 {devdir}/*"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+    mode = stat.S_IMODE(os.stat(devdir / "by-id").st_mode)
+    assert not mode & stat.S_IXUSR, (
+        f"the unguarded glob no longer drops the execute bit ({oct(mode)}); "
+        f"revisit why relax_device_perms tests for a character device"
+    )
+
+
+def _run_supervisor_with_stubs(function, stubs, invocation):
+    """Source ``function`` verbatim from the script and run it under ``stubs``.
+
+    The functions are extracted rather than restated, so the shell under test
+    is the shell that ships. Anything the function calls out to is stubbed by
+    name, which makes its decisions observable without a chip.
+    """
+    import re
+    import subprocess
+
+    source = _supervisor()
+    match = re.search(rf"^{function}\(\) \{{.*?^\}}", source, re.M | re.S)
+    assert match, f"{function} must stay a shell function"
+
+    script = "set -u\n" + stubs + "\n" + match.group(0) + "\n" + invocation
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+def test_recover_device_does_not_reset_a_chip_a_container_holds(tmp_path):
+    """The most destructive action in the script, checked by running it.
+
+    recover_device calls `tt-smi -r`, which resets the chip the deployment is
+    serving on and reports success afterwards because the board itself reads
+    fine. The existing test asserts four strings appear in the right order;
+    that holds even if the guard's logic is inverted or `held` is built
+    wrongly. Run it with the chip "held" by a containerised pid and require
+    that tt-smi is never invoked.
+    """
+    smi_calls = tmp_path / "smi"
+
+    stubs = f'''
+        TTSMI=tt-smi
+        log() {{ echo "LOG: $*"; }}
+        device_holders() {{ echo 111; }}
+        in_container() {{ [ "$1" = 111 ]; }}
+        sudo() {{ echo "$*" >> "{smi_calls}"; }}
+        device_ok() {{ return 0; }}
+        relax_device_perms() {{ :; }}
+        sleep() {{ :; }}
+        ipmitool() {{ :; }}
+    '''
+    result = _run_supervisor_with_stubs(
+        "recover_device", stubs, 'recover_device; echo "rc=$?"'
+    )
+
+    assert "rc=1" in result.stdout, (
+        f"a held chip must make recover_device decline: {result.stdout}"
+    )
+    assert "not recovering" in result.stdout, result.stdout
+    assert not smi_calls.exists(), (
+        f"tt-smi was invoked while a container held the chip: "
+        f"{smi_calls.read_text()}"
+    )
+
+
+def test_recover_device_does_reset_when_nothing_containerised_holds_it(tmp_path):
+    """The other half: a guard that never lets through is also broken.
+
+    If this direction stopped working the supervisor could never recover the
+    board, which is the reason it exists.
+    """
+    smi_calls = tmp_path / "smi"
+
+    stubs = f'''
+        TTSMI=tt-smi
+        log() {{ echo "LOG: $*"; }}
+        device_holders() {{ echo 222; }}
+        in_container() {{ return 1; }}
+        sudo() {{ echo "$*" >> "{smi_calls}"; }}
+        device_ok() {{ return 0; }}
+        relax_device_perms() {{ :; }}
+        sleep() {{ :; }}
+    '''
+    result = _run_supervisor_with_stubs(
+        "recover_device", stubs, 'recover_device; echo "rc=$?"'
+    )
+
+    assert "rc=0" in result.stdout, result.stdout
+    assert smi_calls.exists(), "a free chip must be reset"
+    assert "-r" in smi_calls.read_text(), smi_calls.read_text()
+
+
+def test_stop_server_never_sigkills_a_containerised_holder(tmp_path):
+    """The SIGKILL escalation must skip the deployment's own processes.
+
+    stop_server escalates to kill -9 for whatever still holds the chip. A
+    containerised holder belongs to the running deployment, so killing it is
+    the same failure kill_ours was fixed for -- and here it is SIGKILL, which
+    the process cannot decline.
+    """
+    killed = tmp_path / "killed"
+
+    stubs = f'''
+        log() {{ echo "LOG: $*"; }}
+        kill_ours() {{ :; }}
+        sleep() {{ :; }}
+        device_holders() {{ echo 111; echo 222; }}
+        in_container() {{ [ "$1" = 111 ]; }}
+        kill() {{ echo "$*" >> "{killed}"; }}
+    '''
+    result = _run_supervisor_with_stubs("stop_server", stubs, "stop_server")
+
+    assert result.returncode == 0, result.stderr
+    assert "containerised pid 111 -- leaving it alone" in result.stdout, result.stdout
+
+    escalated = killed.read_text().split() if killed.exists() else []
+    assert "111" not in escalated, (
+        f"the containerised holder was SIGKILLed: {escalated}"
+    )
+    assert escalated == ["-9", "222"], (
+        f"only the host holder may be escalated to, got {escalated}"
+    )
+
+
+def test_stop_server_skips_the_escalation_when_nothing_is_stubborn(tmp_path):
+    """`kill -9` with an empty list would kill nothing -- or the shell's own job.
+
+    The `[ -n "$stubborn" ]` test is what keeps `kill -9` from running with no
+    arguments; the word-splitting is deliberate (shellcheck is disabled on
+    that line), so an empty value must not reach it.
+    """
+    killed = tmp_path / "killed"
+
+    stubs = f'''
+        log() {{ echo "LOG: $*"; }}
+        kill_ours() {{ :; }}
+        sleep() {{ :; }}
+        device_holders() {{ echo 111; }}
+        in_container() {{ return 0; }}
+        kill() {{ echo "$*" >> "{killed}"; }}
+    '''
+    result = _run_supervisor_with_stubs("stop_server", stubs, "stop_server")
+
+    assert result.returncode == 0, result.stderr
+    assert not killed.exists(), (
+        f"kill was invoked with nothing stubborn: {killed.read_text()}"
+    )
+
+
+
+def _reroot_proc(body, proc):
+    """Point device_holders at a fixture tree instead of the real /proc.
+
+    The function strips the literal "/proc/" prefix to get the pid, so both
+    the glob and that strip have to move together -- rewriting only the glob
+    leaves it echoing full paths.
+    """
+    return body.replace("/proc/[0-9]*/fd", f"{proc}/[0-9]*/fd").replace(
+        '${fd#/proc/}', f'${{fd#{proc}/}}'
+    )
+
+def test_device_holders_reports_pids_whose_fds_point_at_the_chip(tmp_path):
+    """The scan both guards depend on -- if it finds nothing they pass vacuously.
+
+    recover_device and stop_server decide from this list, so a scan that
+    silently returns empty makes the tt-smi -r guard and the SIGKILL guard
+    both hold for the wrong reason. Until now it was asserted only by
+    grepping for "/proc/[0-9]*/fd" and "readlink".
+
+    Build a /proc-shaped tree with symlinks and run the function against it.
+    """
+    import os
+    import re
+    import subprocess
+
+    proc = tmp_path / "proc"
+    for pid, target in (
+        ("111", "/dev/tenstorrent/0"),
+        ("222", "/dev/null"),
+        ("333", "/dev/tenstorrent/by-id/blackhole-abc"),
+    ):
+        fd = proc / pid / "fd"
+        fd.mkdir(parents=True)
+        os.symlink(target, fd / "3")
+    # a pid with no fd directory at all must not break the walk
+    (proc / "444").mkdir()
+
+    match = re.search(r"^device_holders\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    assert match, "device_holders must stay a shell function"
+    body = _reroot_proc(match.group(0), proc)
+
+    script = f'set -u\nsudo() {{ "$@"; }}\n{body}\ndevice_holders\n'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    assert result.stdout.split() == ["111", "333"], (
+        f"expected the two chip holders, got {result.stdout.split()!r}"
+    )
+
+
+def test_device_holders_deduplicates_and_sorts_numerically(tmp_path):
+    """`sort -un` is why a pid with several chip fds appears once.
+
+    stop_server interpolates this list into `kill -9`, so a duplicated pid
+    means signalling a dead pid -- and lexical sorting would make the log
+    order confusing when triaging a wedge.
+    """
+    import os
+    import re
+    import subprocess
+
+    proc = tmp_path / "proc"
+    for pid, count in (("9", 1), ("10", 3), ("100", 1)):
+        fd = proc / pid / "fd"
+        fd.mkdir(parents=True)
+        for n in range(count):
+            os.symlink("/dev/tenstorrent/0", fd / str(3 + n))
+
+    match = re.search(r"^device_holders\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    body = _reroot_proc(match.group(0), proc)
+
+    script = f'set -u\nsudo() {{ "$@"; }}\n{body}\ndevice_holders\n'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    assert result.stdout.split() == ["9", "10", "100"], (
+        f"expected numeric order with no duplicates, got {result.stdout.split()!r}"
+    )
+
+
+def test_device_holders_finds_nothing_when_the_chip_is_free(tmp_path):
+    """A free chip must produce no holders.
+
+    Both callers read this through `$(device_holders)` and test `[ -n ... ]`.
+    Command substitution strips trailing newlines, so a stray blank line
+    cannot be mistaken for a holder -- verified by mutation: appending an
+    `echo` to the pipeline does not change the outcome. What this pins is the
+    filter, not the whitespace: an fd pointing somewhere else must not make
+    the supervisor decline to recover a board that is actually free.
+    """
+    import os
+    import re
+    import subprocess
+
+    proc = tmp_path / "proc"
+    fd = proc / "555" / "fd"
+    fd.mkdir(parents=True)
+    os.symlink("/dev/null", fd / "3")
+
+    match = re.search(r"^device_holders\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    body = _reroot_proc(match.group(0), proc)
+
+    script = (
+        f'set -u\nsudo() {{ "$@"; }}\n{body}\n'
+        'held="$(device_holders)"\n'
+        '[ -n "$held" ] && echo "NONEMPTY:[$held]" || echo "EMPTY"\n'
+    )
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert "EMPTY" in result.stdout, (
+        f"a free chip must produce an empty holder list: {result.stdout!r}"
+    )
+
+
+def _run_canary_ok(response_body, status_code, timeout_arg=""):
+    """Run canary_ok verbatim against a stubbed curl.
+
+    curl returns the body and the status code concatenated, and canary_ok
+    parses the code back out itself -- that parsing is what this exercises.
+    The function is extracted rather than restated so the shell under test is
+    the shell that ships.
+    """
+    import re
+    import subprocess
+
+    source = _supervisor()
+    match = re.search(r"^canary_ok\(\) \{.*?^\}", source, re.M | re.S)
+    assert match, "canary_ok must stay a shell function"
+
+    # curl's -w '\n%{http_code}' appends a newline then the code. Feed the
+    # payload through a heredoc so the newline survives verbatim -- passing it
+    # as a shell word mangles it, which is a property of the harness, not of
+    # canary_ok.
+    payload = f"{response_body}\n{status_code}"
+    stubs = (
+        "PORT=8110\nCANARY_WAV=/dev/null\nMODEL_NAME=Qwen3-ASR-1.7B-JA\n"
+        "curl() { cat \"$CANARY_FIXTURE\"; }\n"
+    )
+    script = (
+        "set -u\n" + stubs + match.group(0) + "\n"
+        f'canary_ok {timeout_arg}; echo "rc=$?"\n'
+    )
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fixture:
+        fixture.write(payload)
+        fixture_path = fixture.name
+
+    env = dict(os.environ, CANARY_FIXTURE=fixture_path)
+    try:
+        return subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, env=env
+        )
+    finally:
+        os.unlink(fixture_path)
+
+
+def test_the_canary_accepts_a_200_with_a_transcript():
+    """The liveness check the monitor loop decides "wedged" from.
+
+    Its only existing test is that the timeout is an argument with a default.
+    The status-code parsing -- pulling the code back out of curl's combined
+    body+code output -- had nothing.
+    """
+    result = _run_canary_ok('{"text":"こんにちは"}', 200)
+    assert "rc=0" in result.stdout, result.stdout
+
+
+def test_the_canary_rejects_a_non_200():
+    """A 500 must read as wedged, or a real wedge is never recovered."""
+    for code in (400, 500, 503):
+        result = _run_canary_ok('{"error":"boom"}', code)
+        assert "rc=1" in result.stdout, f"{code}: {result.stdout}"
+
+
+def test_the_canary_rejects_a_200_with_no_transcript():
+    """200 is not enough: an empty or error body means the model produced nothing."""
+    for body in ('{"error":"no audio"}', "{}", ""):
+        result = _run_canary_ok(body, 200)
+        assert "rc=1" in result.stdout, f"{body!r}: {result.stdout}"
+
+
+def test_the_canary_reads_the_code_after_a_multi_line_transcript():
+    """A transcript containing newlines must not be mistaken for the code.
+
+    curl concatenates body and code, so the code is whatever follows the LAST
+    newline -- `${out##*...}`, longest match. With the shortest match (`#`)
+    a multi-line body makes the first body line the "code", the comparison
+    against 200 fails, and the monitor declares a wedge on a healthy server:
+    it would reset the device on every check.
+    """
+    result = _run_canary_ok('{"text":"一行目\n二行目"}', 200)
+    assert "rc=0" in result.stdout, (
+        f"a multi-line transcript was misparsed: {result.stdout}"
+    )
+
+
+def test_the_canary_uses_the_longest_match_to_split_off_the_code():
+    """Pin the operator, since the multi-line case is what depends on it."""
+    import re
+
+    match = re.search(r"^canary_ok\(\) \{.*?^\}", _supervisor(), re.M | re.S)
+    body = match.group(0)
+
+    assert '${out##*' in body, (
+        "the code must be split off with ## (longest match); # would take the "
+        "first body line on a multi-line transcript"
+    )
+
+
+def test_the_canary_asks_curl_for_the_status_code():
+    """Without -w the body has no code appended and the parse yields the body."""
+    import re
+
+    body = re.search(r"^canary_ok\(\) \{.*?^\}", _supervisor(), re.M | re.S).group(0)
+
+    assert "%{http_code}" in body, "curl must be asked for the status code"
+    assert "\\n%{http_code}" in body or "'\\n%{http_code}'" in body, (
+        "the code must be preceded by a newline, or it concatenates with the body"
+    )
+
+
+def test_the_canary_rejects_an_error_that_mentions_text():
+    """The status code must be checked in its own right, not inferred.
+
+    The bodies in the tests above happen to lack the string "text", so they
+    pass even if the 200 comparison is deleted -- verified by mutation. A real
+    server can return a non-200 whose message contains it, and vLLM's
+    transcription errors are free-form strings:
+
+        {"error":{"message":"Invalid or unsupported audio file.", ...}}
+
+    Give it a body that satisfies the transcript check and a code that does
+    not, so only the code comparison can reject it.
+    """
+    for code in (400, 500, 503):
+        result = _run_canary_ok('{"error":{"message":"no \\"text\\" produced"}}', code)
+        assert "rc=1" in result.stdout, (
+            f"HTTP {code} with 'text' in the body was read as alive: "
+            f"{result.stdout}"
+        )
+
+
+def test_the_canary_requires_exactly_200_not_merely_a_code():
+    """`[ -n "$code" ]` would accept every response curl can produce.
+
+    A wedged server still answers with *some* status, so a presence test
+    makes the canary permanently green and the supervisor blind.
+    """
+    result = _run_canary_ok('{"text":"ok"}', 204)
+    assert "rc=1" in result.stdout, (
+        f"a 204 was accepted; the check must be equality with 200: "
+        f"{result.stdout}"
+    )
+
+    result = _run_canary_ok('{"text":"ok"}', 200)
+    assert "rc=0" in result.stdout, result.stdout
+
+
+def _run_monitor_loop(stubs, max_steps=40):
+    """Run the supervisor's top-level loop with everything stubbed.
+
+    The loop is not a function, so the per-function audits never reached it --
+    yet it is what decides when to launch, when to call a wedge and when to
+    reset. Extract the body from `log "=== supervisor start` onwards and run
+    it verbatim; the stubs count their own calls and exit once ``max_steps``
+    actions have happened, since the loop is otherwise infinite.
+    """
+    import subprocess
+
+    source = _supervisor()
+    body = source[source.index('log "=== supervisor start') :]
+
+    script = (
+        "set -u\n"
+        f"MAX_STEPS={max_steps}\nSTEPS=0\n"
+        'step() { STEPS=$((STEPS+1)); echo "$1"; '
+        '[ "$STEPS" -ge "$MAX_STEPS" ] && exit 0; return 0; }\n'
+        + stubs
+        + "\n"
+        + body
+    )
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=60
+    )
+
+
+def test_the_monitor_waits_instead_of_launching_while_a_container_holds_the_chip():
+    """The pre-launch gate: launching beside a --docker-server run cannot work.
+
+    Two processes cannot open the chip, so a local launch while the container
+    serves either fails or fights it. The existing test only greps the log
+    line out of the source.
+    """
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { echo 111; }
+        in_container() { return 0; }
+        sleep() { step "SLEPT"; }
+        launch_server() { step "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        canary_ok() { return 0; }
+        recover_device() { step "RECOVERED"; }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=3)
+
+    assert "LAUNCHED" not in result.stdout, (
+        f"launched while a container held the chip: {result.stdout}"
+    )
+    assert "not launching" in result.stdout, result.stdout
+    assert result.stdout.count("SLEPT") >= 1, result.stdout
+
+
+def test_the_monitor_launches_once_the_chip_is_free():
+    """The other direction -- a gate that never opens never serves."""
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { echo 111; }
+        in_container() { return 1; }
+        sleep() { step "SLEPT"; }
+        launch_server() { step "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        canary_ok() { return 0; }
+        recover_device() { step "RECOVERED"; }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=4)
+
+    assert "LAUNCHED" in result.stdout, (
+        f"a free chip must be launched on: {result.stdout}"
+    )
+
+
+def test_a_single_canary_failure_does_not_reset_the_device():
+    """One failure is a hiccup; the threshold is two consecutive ones.
+
+    A reset costs the compile cache and six and a half minutes, so tripping
+    on a single timeout would make the service worse than no supervisor. The
+    existing test extracts the literal 2 from the source, which says nothing
+    about the counter actually being consulted.
+    """
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { :; }
+        in_container() { return 1; }
+        sleep() { :; }
+        launch_server() { echo "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        recover_device() { step "RECOVERED"; }
+        CANARY_N=0
+        canary_ok() {
+            CANARY_N=$((CANARY_N+1))
+            # fail once, then succeed forever
+            [ "$CANARY_N" = 1 ] && return 1
+            step "CANARY_OK"
+            return 0
+        }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=5)
+
+    assert "RECOVERED" not in result.stdout, (
+        f"a single canary failure triggered a reset: {result.stdout}"
+    )
+    assert "canary failed (1)" in result.stdout, result.stdout
+
+
+def test_two_consecutive_canary_failures_reset_and_relaunch():
+    """The wedge path: recover, then come back round and launch again.
+
+    `continue` rather than `break` is what makes the outer loop relaunch; a
+    break here would leave systemd to restart the whole supervisor, losing
+    the pre-launch gate.
+    """
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { :; }
+        in_container() { return 1; }
+        sleep() { :; }
+        launch_server() { step "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        canary_ok() { return 1; }
+        recover_device() { step "RECOVERED"; }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=6)
+
+    assert "RECOVERED" in result.stdout, result.stdout
+    assert "server wedged" in result.stdout, result.stdout
+    # ...and the outer loop comes back to launch again
+    assert result.stdout.count("LAUNCHED") >= 2, (
+        f"the loop must relaunch after recovering: {result.stdout}"
+    )
+
+
+def test_a_recovered_canary_clears_the_failure_count():
+    """Failures must be consecutive, not cumulative.
+
+    Without the `fails=0` on success the count only ever rises, so any two
+    failures in the lifetime of a launch -- however far apart -- reset the
+    device.
+    """
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { :; }
+        in_container() { return 1; }
+        sleep() { :; }
+        launch_server() { echo "LAUNCHED"; }
+        wait_healthy() { return 0; }
+        warm_first_transcription() { return 0; }
+        recover_device() { step "RECOVERED"; }
+        CANARY_N=0
+        canary_ok() {
+            CANARY_N=$((CANARY_N+1))
+            # fail, succeed, fail, then succeed forever: never two in a row
+            case "$CANARY_N" in
+                1|3) return 1 ;;
+            esac
+            step "CANARY_OK"
+            return 0
+        }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=6)
+
+    assert "RECOVERED" not in result.stdout, (
+        f"non-consecutive failures reset the device: {result.stdout}"
+    )
+
+
+def test_an_unhealthy_launch_recovers_and_retries():
+    """wait_healthy failing must recover and loop, not fall through to the canary."""
+    stubs = '''
+        PORT=8110
+        log() { echo "LOG: $*"; }
+        device_holders() { :; }
+        in_container() { return 1; }
+        sleep() { :; }
+        launch_server() { step "LAUNCHED"; }
+        wait_healthy() { return 1; }
+        warm_first_transcription() { step "WARMED"; return 0; }
+        canary_ok() { step "CANARY"; return 0; }
+        recover_device() { step "RECOVERED"; }
+    '''
+    result = _run_monitor_loop(stubs, max_steps=6)
+
+    assert "RECOVERED" in result.stdout, result.stdout
+    assert "WARMED" not in result.stdout, (
+        f"an unhealthy server must not reach the warm-up: {result.stdout}"
+    )
+    assert "CANARY" not in result.stdout, result.stdout
