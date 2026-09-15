@@ -534,9 +534,17 @@ done | sort -u
 Every line has to be accounted for as one of: renamed, replaced by a later
 commit of ours, deliberately withdrawn (say where that is written down), or a
 real loss to restore. Do not treat a long list as noise -- run across all
-three repos this produced 33 lines here, 2 in tt-metal and 0 in the plugin
-(after `acae5aa`), and every one of the 35 resolved to the first three
+three repos this produced 34 lines here, 2 in tt-metal and 0 in the plugin
+(after `acae5aa`), and every one of the 36 resolved to the first three
 categories. That is only meaningful because each was checked individually.
+
+The count grows as the branch does, so re-run it rather than trusting the
+number: it was 33 here when this paragraph was written, and the extra line is
+`test_the_runbook_marks_the_stale_streaming_column`, removed by `f70bc74e0`
+which replaced it with `test_the_two_columns_agree_on_tokens_per_request` and
+`test_the_runbook_records_the_frame_count_separately` in the same commit --
+the "replaced by a later commit of ours" disposition. tt-metal's two are both
+`dump_reference` goldens withdrawn by the revert `38d8a9437d3`.
 
 On tt-metal, restrict the history to our own commits; the whole log is ~200k
 commits of upstream and the scan is quadratic in what you feed it. Use

@@ -336,13 +336,23 @@ def test_the_readme_tells_you_to_look_for_work_a_merge_dropped():
     # also matched `6m33.591s` elsewhere in the runbook, so deleting this
     # sentence outright left the test green.
     flat = " ".join(body.split())
-    assert "33 lines here, 2 in tt-metal and 0 in the plugin" in flat, (
+    assert "34 lines here, 2 in tt-metal and 0 in the plugin" in flat, (
         "record that this repo's output was long and still clean, or a long "
         "list looks like a failure of the check"
     )
     # and that every line was dispositioned, which is what makes it clean
-    assert "every one of the 35 resolved to the first three" in flat, (
+    assert "every one of the 36 resolved to the first three" in flat, (
         "a count without a disposition is just a number"
+    )
+    # The count is a moving target -- it grows with the branch -- so the
+    # paragraph has to tell the reader to re-run rather than trust it, and has
+    # to disposition the lines it gained. Recorded because the number went
+    # stale silently: it was 33 when written and measured 34 here.
+    assert "re-run it rather than trusting the number" in flat, (
+        "say the count moves, or the next reader treats a mismatch as a loss"
+    )
+    assert "f70bc74e0" in flat and "38d8a9437d3" in flat, (
+        "name the commits that account for the lines, not just their count"
     )
     # The total must be the sum of the per-repo counts the same sentence gives,
     # read back out of the runbook rather than restated here.
