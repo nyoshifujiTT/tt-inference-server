@@ -808,6 +808,57 @@ def set_metal_timeout_env_vars():
     logger.info(f"Set TT_METAL_DISPATCH_TIMEOUT_COMMAND_TO_EXECUTE={timeout_cmd}")
 
 
+# Catalog env vars whose value is a path into the tt-metal checkout. The specs
+# spell these relative ("../../tt-metal/..."), which only resolves against the
+# container layout where APP_DIR/src and tt-metal are siblings. TT_METAL_HOME is
+# set on every launch path, so it is the one anchor that means the same thing in
+# and out of a container.
+_TT_METAL_RELATIVE_PATH_ENV = ("TT_MESH_GRAPH_DESC_PATH",)
+
+
+def _resolve_tt_metal_relative_path(key: str, value: str) -> str:
+    """Anchor a relative tt-metal path to TT_METAL_HOME instead of the cwd.
+
+    Values are exported verbatim, so a relative path is interpreted against
+    whatever cwd the server happens to run in. Under Docker that cwd is
+    ``$APP_DIR/src`` with tt-metal as a sibling two levels up, so
+    ``../../tt-metal/...`` happens to land on ``$TT_METAL_HOME``. ``--local-server``
+    runs from the repo's ``vllm-tt-metal/src`` with tt-metal anywhere the caller
+    built it, so the same string points at a path that does not exist and the
+    device fails to open (TT_FATAL on the mesh graph descriptor).
+
+    Rewriting to ``$TT_METAL_HOME/<tail>`` makes both paths agree. For the Docker
+    layout the result is the same absolute path as before, so behaviour there is
+    unchanged. Absolute values are left alone: FORGE/Quetzal specs point at a
+    descriptor shipped inside a wheel, not at the tt-metal checkout.
+    """
+    if key not in _TT_METAL_RELATIVE_PATH_ENV:
+        return value
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    tt_metal_home = os.getenv("TT_METAL_HOME")
+    if not tt_metal_home:
+        logger.warning(
+            f"{key}={value} is relative but TT_METAL_HOME is unset; leaving it "
+            "as-is, which resolves against the current working directory"
+        )
+        return value
+    # Drop the leading hops and the tt-metal directory name itself: the spec
+    # value is written as a route *to* the checkout, and TT_METAL_HOME already
+    # is the checkout.
+    parts = list(path.parts)
+    while parts and parts[0] == os.pardir:
+        parts.pop(0)
+    if parts and parts[0] == Path(tt_metal_home).name:
+        parts.pop(0)
+    elif parts and parts[0] == "tt-metal":
+        parts.pop(0)
+    resolved = Path(tt_metal_home).joinpath(*parts)
+    logger.info(f"resolved relative {key} against TT_METAL_HOME: {value} -> {resolved}")
+    return str(resolved)
+
+
 def set_runtime_env_vars(model_spec_json):
     """Set runtime environment variables from model spec.
 
@@ -846,6 +897,8 @@ def set_runtime_env_vars(model_spec_json):
                 f"env var value:={value} is not a string, converting to string: {value}"
             )
             value = str(value)
+
+        value = _resolve_tt_metal_relative_path(key, value)
 
         original_value = os.getenv(key)
         if original_value is not None:
