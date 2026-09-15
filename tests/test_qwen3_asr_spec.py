@@ -817,6 +817,11 @@ def test_the_scan_covers_the_implementation_side_too():
     gone from the repo entirely and the v2 audio path holds ttft as
     Optional[float] behind an `is not None` filter instead of a dict subscript
     -- but the scan had to exist to reach that conclusion at all.
+
+    The scan now prints four lines, not one, and each needs its own verdict.
+    The fourth is the interesting one: benchmarking/asr_openai_benchmark.py is
+    a *move* into reference_config/, not an upstream deletion, and the scan
+    cannot tell those apart -- it only asks whether the old path still exists.
     """
     body = _dropped_work_section()
 
@@ -832,12 +837,33 @@ def test_the_scan_covers_the_implementation_side_too():
     )
     assert "[ -e \"$f\" ]" in body, "give the existence check, not a description"
 
-    # the worked example, with the verdict and the evidence behind it
-    assert "workflows/run_reports.py" in body
+    # Every line the scan prints must be named *in the disposition table*, not
+    # merely somewhere in the section: `evals/eval_config.py` also appears
+    # three times in the LibriSpeech aside, so a section-wide containment
+    # check stayed green with its table row deleted -- verified by mutation.
+    rows = [line for line in body.splitlines() if line.startswith("| `")]
+    assert rows, "the dispositions must be a table, one row per printed line"
+    table = "\n".join(rows)
+    for path in (
+        "workflows/run_reports.py",
+        "evals/run_evals.py",
+        "evals/eval_config.py",
+        "benchmarking/asr_openai_benchmark.py",
+    ):
+        assert f"`{path}`" in table, (
+            f"{path} is printed by the scan but has no row giving its verdict"
+        )
     assert "functional_ttft" in body and "Optional[float]" in body, (
         "record what was checked before writing the file off"
     )
-    assert "obsoleted by the rewrite, not lost" in flat
+    assert "Obsoleted by the rewrite, not lost" in flat
+    # and the move must be called out as a move, since the scan cannot see it
+    assert "not an upstream deletion" in flat, (
+        "say that one line is a move; otherwise it reads as a fourth loss"
+    )
+    assert "the scan cannot tell the difference" in flat, (
+        "name the scan's blind spot, or the next reader trusts it too far"
+    )
     assert "Do not restore the file" in flat, (
         "state the action, or the next reader re-adds a file upstream deleted"
     )
@@ -1341,16 +1367,26 @@ def test_the_readme_does_not_claim_the_old_layout():
     So the rule cannot be "these strings must be absent". What matters is that
     the README does not present the *old eval/benchmark layout* as the place
     to run things, which the paths below cover.
+
+    The implementation was stricter than that rule and it broke on a
+    legitimate use: the dropped-work section has to *name* the retired paths
+    in order to disposition them ("this one is a move into reference_config/,
+    not a loss"). Banning the string outright forbids explaining it. So the
+    ban is scoped to run positions -- `python3 <path>` -- which is what the
+    docstring actually describes.
     """
     readme = _readme()
     root = os.path.join(os.path.dirname(__file__), "..")
 
-    # Paths with no source left: mentioning them as somewhere to run is stale.
-    for gone in ("`benchmarking/asr_openai_benchmark.py`", "`evals/run_evals.py`"):
-        assert gone not in readme, f"{gone} has no source in the tree"
-        assert not os.path.exists(
-            os.path.join(root, gone.strip("`"))
-        ), f"{gone} exists again; this assertion is now wrong"
+    # Paths with no source left: telling a reader to *run* them is stale.
+    for gone in ("benchmarking/asr_openai_benchmark.py", "evals/run_evals.py"):
+        assert not re.search(rf"python3?\s+{re.escape(gone)}", readme), (
+            f"{gone} has no source in the tree; it must not be given as a "
+            f"command to run"
+        )
+        assert not os.path.exists(os.path.join(root, gone)), (
+            f"{gone} exists again; this assertion is now wrong"
+        )
 
     # The current homes must be the ones quoted.
     assert "reference_config/evals/asr_ja_eval.py" in readme

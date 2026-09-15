@@ -546,9 +546,9 @@ which replaced it with `test_the_two_columns_agree_on_tokens_per_request` and
 the "replaced by a later commit of ours" disposition. tt-metal's two are both
 `dump_reference` goldens withdrawn by the revert `38d8a9437d3`.
 
-On tt-metal, restrict the history to our own commits; the whole log is ~200k
-commits of upstream and the scan is quadratic in what you feed it. Use
-`upstream/main` as the base:
+On tt-metal, restrict the history to our own commits; the log reachable from
+HEAD is ~31k commits of upstream (~144k across all refs) and the scan is
+quadratic in what you feed it. Use `upstream/main` as the base:
 
 ```
 BASE=$(git rev-parse --verify -q upstream/main \
@@ -584,13 +584,18 @@ git log --format='%h %an' HEAD | grep -i codex | cut -d' ' -f1 | while read c; d
 done | sort -u
 ```
 
-Here that prints one line: `workflows/run_reports.py`, which upstream deleted
-in #4630 ("route all workflows to v2 and delete dead v1 code"). Our change to
-it made the reports workflow tolerate a missing `functional_ttft` on an
-eval-only audio run. Checked before writing it off: `functional_ttft` no
-longer appears anywhere in the repo, and the v2 audio path carries ttft as
-`Optional[float]` with a `is not None` filter rather than a dict subscript, so
-that `KeyError` cannot recur. Verdict: obsoleted by the rewrite, not lost.
+Here that prints four lines, all dispositioned:
+
+| line | where the behaviour went |
+|---|---|
+| `workflows/run_reports.py` | deleted by upstream #4630 ("route all workflows to v2 and delete dead v1 code"). Our change made the reports workflow tolerate a missing `functional_ttft` on an eval-only audio run. Checked before writing it off: `functional_ttft` no longer appears anywhere in the repo, and the v2 audio path carries ttft as `Optional[float]` with an `is not None` filter rather than a dict subscript, so that `KeyError` cannot recur. Obsoleted by the rewrite, not lost. |
+| `evals/run_evals.py` | deleted by the same #4630 v1 cleanup. No successor: the v2 runner replaced the entry point entirely. |
+| `evals/eval_config.py` | deleted by upstream #4678 ("unify the inference-server into one runner"); the successor catalog is `reference_config/evals/eval_config.py`. |
+| `benchmarking/asr_openai_benchmark.py` | not an upstream deletion -- `benchmarking/` was retired in favour of `reference_config/`, and the file lives at `reference_config/benchmarking/asr_openai_benchmark.py`. |
+
+Note the last one is a *move*, not a loss, and the scan cannot tell the
+difference: it only checks whether the old path still exists. Look for the
+basename elsewhere in the tree before concluding anything.
 
 A `FILE GONE` line needs the same treatment as a `LOST` one -- find where the
 behaviour went, and confirm the problem it solved cannot come back. Do not
