@@ -3327,14 +3327,14 @@ def test_the_pin_verdict_states_the_reason_the_tree_actually_supports():
 def test_the_results_table_does_not_credit_the_unbuilt_image():
     """"Measured ... with the image above" became false when the pin moved.
 
-    The pins above now name 60166e19d45, and no image has been built from it
-    (verified on the host: nothing in `docker images` carries that tag, and the
-    serving container runs 0.21.0-e7929dcf5dcf...-c0c4842). Attributing the
-    numbers to "the image above" credits an artifact that does not exist.
+    The pins name a commit no image has been built from, so attributing the
+    numbers to "the image above" credits an artifact that does not exist. The
+    table has to name the image that actually produced them.
 
-    The figures are still good -- the difference is the served decoder's
-    weight-dtype plumbing, which does not move any default -- but the table has
-    to say which image produced them.
+    That image is now `0.21.0-60166e19d45a...-acae5aa`: it was built from the
+    pin as it stood before tt-metal PR #49104 was squash-merged and this branch
+    was rebased, and it is still what serves on the host. The earlier wording
+    named `e7929dcf5dcf...`, which the rebuild superseded.
     """
     readme = _readme()
     body = readme[readme.index("Measured on the delivery p150") :]
@@ -3344,21 +3344,27 @@ def test_the_results_table_does_not_credit_the_unbuilt_image():
     assert "with the image above" not in flat or "Not with the image" in flat, (
         "the pins above name an image that has not been built"
     )
-    assert "e7929dcf5dcf" in flat, "name the image the numbers came from"
-    assert "same defaults" in flat, (
-        "say why the figures still stand, or this reads as invalidating them"
+    assert "60166e19d45a" in flat, "name the image the numbers came from"
+    # and say why it is not the pinned one, so the mismatch is explained rather
+    # than looking like an oversight
+    assert "#49104" in flat and "rebased" in flat, (
+        "say why the measuring image and the pin differ"
     )
 
 
 def test_the_readme_admits_no_image_exists_at_the_current_pins():
-    """The pin moved for a code change; the measurements predate it.
+    """The pin moved, so the measurements predate it -- and this time it matters.
 
-    The old wording said only that the branches were unpushed, which was true
-    but no longer the whole story: bumping tt_metal_commit to pick up the
-    served-decoder dtype fix means the image the numbers came from was built at
-    the *previous* pin and does not contain it. Reporting figures under a pin
-    nothing was built from, without saying so, is the sort of thing a reader
-    reasonably assumes has been checked.
+    Earlier pin moves were "moves no default" cases: the delta was our own
+    code and could be reasoned about. This one is a rebase onto the
+    squash-merge of tt-metal PR #49104, which also pulls in upstream's
+    rewritten models/tt_transformers -- the base class this model subclasses.
+    That code runs under every request, so the figures cannot be waved through
+    as unaffected; they are unverified until a rebuild reproduces them.
+
+    The section therefore has to say three things: which image the numbers came
+    from, that the new pin cannot be built until the rebased branch is
+    force-pushed, and that the numbers are not yet confirmed at it.
     """
     readme = _readme()
     body = readme[readme.index("**No image exists at these pins yet.**") :]
@@ -3366,16 +3372,32 @@ def test_the_readme_admits_no_image_exists_at_the_current_pins():
     flat = " ".join(body.split())
 
     assert "No image exists at these pins yet" in flat
-    # which pin the numbers actually came from
-    assert "e7929dcf5dcf" in flat, (
-        "name the pin the measurements were taken at, or 'predates' is unfalsifiable"
+    # which image the numbers actually came from
+    assert "60166e19d45a" in flat, (
+        "name the image the measurements were taken on, or 'predates' is "
+        "unfalsifiable"
     )
-    # why the figures still stand, so this does not read as invalidating them
-    assert "moves no default" in flat
-    # and the ordering of what is left
-    assert "push the branches, then" in flat, (
-        "the rebuild depends on the push; give the order"
+    # why the pin moved at all, so the SHA change does not look arbitrary
+    assert "#49104" in flat and "rebase" in flat.lower(), (
+        "say why the pin moved; a bare new SHA reads as an unexplained edit"
     )
+    # the blocker on rebuilding, in the right direction
+    assert "force-push" in flat, (
+        "the rebuild depends on the push; say so"
+    )
+    # and the honest status of the figures -- this is the part that changed
+    assert "unverified at the new pin" in flat, (
+        "upstream's tt_transformers rewrite is in the image and runs under "
+        "every request, so the figures may not carry over; do not imply they do"
+    )
+    # The "moves no default" reasoning applied to our own code and must not be
+    # reused for an upstream rewrite of the base class. The phrase may still
+    # appear -- but only in the sentence that retires it, never as the verdict.
+    if "moves no default" in flat:
+        assert 'is **not** a "moves no default" case' in flat, (
+            "that reasoning applied to our own code, not to an upstream "
+            "rewrite of the base class; it may only appear as retired"
+        )
 
 
 @pytest.mark.parametrize("spec_id", ASR_SPEC_IDS)

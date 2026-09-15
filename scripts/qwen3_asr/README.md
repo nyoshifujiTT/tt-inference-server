@@ -1191,10 +1191,9 @@ in the window, not a slower model. Rerun it alone before treating it as a
 regression.
 
 Measured on the delivery p150. **Not with the image the pins above name** --
-that one has not been built yet (see "No image exists at these pins yet"
-below). These come from the image at the previous pin,
-`0.21.0-e7929dcf5dcf...-c0c4842`, which differs only in the served decoder's
-weight-dtype plumbing and produces the same defaults:
+see "No image exists at these pins yet" below. These come from the image
+`0.21.0-60166e19d45a...-acae5aa`, built from the pin as it stood before
+tt-metal PR #49104 was squash-merged and this branch was rebased onto it:
 
 | | accuracy | speed |
 |---|---|---|
@@ -1257,13 +1256,24 @@ so far -- across the vLLM 0.24->0.26 upgrade, three separate image builds at the
 earlier pins, a device reset, and the current pins. The ~1 % spread in rtfx is
 session-to-session drift on this board.
 
-**No image exists at these pins yet.** The `tt_metal_commit` above was bumped
-to pick up a real code change (the served decoder now takes its weight dtype
-from the same helper the demos use), and nothing has been built from it. The
-measurements in this runbook were taken on the image built at the previous pin
-`e7929dcf5dcf...`, which does not contain that change; they stand as
-accuracy/throughput figures because the change moves no default, but the image
-and the pin do not correspond until a rebuild happens.
+**No image exists at these pins yet.** tt-metal PR #49104 was squash-merged
+into `main` on 2026-09-14, so this branch was rebased onto the merge. A rebase
+rewrites every commit above the old PR head, which is why `tt_metal_commit`
+moved from `60166e19d45` to `afa4d983bb0`: same subject, same tree, new SHA.
+
+The figures in this runbook were measured on `0.21.0-60166e19d45a...-acae5aa`,
+built from the pre-rebase pin, and that is still the image serving on the
+host. It cannot be rebuilt at the new pin until the rebased branch is
+force-pushed -- the build clones the fork, and `afa4d983bb0` is not on it yet.
+
+Unlike the earlier pin moves, this one is **not** a "moves no default" case
+that can be waved through. Our own subtree is byte-identical across the
+rebase (`models/demos/audio/qwen3_asr` hashes to `4ab71811348` at both pins),
+but the rebase also pulls in upstream's rewritten `models/tt_transformers`,
+which this model subclasses -- `generator.py` +723 lines, `model_config.py`
++456, `model.py` +183. That code goes into the image and runs under every
+request, so the accuracy and throughput numbers above are **unverified at the
+new pin** until the rebuild and a full eval/bench re-run reproduce them.
 
 **The branch heads have moved past the pins, and deliberately so.** Both pins
 name a commit that is an ancestor of its branch head, not the head itself.
