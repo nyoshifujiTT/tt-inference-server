@@ -3269,9 +3269,21 @@ def test_the_readme_covers_a_docstring_only_change():
     assert "grep '^@@'" in flat, "give the hunk-header check, not a description"
     # the worked example, so the current output is recognisable
     assert "aec8563" in flat and "@@ -6,8 +6,16 @@" in flat
-    assert "`vllm_commit` stays at `acae5aa`" in flat, (
-        "state the verdict, or the reader still does not know whether to bump"
-    )
+    # The section must still end in a verdict, but the verdict changed: the
+    # upstream merge brought 115 executable lines plus a new spec_decode.py
+    # module, so "stays at acae5aa" became false and the pin was bumped. What
+    # this test protects is that a verdict is stated at all -- either the pin
+    # holds, or it is bumped and the reason is given.
+    assert (
+        "`vllm_commit` stays at" in flat
+        or "`vllm_commit` is therefore bumped" in flat
+    ), "state the verdict, or the reader still does not know whether to bump"
+    # and if it was bumped, say what forced it, so the docstring rule above is
+    # not read as having been overruled
+    if "bumped" in flat:
+        assert "115 executable lines" in flat and "spec_decode.py" in flat, (
+            "name what made the docstring rule inapplicable to this diff"
+        )
 
 
 def _repo_beside(name):

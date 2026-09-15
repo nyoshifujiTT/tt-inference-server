@@ -114,7 +114,7 @@ inside the image -- verified on a running container:
 $ docker exec <container> ls /home/container_app_user/tt-metal/models/demos/audio/qwen3_asr/tests | wc -l
 18
 $ docker exec <container> ls /home/container_app_user/vllm-tt-plugin/tests/*.py | wc -l
-30
+32
 ```
 
 What makes a test-only commit safe to leave behind the pin is not absence from
@@ -199,7 +199,14 @@ git diff <pinned> <head> -- <the file> | grep '^@@'
 If every hunk falls inside a docstring, the module's executed code is
 unchanged and the pin can stay. `vllm-tt-plugin` `aec8563` is that case: the
 diff is `@@ -6,8 +6,16 @@`, entirely within `executor.py`'s module docstring
-(lines 1-35), so `vllm_commit` stays at `acae5aa`.
+(lines 1-35), so at the time `vllm_commit` could stay at `acae5aa`.
+
+**That verdict has since expired.** Merging `upstream/main` into the plugin
+branch brought real code: 115 executable lines across `platform.py` (59),
+`worker.py` (39), `executor.py` (13) and `model_runner.py` (4), plus a new
+module `src/vllm_tt_plugin/spec_decode.py` that does not exist at `acae5aa`
+at all. `vllm_commit` is therefore bumped to the merge, `4a93161`. The
+docstring rule above still holds -- it just does not apply to this diff.
 
 The extra tt-metal exclusions are the same rule, not exceptions to it. Those
 files ship inside the image but nothing the server loads imports them: the
@@ -319,7 +326,7 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +    - neosophie/Qwen3-ASR-1.7B-JA
 +  version: "0.1.0"
 +  tt_metal_commit: "afa4d983bb0a91bef48060d2b812d44cbf117745"
-+  vllm_commit: "acae5aa"
++  vllm_commit: "4a93161"
 +  impl: tt_vllm_plugin
 +  min_disk_gb: 15
 +  min_ram_gb: 6
@@ -610,7 +617,7 @@ it is replaced, so keep at least 60 GB free.
 MODEL_SPECS_ENV=dev python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 \
   --workflow server --docker-server --dev-mode --no-auth --service-port 8110 \
   --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-afa4d983bb0a91bef48060d2b812d44cbf117745-acae5aa
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-afa4d983bb0a91bef48060d2b812d44cbf117745-4a93161
 ```
 
 `MODEL_SPECS_ENV=dev` is required here for the same reason as in the build: the
@@ -1321,7 +1328,7 @@ a failure path this deployment does not reach:
 
 | repository | committed since the pin | reaches the image? |
 |---|---|---|
-| `tt-metal` | `README.md`, `demo/demo.py`, `demo/demo_wav.py`, `reference/dump_reference.py`, `reference/prep_wav.py`, seven `tests/*.py`, and a **comment** in `tt/generator_vllm.py` | no: nothing on the *served* path changed |
+| `tt-metal` | `README.md`, `docs/prefill_program_cache_collision_issue.md`, `demo/demo.py`, `demo/demo_wav.py`, `reference/dump_reference.py`, `reference/prep_wav.py`, seven `tests/*.py`, and a **comment** in `tt/generator_vllm.py` | no: nothing on the *served* path changed |
 | `vllm-tt-plugin` | four `tests/*.py`, comments plus a dropped `# pragma: no cover` in `executor.py`, and the compilation-mode guard in `platform.py` | the guard does, see below |
 
 "Nothing executable changed" was the earlier wording and it is no longer
