@@ -123,6 +123,10 @@ SUPERSEDED_TT_METAL_COMMITS = (
     "986aad1",  # pre-rebase branch head
     "3b1b9ad",  # before the eval-side 16 kHz resample fix
     "e7929dc",  # before the served decoder took its dtype from the shared helper
+    # Retired by the rebase onto the squash-merge of tt-metal #49104: the
+    # commit still exists as an object but is no longer on the branch, so a
+    # build would fail at `git checkout`. Its replacement is afa4d983bb0.
+    "60166e19d45a0da3aa1735eb88fed13c444877aa",
 )
 
 
