@@ -539,17 +539,27 @@ three repos this produced 33 lines here, 2 in tt-metal and 0 in the plugin
 categories. That is only meaningful because each was checked individually.
 
 On tt-metal, restrict the history to our own commits; the whole log is ~200k
-commits of upstream and the scan is quadratic in what you feed it. Resolve the
-base by remote-tracking ref rather than by name -- the PR branch is
-`upstream/yito/qwen3_asr_pr` in some checkouts and `origin/yito/qwen3_asr_pr`
-in others, and a bad revision aborts the scan with `fatal: ambiguous
-argument`:
+commits of upstream and the scan is quadratic in what you feed it. Use
+`upstream/main` as the base:
 
 ```
-BASE=$(git rev-parse --verify -q upstream/yito/qwen3_asr_pr \
-       || git rev-parse --verify -q origin/yito/qwen3_asr_pr)
+BASE=$(git rev-parse --verify -q upstream/main \
+       || git rev-parse --verify -q origin/main)
 git log --format='%h %an' "$BASE..HEAD" | grep -i codex | ...
 ```
+
+Resolve it by remote-tracking ref rather than by name, because a bad revision
+aborts the scan with `fatal: ambiguous argument` rather than skipping.
+
+**Do not use the PR branch (`yito/qwen3_asr_pr`) as the base any more.** That
+was correct while the model PR was open, and it is the trap here: the ref
+still resolves after #49104 was squash-merged, so the scan does not error --
+it silently widens. Measured on this checkout, the rebase moved our commits
+off that ref (`merge-base --is-ancestor` now fails for it), so
+`$BASE..HEAD` walks **975** commits instead of our **51**, and the 924
+upstream commits it picks up are exactly the noise the bound exists to avoid.
+`upstream/main..HEAD` is both an ancestor bound and tight: 51 commits, all
+ours.
 
 **The test scan alone is not enough.** The plugin's loss was an
 implementation line, not a test -- the test went with it, so scanning tests

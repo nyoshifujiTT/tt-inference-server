@@ -380,25 +380,47 @@ def test_the_dropped_work_scan_is_usable_in_every_repo():
     assert 'grep -rq "def $fn" "$TESTS/"' in body, (
         "the grep has to honour TESTS, or parameterising the filter is pointless"
     )
-    # and the tt-metal-specific range, since its full log is unusable
-    assert "yito/qwen3_asr_pr" in body, (
-        "say how to bound the history on tt-metal"
+    # The base must be right in the *snippet*, not merely mentioned nearby:
+    # "upstream/main" occurs three times in this section (the lead-in, the
+    # snippet, the closing comparison), so a containment check stayed green
+    # with the snippet reverted to the retired PR branch -- verified by
+    # mutation. Assert on the assignment the reader copies.
+    assert "BASE=$(git rev-parse --verify -q upstream/main" in body, (
+        "the snippet itself must bound by upstream/main"
     )
-    # resolved by ref, not by a hardcoded remote name: the branch is under
-    # upstream/ in one checkout and origin/ in another, and the wrong one
-    # aborts the scan with "fatal: ambiguous argument" rather than skipping
+    assert "|| git rev-parse --verify -q origin/main)" in body, (
+        "keep the origin/ fallback; the remote name differs per checkout"
+    )
+    # and the retired base must not be what the snippet resolves
+    snippet = body[body.index("BASE=$(") :]
+    snippet = snippet[: snippet.index("```")]
+    assert "qwen3_asr_pr" not in snippet, (
+        "the snippet must not resolve the retired PR branch; it still exists, "
+        "so the scan would silently widen instead of failing"
+    )
+    # resolved by ref, not by a hardcoded remote name: main is under upstream/
+    # in one checkout and origin/ in another, and a bad revision aborts the
+    # scan with "fatal: ambiguous argument" rather than skipping
     assert "git rev-parse --verify -q" in body, (
         "resolve the base defensively; a bad revision aborts the scan"
     )
-    # Both spellings must appear in the prose that explains why, not only
-    # inside the snippet: the explanation is what stops someone "simplifying"
-    # the rev-parse fallback back to a single hardcoded ref.
-    reason = body[body.index("Resolve the") :]
-    reason = reason[: reason.index("```")]
-    for ref in ("upstream/yito/qwen3_asr_pr", "origin/yito/qwen3_asr_pr"):
-        assert ref in reason, f"say that {ref} is one of the spellings seen"
-    assert "fatal: ambiguous" in reason, (
+    assert "fatal: ambiguous" in body, (
         "name the failure a wrong ref produces, which is an abort not a skip"
+    )
+
+    # The retired base has to be called out, not merely replaced. It is the
+    # dangerous case: `yito/qwen3_asr_pr` still *resolves* after #49104 was
+    # squash-merged, so using it does not error -- the rebase moved our
+    # commits off it, and the range silently widens from 51 commits to 975.
+    # A reader who only sees the new snippet may "restore" the old base.
+    assert "Do not use the PR branch" in body, (
+        "ban the retired base explicitly; it still resolves, so it fails silently"
+    )
+    assert "975" in body and "51" in body, (
+        "quote what the wrong base actually costs, measured not asserted"
+    )
+    assert "still resolves" in body, (
+        "say why it is a trap rather than an error"
     )
 
 
