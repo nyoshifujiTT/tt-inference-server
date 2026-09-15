@@ -3226,6 +3226,59 @@ def _pinned_metal_from_readme(readme):
     return match.group(1)
 
 
+def test_the_runbook_records_that_the_model_pr_landed_and_how_to_follow_it():
+    """The deviation section predicted a future that has now happened.
+
+    It said tt-metal "stays on the model's PR branch" because the ttnn
+    implementation "is still in review", and that "once the PR lands, the pin
+    becomes an ordinary main commit". #49104 merged on 2026-09-14, and the
+    prediction left as-is reads as a live instruction not to rebase -- the
+    opposite of what was done.
+
+    The replacement has to say which operation the merge calls for, because
+    getting it wrong is expensive rather than merely untidy: the PR was
+    *squash*-merged, so its 20 commits are unreachable from main while the
+    squash carries their content, and `git merge` brings every file in a
+    second time (33 predicted conflicts). A rebase onto the squash replays
+    cleanly. The distinction, not just the outcome, is what a future reader
+    needs.
+    """
+    readme = _readme()
+    body = readme[readme.index("One thing was deliberately *not* followed") :]
+    body = body[: body.index("#### After any upstream merge")]
+    flat = " ".join(body.split())
+
+    # the prediction must be resolved, not left pending
+    assert "That PR is now merged" in flat, (
+        "say the PR landed; the old text reads as an instruction not to rebase"
+    )
+    assert "49104" in flat and "e402f01577c" in flat, (
+        "name the PR and the commit it landed as, so the claim is checkable"
+    )
+    # The merge style must be stated where the verdict is drawn, not merely
+    # somewhere nearby: "squash" occurs five times in this section (the
+    # explanation, the tree comparison, the rebase sentence, the forward
+    # rule), so a bare containment check stayed green with the actual claim
+    # reduced to "It was merged" -- verified by mutation.
+    assert "It was **squash**-merged" in flat, (
+        "name the merge style in the sentence that draws the conclusion"
+    )
+    assert "rebase" in flat.lower() and "merge` the wrong verb" in flat, (
+        "say which operation the squash calls for"
+    )
+    # the evidence, so the choice is not a matter of taste
+    assert "not reachable from `main`" in flat, (
+        "give the fact that rules out a merge"
+    )
+    assert "33 conflicts" in flat, (
+        "quote what merging would actually cost, measured not guessed"
+    )
+    # and the forward-looking rule, since this will recur
+    assert "a squash needs a rebase, not a merge" in flat, (
+        "state the rule for next time, or the reader re-derives it"
+    )
+
+
 def test_the_pin_verdict_states_the_reason_the_tree_actually_supports():
     """"Nothing executable changed" stopped being true, and was load-bearing.
 

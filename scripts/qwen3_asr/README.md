@@ -481,12 +481,28 @@ removed in 0.24.0 and has not returned in 0.26.0. Measured across the upgrade:
 TED CER 0.1002 and MagicHub CER 0.1668 unchanged, `rtfx` 12.24 -> 12.61, p99
 7.73 s -> 5.89 s.
 
-One thing is deliberately *not* followed:
+One thing was deliberately *not* followed, until the PR landed:
 
-- **`tt-metal` stays on the model's PR branch** (`upstream/yito/qwen3_asr_pr`),
-  not on tt-metal main. The ttnn implementation is still in review there;
-  rebasing onto main ahead of that PR would put this bring-up in conflict with
-  it. Once the PR lands, the pin becomes an ordinary main commit.
+- **`tt-metal` used to stay on the model's PR branch**
+  (`upstream/yito/qwen3_asr_pr`) rather than tt-metal main, because the ttnn
+  implementation was still in review and rebasing ahead of it would have put
+  this bring-up in conflict with the PR.
+
+  **That PR is now merged** -- tenstorrent/tt-metal#49104 landed on `main` on
+  2026-09-14 as `e402f01577c` -- and this branch has been rebased onto it, so
+  the pin is an ordinary main-descended commit.
+
+  It was **squash**-merged, which is what makes `merge` the wrong verb here:
+  the 20 PR commits are not reachable from `main` (`merge-base --is-ancestor`
+  fails for every one), while the squash carries their content verbatim
+  (`models/demos/audio/qwen3_asr` hashes to `b13e930292a` at both the PR head
+  and the squash). Merging would therefore bring the same files in a second
+  time -- `git merge-tree` predicted 33 conflicts across ten of them. Rebasing
+  our 51 commits `--onto` the squash replayed all 51 with no conflicts and
+  left our subtree hash unchanged.
+
+  So after a future upstream merge of this kind, check which one it was before
+  choosing: a squash needs a rebase, not a merge.
 
 #### After any upstream merge, check for silently dropped work
 
