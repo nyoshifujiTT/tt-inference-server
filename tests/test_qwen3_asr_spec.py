@@ -3202,6 +3202,128 @@ def test_the_readme_covers_a_docstring_only_change():
     )
 
 
+def _repo_beside(name):
+    """A sibling checkout of one of the pinned repositories, if present.
+
+    Same resolution as test_qwen3_asr_pin_form's helper; duplicated rather
+    than imported so this module keeps working when run on its own.
+    """
+    path = os.path.join(os.path.dirname(__file__), "..", "..", name)
+    return path if os.path.isdir(os.path.join(path, ".git")) else None
+
+
+def _pinned_metal_from_readme(readme):
+    """tt_metal_commit as set by the runbook's own patch block.
+
+    Scoped to the patch block on purpose: an earlier section quotes another
+    PR's recipe, which carries its own `+  ..._commit:` lines, so a whole-file
+    search would return whichever appeared first.
+    """
+    start = readme.index("git apply <<'PATCH'")
+    block = readme[start : readme.index("\nPATCH\n", start)]
+    match = re.search(r'^\+  tt_metal_commit: "([0-9a-f]+)"', block, re.M)
+    assert match, "the runbook patch must set tt_metal_commit"
+    return match.group(1)
+
+
+def test_the_pin_verdict_states_the_reason_the_tree_actually_supports():
+    """"Nothing executable changed" stopped being true, and was load-bearing.
+
+    That was the stated reason for leaving `tt_metal_commit` behind the branch
+    head. Measured against the tree at the current pin, three files have real
+    executable diffs -- `demo/demo.py`, `reference/prep_wav.py`,
+    `demo/demo_wav.py` -- and `reference/dump_reference.py` gained a refusal
+    for a too-short clip. Only `tt/generator_vllm.py` is comment-only.
+
+    The verdict survives, but on the narrower ground that none of those files
+    is on the *served* path: the vLLM adapter imports neither `demo/` nor
+    `reference/prep_wav.py`. Keeping the old wording would mean the pin rests
+    on a claim the repository contradicts, which is exactly the kind of thing
+    that gets copied forward unchecked.
+
+    Asserted against the tree, not the prose, so if a served-path file ever
+    does change after the pin this fails instead of reading as still-true.
+    """
+    import subprocess
+
+    readme = _readme()
+    body = readme[readme.index("**The branch heads have moved past the pins") :]
+    body = body[: body.index("\n## Install")]
+    flat = " ".join(body.split())
+
+    # the corrected wording, and the retired one
+    assert "nothing on the *served* path changed" in flat, (
+        "state the reason the tree supports"
+    )
+    assert "no longer" in flat and "Nothing executable changed" in flat, (
+        "say that the earlier reason was retired, or the change looks cosmetic"
+    )
+    # the adapter must be named as the thing that does not import them
+    assert "generator_vllm.py`) imports neither" in flat, (
+        "name what makes them off-path, not just that they are"
+    )
+
+    # and the premise, checked against tt-metal itself
+    repo = _repo_beside("tt-metal")
+    if repo is None:
+        pytest.skip("tt-metal is not checked out beside this repo")
+
+    pin = _pinned_metal_from_readme(readme)
+    adapter = "models/demos/audio/qwen3_asr/tt/generator_vllm.py"
+    changed = subprocess.run(
+        ["git", "-C", repo, "diff", "--name-only", pin, "HEAD", "--",
+         "models/demos/audio/qwen3_asr"],
+        capture_output=True, text=True,
+    )
+    if changed.returncode != 0:
+        pytest.skip("the pinned commit is not in this checkout")
+
+    files = [f for f in changed.stdout.split() if f]
+    # the served path is the adapter plus tt/ generally; a change there would
+    # invalidate the verdict outright
+    served = [
+        f
+        for f in files
+        if f.startswith("models/demos/audio/qwen3_asr/tt/") and f != adapter
+    ]
+    assert not served, (
+        f"served-path files changed after the pin, so the verdict is wrong: {served}"
+    )
+
+    # and the adapter itself must still be comment-only
+    diff = subprocess.run(
+        ["git", "-C", repo, "diff", pin, "HEAD", "--", adapter],
+        capture_output=True, text=True,
+    ).stdout
+    executable = [
+        line
+        for line in diff.splitlines()
+        if line[:1] in "+-"
+        and not line.startswith(("+++", "---"))
+        and line[1:].strip()
+        and not line[1:].lstrip().startswith("#")
+    ]
+    assert not executable, (
+        "the adapter is no longer comment-only; the table says it is:\n"
+        + "\n".join(executable[:10])
+    )
+
+    # Every non-test file that changed after the pin must be named in the row.
+    # Without this the list can go stale silently: dropping a filename leaves
+    # the prose self-consistent, so the mutation survives -- verified by
+    # removing `reference/dump_reference.py` and watching the rest pass.
+    row = next(
+        line for line in readme.splitlines() if line.startswith("| `tt-metal` |")
+    )
+    for path in files:
+        if "/tests/" in path:
+            continue
+        name = path.split("models/demos/audio/qwen3_asr/", 1)[-1]
+        assert name in row, (
+            f"{name} changed after the pin but the table does not list it: {row}"
+        )
+
+
 def test_the_results_table_does_not_credit_the_unbuilt_image():
     """"Measured ... with the image above" became false when the pin moved.
 

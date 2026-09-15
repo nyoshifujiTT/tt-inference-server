@@ -1272,8 +1272,21 @@ a failure path this deployment does not reach:
 
 | repository | committed since the pin | reaches the image? |
 |---|---|---|
-| `tt-metal` | `README.md`, `demo/*.py`, `reference/prep_wav.py`, seven `tests/*.py`, and a **comment** in `tt/generator_vllm.py` | no: nothing executable changed |
+| `tt-metal` | `README.md`, `demo/demo.py`, `demo/demo_wav.py`, `reference/dump_reference.py`, `reference/prep_wav.py`, seven `tests/*.py`, and a **comment** in `tt/generator_vllm.py` | no: nothing on the *served* path changed |
 | `vllm-tt-plugin` | four `tests/*.py`, comments plus a dropped `# pragma: no cover` in `executor.py`, and the compilation-mode guard in `platform.py` | the guard does, see below |
+
+"Nothing executable changed" was the earlier wording and it is no longer
+true: measured at this pin, `demo/demo.py` (17 lines), `reference/prep_wav.py`
+(15) and `demo/demo_wav.py` (4) all have executable diffs, and
+`reference/dump_reference.py` gained a refusal for a too-short clip. Only
+`tt/generator_vllm.py` is comment-only (0 executable lines).
+
+The verdict still holds, but for the narrower reason stated in the table: none
+of those files is on the served path. The vLLM adapter
+(`tt/generator_vllm.py`) imports neither `demo/` nor `reference/prep_wav.py`
+-- they are the ttnn demo entry points and the offline golden/wav tooling, and
+the only importers are each other, `reference/dump_reference.py`, and tests.
+So the runtime the image serves is unchanged even though the tree is not.
 
 The `platform.py` change narrows `except Exception` around the
 compilation-mode pin to `except ImportError` around the import alone, with the
