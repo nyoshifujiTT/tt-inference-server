@@ -60,9 +60,12 @@ class AsyncLogHandler(logging.Handler):
     def __init__(self, filename=None, max_bytes=104857600, backup_count=5):
         super().__init__()
         # logging.Handler.__init__ registers self in logging._handlerList, so
-        # logging.shutdown() -- which dictConfig() calls via
-        # _clearExistingHandlers() -- can invoke close() on this instance before
-        # the rest of __init__ has run. Bind the attribute close() needs first.
+        # anything that reconfigures logging can invoke close() on this
+        # instance before the rest of __init__ has run. Two routes reach that
+        # state: logging.shutdown(), which dictConfig() calls via
+        # _clearExistingHandlers(), and importing vLLM while building its
+        # formatter below. Bind the attribute close() needs first, so it is
+        # safe during that partially constructed interval.
         self._listener = None
         _safe_stop_listener(AsyncLogHandler._active_listener)
         AsyncLogHandler._active_listener = None

@@ -98,10 +98,10 @@ model_performance_reference = read_performance_reference_json()
 
 
 def get_perf_reference_map(
-    model_name: str, perf_targets_map: Dict[str, float]
+    hf_model_repo: str, perf_targets_map: Dict[str, float]
 ) -> Dict[DeviceTypes, List[BenchmarkTaskParams]]:
     perf_reference_map: Dict[DeviceTypes, List[BenchmarkTaskParams]] = {}
-    model_data = model_performance_reference.get(model_name, {})
+    model_data = model_performance_reference.get(hf_model_repo, {})
 
     for device_str, benchmarks in model_data.items():
         device_type = DeviceTypes.from_string(device_str)
@@ -373,8 +373,25 @@ training_lora_impl = ImplSpec(
     repo_url="https://github.com/tenstorrent/tt-inference-server",
     code_path="tt-media-server/tt_model_runners/forge_training_runners/training_lora_runner.py",
 )
+# tt-blacksmith-backed LoRA runner (LoraLLMTrainer). Distinct impl_id so it does
+# not collide with the legacy `training_lora` on the same (model_name, device);
+# selectable via --impl trainer-training-lora.
+trainer_training_lora_impl = ImplSpec(
+    impl_id="trainer_training_lora",
+    impl_name="trainer-training-lora",
+    repo_url="https://github.com/tenstorrent/tt-inference-server",
+    code_path="tt-media-server/tt_model_runners/forge_training_runners/trainer_training_lora_runner.py",
+)
+
+quetzal_impl = ImplSpec(
+    impl_id="quetzal",
+    impl_name="quetzal",
+    repo_url="https://github.com/tenstorrent/tt-quetzalcoatlus",
+    code_path="serving",
+)
 
 _IMPL_REGISTRY: Dict[str, ImplSpec] = {
+    "quetzal": quetzal_impl,
     "tt_transformers": tt_transformers_impl,
     "llama3_70b_galaxy": llama3_70b_galaxy_impl,
     "qwen3_32b_galaxy": qwen3_32b_galaxy_impl,
@@ -389,6 +406,7 @@ _IMPL_REGISTRY: Dict[str, ImplSpec] = {
     "qwen36_blackhole_vlm": qwen36_blackhole_vlm_impl,
     "diffusion_gemma": diffusion_gemma_impl,
     "training_lora": training_lora_impl,
+    "trainer_training_lora": trainer_training_lora_impl,
 }
 
 
@@ -1072,9 +1090,8 @@ class ModelSpecTemplate:
         specs = []
 
         for weight in self.weights:
-            weight_model_name = model_weights_to_model_name(weight)
             template_reference_map = get_perf_reference_map(
-                weight_model_name, self.perf_targets_map
+                weight, self.perf_targets_map
             )
             for device_model_spec in self.device_model_specs:
                 device_type = device_model_spec.device
@@ -1093,7 +1110,7 @@ class ModelSpecTemplate:
                 # actually overrides; otherwise this is one map per weight.
                 if device_model_spec.perf_targets_map:
                     perf_reference_map = get_perf_reference_map(
-                        weight_model_name,
+                        weight,
                         {
                             **self.perf_targets_map,
                             **device_model_spec.perf_targets_map,
