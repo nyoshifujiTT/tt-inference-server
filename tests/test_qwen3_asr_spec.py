@@ -127,6 +127,12 @@ SUPERSEDED_TT_METAL_COMMITS = (
     # commit still exists as an object but is no longer on the branch, so a
     # build would fail at `git checkout`. Its replacement is afa4d983bb0.
     "60166e19d45a0da3aa1735eb88fed13c444877aa",
+    # Superseded by the four adapter fixes for the rebased upstream contract.
+    # The decisive one runs the audio encoder during prefill warmup: without it
+    # the encoder allocated beside the live decode trace's scratch and produced
+    # a different output on every request after the first, taking TED CER from
+    # 0.1002 to 0.975. An image built from this pin reproduces that.
+    "afa4d983bb0a91bef48060d2b812d44cbf117745",
 )
 
 

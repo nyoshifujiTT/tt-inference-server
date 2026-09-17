@@ -58,7 +58,7 @@ the upstream clone at all:
 ```
 cd $TT_METAL_HOME
 docker buildx bake -f dockerfile/docker-bake.hcl \
-  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:afa4d983bb0a91bef48060d2b812d44cbf117745 \
+  --set ci-build.tags=local/tt-metal/tt-metalium/ubuntu-22.04-amd64:0a32a37e070aa235eb2cf935d11e87630174e94b \
   --set ci-build.output=type=docker \
   ci-build
 ```
@@ -325,7 +325,7 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +- weights:
 +    - neosophie/Qwen3-ASR-1.7B-JA
 +  version: "0.1.0"
-+  tt_metal_commit: "afa4d983bb0a91bef48060d2b812d44cbf117745"
++  tt_metal_commit: "0a32a37e070aa235eb2cf935d11e87630174e94b"
 +  vllm_commit: "4a93161"
 +  impl: tt_vllm_plugin
 +  min_disk_gb: 15
@@ -348,7 +348,7 @@ diff --git a/workflows/model_specs/prod/audio_tts.yaml b/workflows/model_specs/p
 +  status: EXPERIMENTAL
 PATCH
 
-python3 scripts/build_docker_images.py --build-metal-commit afa4d983bb0a91bef48060d2b812d44cbf117745 --single-threaded
+python3 scripts/build_docker_images.py --build-metal-commit 0a32a37e070aa235eb2cf935d11e87630174e94b --single-threaded
 
 git checkout vllm-tt-metal/vllm.tt-metal.src.dev.Dockerfile \
              workflows/model_specs/prod/audio_tts.yaml
@@ -617,7 +617,7 @@ it is replaced, so keep at least 60 GB free.
 MODEL_SPECS_ENV=dev python3 run.py --model Qwen3-ASR-1.7B-JA --tt-device p150 \
   --workflow server --docker-server --dev-mode --no-auth --service-port 8110 \
   --host-hf-cache \
-  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-afa4d983bb0a91bef48060d2b812d44cbf117745-4a93161
+  --override-docker-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:0.21.0-0a32a37e070aa235eb2cf935d11e87630174e94b-4a93161
 ```
 
 `MODEL_SPECS_ENV=dev` is required here for the same reason as in the build: the
