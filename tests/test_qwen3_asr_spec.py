@@ -133,6 +133,10 @@ SUPERSEDED_TT_METAL_COMMITS = (
     # a different output on every request after the first, taking TED CER from
     # 0.1002 to 0.975. An image built from this pin reproduces that.
     "afa4d983bb0a91bef48060d2b812d44cbf117745",
+    # Superseded by the test-premise fix: the pin bumped to 0a32a37e070 made
+    # the qwen3_asr suite red, because a body-size check on
+    # warmup_model_prefill forbade the encoder warmup that pin introduced.
+    "0a32a37e070aa235eb2cf935d11e87630174e94b",
 )
 
 
