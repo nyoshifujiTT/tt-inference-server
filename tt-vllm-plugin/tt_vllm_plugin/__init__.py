@@ -40,29 +40,18 @@ def register_models():
             "BGE model may not be available. Ensure tt-metal is in Python path."
         )
 
-    # Register Qwen3-Embedding model (TTQwen3Model)
-    # This allows vLLM to find the TT-specific Qwen3-Embedding implementation
-    # Note: Qwen3-Embedding may be detected as Qwen3ForCausalLM by vLLM,
-    # so we register both TTQwen3Model and TTQwen3ForCausalLM
-    try:
-        ModelRegistry.register_model(
-            "TTQwen3Model",
-            "models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm:Qwen3ForEmbedding",
-        )
-        # Also register TTQwen3ForCausalLM as fallback (in case vLLM detects it as causal LM)
-        ModelRegistry.register_model(
-            "TTQwen3ForCausalLM",
-            "models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm:Qwen3ForEmbedding",
-        )
-        print("Registered Qwen3-Embedding model")
-    except Exception as e:
-        # If registration fails (e.g., module not found), log warning but continue
-        import logging
-
-        logging.warning(
-            f"Failed to register TTQwen3Model/TTQwen3ForCausalLM (Qwen3-Embedding): {e}. "
-            "Qwen3-Embedding model may not be available. Ensure tt-metal is in Python path."
-        )
+    # Qwen3-Embedding is deliberately not registered here. Serving it goes
+    # through tenstorrent/vllm-tt-plugin, whose pooling runner delegates to
+    # model.pooler over the flat per-token hidden states, and the class that
+    # meets that contract is
+    # models.demos.qwen3_embedding.tt.generator_vllm:Qwen3EmbeddingForTTvLLM.
+    #
+    # The entries removed here named the model wrapper instead, whose forward
+    # returns the finished embedding rather than the pre-pooling stage. This
+    # plugin's runner consumed that output directly as the pooled result, a
+    # contract vLLM itself does not have, so keeping the registration alive
+    # would let a stale engine bind Qwen3-Embedding to the wrong caller
+    # convention.
 
     # Add additional model registrations here as needed
     # ModelRegistry.register_model("AnotherModel", "path.to:ModelClass")
