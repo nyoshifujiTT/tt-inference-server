@@ -1,0 +1,699 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""The corpus eval the runbook tells readers to run must live in the repo.
+
+The accuracy numbers this bring-up is accepted on (TED CER 0.1002, MagicHub CER
+0.1668) come from asr_ja_eval.py. The runbook printed a command for it while
+the script existed only in a working directory on the bring-up host, so a
+reader following the runbook got "No such file or directory" and no way to
+reproduce the figures. Its sibling, asr_openai_benchmark.py, was committed
+under reference_config/; this one belongs next to it.
+"""
+
+import ast
+import json
+import os
+import re
+
+import pytest
+
+HERE = os.path.dirname(__file__)
+EVAL = os.path.join(HERE, "..", "reference_config", "evals", "asr_ja_eval.py")
+README = os.path.join(HERE, "..", "scripts", "qwen3_asr", "README.md")
+
+
+def _read(path):
+    with open(path) as fh:
+        return fh.read()
+
+
+def test_the_corpus_eval_script_is_committed():
+    assert os.path.exists(EVAL), (
+        "asr_ja_eval.py must be in the repository; the runbook's accuracy "
+        "section is unreproducible without it"
+    )
+    ast.parse(_read(EVAL))
+
+
+def test_the_runbook_points_at_the_committed_path():
+    """A bare "python3 asr_ja_eval.py" only works from an undisclosed cwd."""
+    readme = _read(README)
+    assert "reference_config/evals/asr_ja_eval.py" in readme
+    assert "\npython3 asr_ja_eval.py" not in readme, (
+        "the runbook must give the in-repo path, not a bare filename"
+    )
+
+
+def test_the_eval_speaks_the_multipart_transcription_api():
+    """The whole reason the upstream harness is unusable here.
+
+    The runbook explains that the upstream generic audio path POSTs a JSON body
+    and gets HTTP 400 because vLLM wants multipart/form-data. The script the
+    runbook substitutes has to be the one that does it correctly, otherwise the
+    justification does not hold.
+    """
+    src = _read(EVAL)
+    assert "/v1/audio/transcriptions" in src
+    assert "multipart/form-data" in src
+
+
+def test_the_eval_sends_the_customer_request_parameters():
+    """The measured numbers are only comparable if the preset travels with it.
+
+    Accuracy was accepted against the customer's (gbase-asr) request shape;
+    dropping any of these silently changes what the CER means.
+    """
+    src = _read(EVAL)
+    for field in (
+        '"language"',
+        '"to_language"',
+        '"repetition_penalty"',
+        '"max_completion_tokens"',
+        '"temperature"',
+    ):
+        assert field in src, f"the customer preset field {field} must be sent"
+
+
+def test_the_eval_reports_the_metrics_the_runbook_quotes():
+    """The eval must emit every figure the acceptance table cites."""
+    src = _read(EVAL)
+    for key in ("corpus_cer", "rtf_sum_lat_over_audio", "throughput_audio_per_s"):
+        assert key in src
+
+
+def test_the_results_table_records_corpus_speed_not_only_accuracy():
+    """The corpora were accepted on CER alone; their speed went unrecorded.
+
+    asr_ja_eval.py reports throughput_audio_per_s for every run and the table
+    kept only corpus_cer, so a rerun that transcribed correctly at half the
+    speed matched the runbook exactly. The one speed figure that was recorded --
+    LibriSpeech rtfx -- comes from a different harness on a different workload,
+    so it cannot stand in for the corpora.
+    """
+    readme = _read(README)
+    row_ted = [ln for ln in readme.splitlines() if ln.startswith("| TED 509 clips")]
+    row_magic = [ln for ln in readme.splitlines() if ln.startswith("| MagicHub 600 clips")]
+    assert row_ted and row_magic, "both corpus rows must be in the results table"
+    for row in (row_ted[0], row_magic[0]):
+        assert "audio-s/s" in row, f"record the throughput for this corpus: {row}"
+        assert "p50" in row, f"and a latency percentile: {row}"
+
+
+def test_the_recorded_corpus_throughput_is_consistent_with_its_own_inputs():
+    """audio-s / wall-s must equal the quoted rate, or one of them is stale."""
+    readme = _read(README)
+    for name in ("TED 509 clips", "MagicHub 600 clips"):
+        row = next(ln for ln in readme.splitlines() if ln.startswith(f"| {name}"))
+        got = re.search(
+            r"([\d.]+) audio-s in ([\d.]+) s wall = \*\*([\d.]+) audio-s/s\*\*", row
+        )
+        assert got, f"quote the inputs alongside the rate: {row}"
+        audio, wall, rate = (float(g) for g in got.groups())
+        assert abs(audio / wall - rate) < 0.01, (
+            f"{name}: {audio}/{wall} = {audio / wall:.3f}, table says {rate}"
+        )
+
+
+def test_the_table_says_the_three_speed_figures_are_not_comparable():
+    """They differ in harness and in workload, so a reader will compare them.
+
+    LibriSpeech re-sends 32 downloaded clips to fill 128 requests
+    (``samples[idx % len(samples)]``), while the corpora make one pass over 509
+    and 600 distinct clips. Putting 3.96 next to 12.58 without that note reads
+    as a threefold regression.
+    """
+    readme = _read(README)
+    body = readme[readme.index("| TED 509 clips") :]
+    body = body[: body.index("And the serving-level timings")]
+    flat = " ".join(body.split())
+    assert "not comparable to each other" in flat, "say the three rows are not one series"
+    assert "re-sends the same audio" in flat, "name why the LibriSpeech row is higher"
+    assert "Compare a rerun against the same row" in flat, "and what to do instead"
+
+
+def test_the_benchmark_really_reuses_its_downloaded_clips():
+    """The note above is only true while the benchmark cycles its samples."""
+    src = _read(
+        os.path.join(HERE, "..", "reference_config", "benchmarking", "asr_openai_benchmark.py")
+    )
+    assert "samples[idx % len(samples)]" in src, (
+        "the runbook explains the LibriSpeech row by this reuse; if it stops "
+        "cycling, the explanation stops holding"
+    )
+
+
+def test_the_table_warns_that_pre_fix_speed_figures_are_high():
+    """Older runs are quoted in worklogs and will be compared against these."""
+    readme = _read(README)
+    body = readme[readme.index("| TED 509 clips") :]
+    body = body[: body.index("And the serving-level timings")]
+    flat = " ".join(body.split())
+    assert "1892.0" in flat and "2212.0" in flat, "name the superseded totals"
+    assert "1649.4" in flat and "1927.7" in flat, "and the measured ones"
+    assert "CERs are unaffected" in flat, (
+        "say the accuracy conclusions did not move, or the fix reads as invalidating them"
+    )
+
+
+def test_the_runbook_says_how_to_build_the_two_manifests():
+    """--manifest <corpus>/manifest.jsonl is unusable without a recipe.
+
+    Neither TED nor MagicHub can be redistributed, so the manifests have to be
+    rebuilt by the reader. The runbook quoted the resulting CERs and printed a
+    command taking a manifest, but said nothing about how either corpus is
+    assembled -- which of the two headline numbers is reproducible was then a
+    matter of guesswork.
+    """
+    readme = _read(README)
+    assert "Where the two manifests come from" in readme
+    # the record format, or the reader cannot write one
+    assert '"wav"' in readme and '"ref"' in readme
+    # TED is reconstructed, not downloaded
+    assert "compose_tedxjp10k.py" in readme
+    assert "segments" in readme
+    # MagicHub: which dataset, and the sampling that fixes 600
+    assert "MagicHub/Japanese_Spontaneous_Conversation_Training_Dataset" in readme
+    assert "seed 42" in readme
+
+
+def test_the_runbook_records_why_a_mixed_track_corpus_is_excluded():
+    """Otherwise the next reader repeats the CABank Sakura attempt.
+
+    Its per-clip CER measured 2.0 -- not a model result but an artefact of one
+    mixed track holding every speaker while the reference holds one line.
+    """
+    readme = _read(README)
+    assert "CABank" in readme
+    assert "mixed track" in readme
+
+
+def test_the_runbook_says_to_discard_the_first_corpus_run():
+    """Otherwise a warm-up artefact reads as a regression.
+
+    The first TED pass on a freshly healthy server reported 19 failures; the
+    second on the same server reported the steady 15. What moves is p99
+    (16.637 s vs 8.847 s) -- kernel compilation and cache warm-up push the tail
+    past the eval's 120 s timeout. corpus_cer is unaffected (0.1000 vs 0.1002)
+    because it is computed over the clips that returned.
+    """
+    readme = _read(README)
+    assert "Discard the first corpus run" in readme
+    # the sentence wraps in the source, so normalise whitespace before matching
+    flat = " ".join(readme.split())
+    assert "run one measurement at a time" in flat
+    # the evidence, so the next reader can tell warm-up from a real regression
+    assert "16.637" in readme and "8.847" in readme, "keep the p99 pair on record"
+    assert "490 / 19" in readme and "494 / 15" in readme
+
+
+def test_the_runbook_does_not_promise_the_first_run_will_be_bad():
+    """19 is what the first pass *can* be, not what it will be.
+
+    Measured on a later restart: the first TED pass came in at 494 / 15, CER
+    0.1002, p99 4.924 s -- the steady numbers -- because one golden clip had
+    been transcribed before it, which pays the JIT compilation the first corpus
+    run otherwise absorbs.
+
+    Read as a promise, the 490/19 row makes a correct first pass look wrong,
+    and hides the cheaper option: warm with one request instead of spending a
+    six-minute corpus pass to do it.
+    """
+    readme = _read(README)
+    flat = " ".join(readme.split())
+    assert "The first run *can* land on the steady numbers" in flat, (
+        "say the first pass is not necessarily the bad one"
+    )
+    # the counter-example, with its own measured numbers
+    assert "4.924" in readme, "record the p99 of the good first pass"
+    # and the cheaper alternative to burning a corpus pass
+    assert "warm the server with one request" in flat, (
+        "offer the one-request warm-up, not only 'discard the first pass'"
+    )
+
+
+def test_the_runbook_explains_the_fifteen_expected_ted_failures():
+    """"494 ok / 15 download artifacts" was asserted, never evidenced.
+
+    The 15 are zero-length wavs in the manifest; the server rejects them with
+    HTTP 400. Recording the check keeps the next reader from chasing them.
+    """
+    readme = _read(README)
+    assert "zero-length wavs" in readme
+    assert "HTTP Error 400" in readme
+    assert "frames 0" in readme
+
+
+def test_the_runbook_separates_transient_failures_from_the_permanent_fifteen():
+    """The fail count is not fixed, and 15 was documented as though it were.
+
+    asr_ja_eval.py records a failure and moves on -- it does not retry -- so a
+    single network hiccup changes the number. Measured on this host: one pass
+    returned 490 ok / 19 fail (corpus_cer 0.1000, audio_s 1636.1) and an
+    immediate rerun against the same server returned 494 / 15, CER 0.1002,
+    audio_s 1649.4, with the server's error/abort/length/repetition counters at
+    0.0 the whole time. Reading 19 against a documented 15 looks like a
+    regression and is not one.
+    """
+    readme = _read(README)
+    body = readme[readme.index("494 ok / 15 download artifacts") :]
+    body = body[: body.index("#### Where the two manifests come from")]
+    flat = " ".join(body.split())
+
+    assert "A higher fail count is not automatically a regression" in flat, (
+        "say that the count moves, or 19 reads as a model failure"
+    )
+    assert "it does not retry" in flat, "name the reason the count moves"
+    # the measured pair, so the reader can recognise the shape
+    assert "490 ok / 19 fail" in flat and "494 / 15" in flat, (
+        "quote both passes; one number alone does not show the count moving"
+    )
+    # and how to tell them apart -- by error text, not by counting
+    assert "by their error text rather than by the count" in flat, (
+        "give the discriminator"
+    )
+
+
+def test_the_runbook_explains_why_audio_s_moves_with_the_fail_count():
+    """Otherwise the audio total looks like independent corroboration.
+
+    audio_s sums the clips that succeeded, so it drops by exactly the audio of
+    the extra failures (1649.4 - 1636.1 = 13.3 s over 4). A reader who treats
+    it as a second signal concludes two things went wrong instead of one.
+    """
+    readme = _read(README)
+    body = readme[readme.index("494 ok / 15 download artifacts") :]
+    body = body[: body.index("#### Where the two manifests come from")]
+    flat = " ".join(body.split())
+    assert "sums the clips that succeeded" in flat
+    assert "symptom of the same thing rather than separate evidence" in flat, (
+        "say it is not independent corroboration"
+    )
+    # and the arithmetic, read back out of the runbook
+    got = re.search(r"1649\.4 - 1636\.1 = ([\d.]+) s over the (\d+) extra failures", flat)
+    assert got, "quote the arithmetic that ties the two together"
+    assert abs(float(got.group(1)) - (1649.4 - 1636.1)) < 0.05
+
+
+def test_the_harness_really_does_not_retry():
+    """The runbook's explanation depends on this, so pin it.
+
+    If a retry is ever added the guidance above becomes wrong -- a transient
+    failure would no longer show up in the count at all.
+    """
+    src = _read(EVAL)
+    body = src[src.index("def transcribe(") : src.index("# --- Japanese text normalization")]
+    assert "for attempt" not in body and "retries" not in body, (
+        "a retry loop would change what a non-zero fail count means; update the "
+        "runbook's transient-vs-permanent guidance if one is added"
+    )
+    assert "ERROR: {e}" in body, (
+        "a failure must be recorded with its reason, since the reason is what "
+        "separates a transient failure from an empty wav"
+    )
+
+
+def _resolve_secs():
+    """Compile resolve_secs out of the eval, so the real function is exercised."""
+    tree = ast.parse(_read(EVAL))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "resolve_secs":
+            module = ast.Module(body=[node], type_ignores=[])
+            namespace = {}
+            exec(compile(ast.fix_missing_locations(module), EVAL, "exec"), namespace)  # noqa: S102
+            return namespace["resolve_secs"]
+    raise AssertionError("resolve_secs not found")
+
+
+def test_audio_duration_prefers_our_own_measurement():
+    """usage.seconds is billing, in whole seconds, so it rounds every clip up.
+
+    This eval computed wav_dur() for every clip and then threw it away, passing
+    None as the fallback so the server's rounded figure always won. On TED-509
+    that reported 1892.0 s of audio for files that measure 1649.4 s -- a 14.7%
+    overstatement that flattered throughput_audio_per_s and
+    rtf_sum_lat_over_audio by the same factor. corpus_cer is unaffected, and the
+    per-clip durations written to the samples file stayed correct, so only the
+    aggregate was wrong.
+
+    The same defect was fixed in asr_openai_benchmark.py (a61fb3cdf) five days
+    before this script was committed; it arrived carrying the pre-fix form.
+    """
+    resolve = _resolve_secs()
+    # measured wins even when the server answers
+    assert resolve({"usage": {"seconds": 12}}, 11.34) == 11.34
+    assert resolve({"duration": 12.0}, 11.34) == 11.34
+    # and the fallbacks keep their old precedence when we could not measure
+    assert resolve({"duration": 12.0, "usage": {"seconds": 13}}, None) == 12.0
+    assert resolve({"usage": {"seconds": 13}}, None) == 13.0
+    assert resolve({}, None) is None
+
+
+def test_the_measured_duration_is_actually_handed_to_the_resolver():
+    """The fix is in the call site as much as in the function.
+
+    resolve_secs could prefer its argument perfectly and still be useless while
+    transcribe() passes None, which is exactly how this shipped.
+    """
+    src = _read(EVAL)
+    body = src[src.index("def transcribe(") : src.index("# --- Japanese text normalization")]
+    assert "resolve_secs(data,dur)" in body.replace(" ", ""), (
+        "transcribe() must pass the duration wav_dur() already measured"
+    )
+    assert "resolve_secs(data,None)" not in body.replace(" ", ""), (
+        "passing None discards the local measurement"
+    )
+
+
+def test_the_aggregate_uses_that_duration():
+    src = _read(EVAL)
+    lines = [ln.replace(" ", "") for ln in src.splitlines()]
+    assert any("audio+=(asecord)" in ln for ln in lines), (
+        "the corpus total must come from the per-clip duration"
+    )
+
+
+def test_both_harnesses_state_the_same_rule():
+    """One rule, two clients: a divergence here is how this bug survived."""
+    bench = _read(
+        os.path.join(HERE, "..", "reference_config", "benchmarking", "asr_openai_benchmark.py")
+    )
+    eval_src = _read(EVAL)
+    for src, name in ((bench, "asr_openai_benchmark.py"), (eval_src, "asr_ja_eval.py")):
+        assert "billing quantity" in src, f"{name} must say why the server figure is not a measurement"
+        assert "1649.4" in src and "1892.0" in src, f"{name} must cite the measured overstatement"
+
+
+def _eval_module():
+    """Import the harness so its scoring can be exercised, not just grepped.
+
+    Every test above reads the source text or the runbook. None of them calls
+    norm_ja / cer / _edit -- the three functions that actually produce the CER
+    this bring-up is accepted on -- so the regex, the division and the edit
+    distance could all be rewritten without a single failure here.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_asr_ja_eval_behaviour", os.path.abspath(EVAL)
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_normaliser_strips_what_the_readme_says_it_strips():
+    """CER is computed after NFKC and punctuation removal; check both happen."""
+    norm = _eval_module().norm_ja
+
+    assert norm("ＡＢＣ") == "ABC", "NFKC must fold full-width to ASCII"
+    assert norm("周りを見ると。") == norm("周りを見ると"), "trailing 。 must not count"
+    assert norm("「はい」、そうです！") == "はいそうです"
+    assert norm("あ い　う") == "あいう", "both ASCII and ideographic space go"
+    assert norm("コーヒー") == "コヒ", (
+        "the long-vowel mark is in the strip set; if that changes, every "
+        "katakana loanword's CER moves"
+    )
+
+
+def test_the_normaliser_keeps_the_characters_cer_is_counted_over():
+    """Stripping too much would flatter the score."""
+    norm = _eval_module().norm_ja
+
+    for text in ("東京", "ひらがな", "カタカナ", "abc", "123"):
+        assert norm(text) == text, f"{text!r} must survive normalisation"
+
+
+def test_cer_is_edits_over_reference_length():
+    """The denominator is the reference, not the hypothesis or the max.
+
+    Dividing by the hypothesis length would let a truncated transcript score
+    perfectly, and dividing by max() would cap every error below 1.0.
+    """
+    module = _eval_module()
+
+    assert module.cer("あいうえお", "あいうえお") == 0.0
+    assert module.cer("あいうえお", "あいうX") == pytest.approx(2 / 5), (
+        "one substitution (え->X) and one deletion (お) over a 5-character "
+        "reference"
+    )
+    # a hypothesis twice as long as the reference scores above 1.0
+    assert module.cer("あい", "あいうえお") == pytest.approx(3 / 2)
+
+
+def test_cer_normalises_both_sides_before_comparing():
+    """Both arguments go through norm_ja, not just the reference.
+
+    The obvious cases only exercise the reference side: "周りを見ると。" vs
+    "周りを見ると" and "ＡＢＣ" vs "ABC" both pass if only ref is normalised,
+    because the hypothesis is already in normal form. The model is the side
+    that emits punctuation and full-width characters, so it is the hypothesis
+    that needs normalising -- each case below has the material on that side.
+    """
+    module = _eval_module()
+
+    assert module.cer("周りを見ると。", "周りを見ると") == 0.0
+    assert module.cer("ＡＢＣ", "ABC") == 0.0
+
+    # hypothesis carries the punctuation / width the reference does not
+    assert module.cer("周りを見ると", "周りを見ると。") == 0.0, (
+        "the hypothesis must be normalised too, or every trailing 。 the "
+        "model emits counts as an insertion"
+    )
+    assert module.cer("ABC", "ＡＢＣ") == 0.0
+    assert module.cer("はいそうです", "「はい」、そうです！") == 0.0
+
+
+def test_an_empty_reference_scores_one_unless_the_hypothesis_is_empty_too():
+    """Both branches are load-bearing for the corpus totals.
+
+    A manifest line with no reference text still goes through scoring; the
+    runbook says such a clip "drags CER to 1.0 for that clip", which is this
+    branch. Returning 0.0 instead would silently improve the corpus number.
+    """
+    module = _eval_module()
+
+    assert module.cer("", "") == 0.0
+    assert module.cer("", "なにか") == 1.0
+
+
+def test_the_edit_distance_is_a_real_levenshtein():
+    """Substitution, insertion and deletion must all cost exactly one.
+
+    The DP is hand-rolled over a single row with a `prev` carry; dropping any
+    of the three candidates, or updating `prev` at the wrong point, still
+    returns plausible-looking numbers.
+    """
+    edit = _eval_module()._edit
+
+    assert edit(list("kitten"), list("sitting")) == pytest.approx(3 / 6)
+    assert edit(list("abc"), list("abc")) == 0.0
+    assert edit(list("abc"), list("abd")) == pytest.approx(1 / 3)  # substitution
+    assert edit(list("abc"), list("ab")) == pytest.approx(1 / 3)   # deletion
+    assert edit(list("abc"), list("abcd")) == pytest.approx(1 / 3)  # insertion
+    assert edit(list("abc"), list("")) == 1.0
+    assert edit(list("abc"), list("xyz")) == 1.0
+
+
+def test_the_two_harnesses_normalise_identically():
+    """demo-vs-served parity is a CER comparison, so the metric must match.
+
+    tt-metal's corpus_eval.py exists to be compared against this client on the
+    same clips. Its own tests assert its normalisation against fixed cases
+    because scoring the two sides differently once made the demo look 8 CER
+    points worse. Nothing asserted the same from this side.
+    """
+    ours = _eval_module().norm_ja
+
+    metal = os.path.join(
+        HERE, "..", "..", "tt-metal", "models", "demos", "audio", "qwen3_asr",
+        "eval", "corpus_eval.py",
+    )
+    if not os.path.exists(metal):
+        pytest.skip("tt-metal is not checked out beside this repo")
+
+    import re as _re
+    import unicodedata
+
+    src = _read(metal)
+    match = _re.search(r'_NORM_STRIP = re\.compile\((r"[^\n]*")\)', src)
+    assert match, "the demo-side normalisation regex must stay greppable"
+    pattern = _re.compile(eval(match.group(1)))  # noqa: S307 - literal from our own source
+
+    def theirs(text):
+        return pattern.sub("", unicodedata.normalize("NFKC", text)).strip()
+
+    for text in (
+        "周りを見ると。",
+        "「はい」、そうです！",
+        "ＡＢＣ",
+        "コーヒー",
+        "あ い　う",
+        "東京都は、日本の首都です。",
+    ):
+        assert ours(text) == theirs(text), (
+            f"the two harnesses disagree on {text!r}: {ours(text)!r} vs "
+            f"{theirs(text)!r} -- their CERs are then not comparable"
+        )
+
+
+MANIFEST_WAV_KEYS = ["wav", "audio", "audio_filepath", "path"]
+MANIFEST_REF_KEYS = ["ref", "text", "reference"]
+
+
+def test_the_manifest_reader_accepts_the_names_other_corpora_use():
+    """One manifest has to be readable by both evals, or parity is a fiction.
+
+    tt-metal's corpus_eval.py accepts wav / audio / audio_filepath / path and
+    documents the order; this client took it["wav"] and nothing else, so a
+    manifest built for the demo side (NeMo-style audio_filepath, say) could
+    not be handed to the served side without rewriting it -- and "same clips,
+    same metric" stops being true when the files differ.
+    """
+    module = _eval_module()
+
+    for key in MANIFEST_WAV_KEYS:
+        assert module.manifest_wav({key: "/clip.wav"}) == "/clip.wav", key
+
+
+def test_the_wav_keys_are_tried_in_the_documented_order():
+    """Order matters when a manifest carries more than one of them."""
+    module = _eval_module()
+
+    item = {key: f"/{key}.wav" for key in MANIFEST_WAV_KEYS}
+    for key in MANIFEST_WAV_KEYS:
+        assert module.manifest_wav(item) == f"/{key}.wav", (
+            f"expected {key} to win over {MANIFEST_WAV_KEYS[MANIFEST_WAV_KEYS.index(key) + 1:]}"
+        )
+        del item[key]
+
+
+def test_a_line_with_no_audio_path_raises():
+    """Skipping it silently would shrink the corpus without saying so.
+
+    The demo side raises KeyError here; the counts the runbook quotes (509
+    clips) are only meaningful if a malformed line is loud.
+    """
+    module = _eval_module()
+
+    with pytest.raises(KeyError):
+        module.manifest_wav({"ref": "text but no audio"})
+
+
+def test_the_reference_falls_back_to_an_empty_string():
+    """An empty reference scores 1.0 for that clip -- it is not dropped.
+
+    That behaviour is documented on both sides; returning None here would
+    crash norm_ja instead, turning a scoring case into a traceback.
+    """
+    module = _eval_module()
+
+    for key in MANIFEST_REF_KEYS:
+        assert module.manifest_ref({key: "参照"}) == "参照", key
+    assert module.manifest_ref({"wav": "/clip.wav"}) == ""
+
+
+def test_both_evals_resolve_a_manifest_line_identically():
+    """Compare the readers, not the prose: they must agree line by line."""
+    ours = _eval_module()
+
+    metal = os.path.join(
+        HERE, "..", "..", "tt-metal", "models", "demos", "audio", "qwen3_asr",
+        "eval", "corpus_eval.py",
+    )
+    if not os.path.exists(metal):
+        pytest.skip("tt-metal is not checked out beside this repo")
+
+    src = _read(metal)
+    match = re.search(r"path = (it\.get\(.*?\)\s*or\s*it\[\"path\"\])", src)
+    assert match, "the demo-side path resolution must stay greppable"
+    theirs = eval(  # noqa: S307 - literal lifted from our own source
+        f"lambda it: {match.group(1)}"
+    )
+
+    for item in (
+        {"wav": "/a.wav"},
+        {"audio": "/b.wav"},
+        {"audio_filepath": "/c.wav"},
+        {"path": "/d.wav"},
+        {"wav": "/a.wav", "path": "/d.wav"},
+        {"audio": "/b.wav", "audio_filepath": "/c.wav"},
+    ):
+        assert ours.manifest_wav(item) == theirs(item), (
+            f"the two readers disagree on {item!r}"
+        )
+
+
+def test_the_runbook_documents_the_keys_the_reader_accepts():
+    """The table has to name every key, or a working manifest looks invalid."""
+    readme = _read(README)
+    table = readme[readme.index("| field | keys tried, in order |") :]
+    table = table[: table.index("\n\n")]
+
+    for key in MANIFEST_WAV_KEYS + MANIFEST_REF_KEYS:
+        assert f"`{key}`" in table, f"{key} is accepted but not documented"
+
+
+def test_the_eval_reads_every_manifest_field_through_the_helpers():
+    """A direct it["wav"] left behind would bypass the aliases."""
+    src = _read(EVAL)
+    body = src[src.index("def main():") :]
+
+    for direct in ('it["wav"]', 'it["ref"]'):
+        assert direct not in body, (
+            f"{direct} bypasses the alias helpers; use manifest_wav/manifest_ref"
+        )
+
+
+def test_the_manifest_reader_counts_the_clips_it_is_given(tmp_path):
+    """Every corpus number in the runbook is `len(load_manifest(...))`.
+
+    The key *resolution* is covered above, but the reader itself -- which
+    decides how many clips there are -- was never run. TED 509 / MagicHub 600
+    are the counts the accuracy claims are stated over, and a reader that
+    quietly dropped or doubled a line would move the denominator of every CER
+    without failing anything.
+    """
+    module = _eval_module()
+
+    manifest = tmp_path / "m.jsonl"
+    manifest.write_text(
+        '{"wav": "/a.wav", "ref": "A"}\n{"wav": "/b.wav", "ref": "B"}\n'
+    )
+
+    items = module.load_manifest(str(manifest))
+    assert items == [
+        {"wav": "/a.wav", "ref": "A"},
+        {"wav": "/b.wav", "ref": "B"},
+    ], items
+
+
+def test_blank_lines_do_not_become_clips(tmp_path):
+    """A trailing newline is normal in a generated manifest.
+
+    Counting it would add an item with no audio path, so the run would die in
+    manifest_wav with a KeyError on a manifest that is perfectly valid.
+    """
+    module = _eval_module()
+
+    manifest = tmp_path / "m.jsonl"
+    manifest.write_text('{"wav": "/a.wav"}\n\n   \n{"wav": "/b.wav"}\n')
+
+    assert len(module.load_manifest(str(manifest))) == 2
+
+
+def test_a_malformed_line_is_loud_rather_than_skipped(tmp_path):
+    """Same rule as a line with no audio path: the corpus must not shrink.
+
+    509 clips means 509 lines were read. If a truncated write or a stray log
+    line were skipped, the eval would report a CER over fewer clips than the
+    number printed beside it.
+    """
+    module = _eval_module()
+
+    manifest = tmp_path / "bad.jsonl"
+    manifest.write_text('{"wav": "/a.wav"}\nnot json at all\n')
+
+    with pytest.raises(json.JSONDecodeError):
+        module.load_manifest(str(manifest))

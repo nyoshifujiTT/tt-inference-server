@@ -1130,6 +1130,98 @@ class TestModelSpecsStructure:
             assert not hasattr(spec, "device_model_specs")
             assert not hasattr(spec, "weights")
 
+    def test_qwen3_asr_registered_via_plugin_builtin_map(self):
+        """Qwen3-ASR is served by the standalone vllm-tt-plugin whose built-in
+        model map registers the TT adapter, so the spec must no longer depend on
+        the EXTRA_MODELS_DIR bundle hook while keeping the measured p150 batch
+        width (max_num_seqs=4)."""
+        asr_ids = [
+            "id_tt-vllm-plugin_Qwen3-ASR-1.7B_p150",
+            "id_tt-vllm-plugin_Qwen3-ASR-1.7B-JA_p150",
+        ]
+        # Qwen3-ASR is a bring-up and lives only in the dev catalog; MODEL_SPECS
+        # follows MODEL_SPECS_ENV, which defaults to prod. Resolve dev directly
+        # so the assertion does not depend on how the runner is invoked.
+        from workflows.model_spec import get_model_spec_map, load_templates_from_yaml
+        from workflows.utils import get_repo_root_path
+
+        dev_specs = get_model_spec_map(
+            load_templates_from_yaml(
+                get_repo_root_path()
+                / "workflows"
+                / "model_specs"
+                / "dev"
+                / "audio_tts.yaml",
+                env="dev",
+            )
+        )
+        for model_id in asr_ids:
+            assert model_id in dev_specs, f"missing spec {model_id}"
+            dms = dev_specs[model_id].device_model_spec
+            env = dms.env_vars or {}
+            # Adapter arch now comes from the plugin built-in map, not a bundle.
+            assert "EXTRA_MODELS_DIR" not in env
+            # Measured p150 batched-serving sweet spot is preserved.
+            assert dms.max_concurrency == 4
+            assert dms.vllm_args.get("max_num_seqs") == "4"
+            # Fast decode path is the default: decode_only tracing, and the old
+            # belt-and-suspenders TT_METAL_TRACE_REGION_SIZE=0 (which pinned an
+            # unusable 0-size trace region) is gone so the decode trace can be
+            # captured.
+            assert "TT_METAL_TRACE_REGION_SIZE" not in env
+            # TT settings reach vLLM through the generated additional_config,
+            # which the base spec builds from override_tt_config. A raw
+            # "additional-config" vllm_arg would not replace it (the keys differ
+            # by a hyphen) and both would be passed.
+            #
+            # Parse it rather than matching substrings. The earlier form paired
+            # a literal '"trace_mode": "decode_only"' with `"none" not in
+            # add_cfg`, which is a check on the whole JSON string: it rejected a
+            # correct config that merely contained the letters (a key or value
+            # such as "nonentity") and accepted "NONE", which disables tracing.
+            # trace_mode sets the shipped performance default, so the assertion
+            # has to be about the value.
+            add_cfg = dms.vllm_args.get("additional_config", "")
+            tt_cfg = json.loads(add_cfg)["tt"]
+            assert tt_cfg["trace_mode"] == "decode_only", tt_cfg
+            assert "additional-config" not in dms.vllm_args
+
+    @pytest.mark.parametrize(
+        "trace_mode,should_pass",
+        [
+            ("decode_only", True),
+            ("none", False),
+            ("NONE", False),
+            ("all", False),
+        ],
+    )
+    def test_the_trace_mode_check_reads_the_value_not_the_json_text(
+        self, trace_mode, should_pass
+    ):
+        """Guard the assertion above against the substring form it replaced.
+
+        `"none" not in add_cfg` looked like "trace_mode is not none" and was
+        neither: it rejected a correct config that happened to contain the
+        letters anywhere in the JSON, and accepted "NONE", which disables
+        tracing just as effectively as "none". This exercises the parse on the
+        cases that separate the two readings.
+        """
+        add_cfg = json.dumps({"tt": {"trace_mode": trace_mode}})
+        assert (json.loads(add_cfg)["tt"]["trace_mode"] == "decode_only") is should_pass
+
+    def test_a_config_containing_the_letters_none_is_not_rejected(self):
+        """The false positive the substring check produced.
+
+        A future key or value spelled with those letters -- "nonemptyprompt",
+        "nonentity" -- would have failed the spec test while the trace mode was
+        exactly right.
+        """
+        add_cfg = json.dumps(
+            {"tt": {"trace_mode": "decode_only", "note": "nonentity"}}
+        )
+        assert "none" in add_cfg, "the substring form would have rejected this"
+        assert json.loads(add_cfg)["tt"]["trace_mode"] == "decode_only"
+
 
 class TestRequiredTargetTiers:
     """Tests for ModelStatusTypes.required_target_tiers property."""
