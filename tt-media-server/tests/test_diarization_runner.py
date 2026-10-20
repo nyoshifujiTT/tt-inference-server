@@ -126,3 +126,22 @@ def test_requests_are_not_batched(_mock_setup_env, mock_get_settings):
     mock_get_settings.return_value = settings
 
     assert TTDiarizationRunner("0").is_request_batchable(object()) is False
+
+
+def test_warmup_audio_is_speech_so_the_embedding_net_compiles():
+    """Warmup must drive both nets, so its audio has to contain speech.
+
+    A silent warmup left every embedding kernel to compile on the first real
+    request (68 s instead of 6 s). The clip is pyannote's own two-speaker
+    sample; check it is long enough to cover the 10 s segmentation window and
+    far from silent.
+    """
+    from tt_model_runners.diarization_runner import _speech_sample
+
+    audio = _speech_sample()
+    waveform = audio["waveform"]
+
+    assert audio["sample_rate"] == 16000
+    assert waveform.ndim == 2 and waveform.shape[0] == 1
+    assert waveform.shape[1] / audio["sample_rate"] >= 10.0
+    assert float(waveform.abs().mean()) > 1e-3

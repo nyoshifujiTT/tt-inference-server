@@ -16,9 +16,13 @@ from utils.diarization_backend import DiarizationBackend
 # the WeSpeaker backbone allocate their halo/reader buffers out of it.
 DIARIZATION_L1_SMALL_SIZE = 32768
 
-# Long enough to span the segmentation window (10 s) so its kernels compile
-# during warmup rather than on the first real request.
-WARMUP_SECONDS = 12.0
+# Warmup must drive both nets. Silence makes segmentation find no speaker, so
+# the embedding net is never called and all of its kernels compile on the first
+# real request instead (measured: 0 kernel binaries after a silent warmup, 478
+# after the first request, which took 68 s against 6 s steady state). The clip
+# pyannote.audio ships for its own examples is real two-speaker speech, 30 s
+# long, so it spans the 10 s segmentation window and yields embeddings.
+WARMUP_SAMPLE = ("pyannote.audio", "sample/sample.wav")
 
 
 class TTDiarizationRunner(BaseMetalDeviceRunner):
@@ -78,7 +82,7 @@ class TTDiarizationRunner(BaseMetalDeviceRunner):
 
         self.logger.info(f"Device {self.device_id}: Compiling kernels...")
         self.backend.diarize(
-            _silence(self.settings.default_sample_rate), exclusive=True
+            _speech_sample(), exclusive=True
         )
         self.logger.info(f"Device {self.device_id}: Diarization pipeline ready")
         return True
@@ -120,16 +124,22 @@ class TTDiarizationRunner(BaseMetalDeviceRunner):
         return False
 
 
-def _silence(sample_rate: int) -> dict:
-    """A short silent waveform, in the in-memory shape pyannote accepts.
+def _speech_sample() -> dict:
+    """pyannote.audio's bundled speech clip, in the in-memory shape it accepts.
 
     Handed as a tensor rather than a path so the pipeline never decodes a file:
     torchcodec cannot load against the torch pin this image ships.
     """
+    from importlib.resources import files
+
+    import soundfile
     import torch
 
-    samples = int(WARMUP_SECONDS * sample_rate)
+    package, resource = WARMUP_SAMPLE
+    samples, sample_rate = soundfile.read(
+        str(files(package).joinpath(resource)), dtype="float32", always_2d=True
+    )
     return {
-        "waveform": torch.zeros(1, samples, dtype=torch.float32),
+        "waveform": torch.from_numpy(samples.T.copy()),
         "sample_rate": int(sample_rate),
     }
