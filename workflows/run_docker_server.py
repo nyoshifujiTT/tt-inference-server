@@ -559,6 +559,7 @@ def generate_docker_run_command(
                 ModelType.VIDEO,
                 ModelType.TEXT_TO_SPEECH,
                 ModelType.AUDIO,
+                ModelType.DIARIZATION,
                 ModelType.TRAINING,
             )
         ):
