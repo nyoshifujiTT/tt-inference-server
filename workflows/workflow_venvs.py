@@ -355,6 +355,66 @@ def setup_agentic_traces(
     return True
 
 
+TT_METAL_REPO_URL = "https://github.com/tenstorrent/tt-metal.git"
+DIARIZATION_ACCURACY_PATH = "models/demos/audio/pyannote_diarization"
+
+
+def get_diarization_metal_checkout(venv_config: VenvConfig) -> Path:
+    """Sparse tt-metal checkout inside the EVALS_DIARIZATION venv."""
+    return venv_config.venv_path / "tt-metal"
+
+
+def setup_evals_diarization(
+    venv_config: VenvConfig,
+    model_spec: "ModelSpec",  # noqa: F821
+) -> bool:
+    """Hook for EVALS_DIARIZATION: fetch tt-metal's diarization scoring code.
+
+    The DER is computed by ``models.demos.audio.pyannote_diarization.accuracy``
+    so the served model and tt-metal's own tests are scored by the same code.
+    Only that package is checked out (sparse, blobless), at the tt-metal commit
+    the served image was built from, and a ``.pth`` file puts the checkout root
+    on the venv's import path.
+    """
+    commit = getattr(model_spec, "tt_metal_commit", None)
+    if not commit:
+        logger.error(
+            "EVALS_DIARIZATION needs the tt-metal commit the server image was "
+            "built from, and the model spec has none. Tag the image in the "
+            "standard <version>-<tt_metal_commit>-<sha>-<timestamp> form so "
+            "--override-docker-image carries it."
+        )
+        return False
+
+    checkout = get_diarization_metal_checkout(venv_config)
+    steps = []
+    if not (checkout / ".git").exists():
+        steps += [
+            f"git init -q {checkout}",
+            f"git -C {checkout} remote add origin {TT_METAL_REPO_URL}",
+            f"git -C {checkout} sparse-checkout set --no-cone /{DIARIZATION_ACCURACY_PATH}/",
+        ]
+    steps += [
+        f"git -C {checkout} fetch -q --depth 1 --filter=blob:none origin {commit}",
+        f"git -C {checkout} checkout -q --force FETCH_HEAD",
+    ]
+    for step in steps:
+        if run_command(step, logger=logger) != 0:
+            return False
+
+    site_packages = next(
+        (venv_config.venv_path / "lib").glob("python*/site-packages"), None
+    )
+    if site_packages is None:
+        logger.error(
+            "Could not locate site-packages under %s to write tt-metal.pth",
+            venv_config.venv_path,
+        )
+        return False
+    (site_packages / "tt-metal.pth").write_text(f"{checkout}\n")
+    return True
+
+
 def get_inferencex_repo_path(venv_config: VenvConfig) -> Path:
     """Location of the InferenceX checkout inside the AGENTIC_TRACES venv."""
     return venv_config.venv_path / "InferenceX"
@@ -606,6 +666,11 @@ _venv_config_list = [
     VenvConfig(
         venv_type=WorkflowVenvType.EVALS_EMBEDDING,
         requirements_file="evals-embedding.txt",
+    ),
+    VenvConfig(
+        venv_type=WorkflowVenvType.EVALS_DIARIZATION,
+        requirements_file="evals-diarization.txt",
+        setup_function=setup_evals_diarization,
     ),
     VenvConfig(
         venv_type=WorkflowVenvType.REPORTS_RUN_SCRIPT,

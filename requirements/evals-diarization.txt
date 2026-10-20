@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+#
+# Dependencies for the EVALS_DIARIZATION workflow venv.
+# Used by: setup_evals_diarization() in workflows/workflow_venvs.py
+#
+# The DER is scored by tt-metal's models/demos/audio/pyannote_diarization
+# accuracy module, which needs pyannote.audio (for the bundled reference clip
+# and its RTTM) and pyannote.metrics. Scoring runs on the CPU, so torch comes
+# from the CPU index rather than pulling a CUDA build.
+
+-c constraints.txt
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+pyannote.audio>=4.0,<5
+torch==2.8.0+cpu
+torchaudio==2.8.0+cpu

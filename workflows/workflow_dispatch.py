@@ -50,6 +50,7 @@ _ENGINE_VLLM_CLIENT_BENCHMARK_TYPES = frozenset({ModelType.EMBEDDING})
 _ENGINE_EVAL_VENV_BY_MODEL_TYPE = {
     ModelType.AUDIO: WorkflowVenvType.EVALS_AUDIO,
     ModelType.EMBEDDING: WorkflowVenvType.EVALS_EMBEDDING,
+    ModelType.DIARIZATION: WorkflowVenvType.EVALS_DIARIZATION,
 }
 
 # Model types that share LLM code path rather than a media runner.
@@ -732,6 +733,14 @@ def _engine_dependency_venv_types(
             venv_types.append(eval_venv)
         if model_spec.model_type in _LLM_LIKE_TYPES:
             venv_types.extend(_llm_eval_venv_types(model_spec, runtime_config))
+    # The diarization benchmark sends pyannote's bundled reference clip, and
+    # pyannote is only installed in the diarization eval venv.
+    if (
+        wf in _ENGINE_BENCHMARK_WORKFLOWS
+        and model_spec.model_type == ModelType.DIARIZATION
+        and WorkflowVenvType.EVALS_DIARIZATION not in venv_types
+    ):
+        venv_types.append(WorkflowVenvType.EVALS_DIARIZATION)
     if (
         wf in _ENGINE_BENCHMARK_WORKFLOWS
         and model_spec.model_type in _ENGINE_VLLM_CLIENT_BENCHMARK_TYPES

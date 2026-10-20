@@ -698,3 +698,22 @@ def test_diarization_routes_to_v2(workflow):
     )
     assert workflow_dispatch.is_engine_routed_model(spec) is True
     assert workflow_dispatch.can_dispatch_to_engine(spec, rc) is True
+
+
+@pytest.mark.parametrize("workflow", [WorkflowType.EVALS, WorkflowType.BENCHMARKS])
+def test_diarization_provisions_its_scoring_venv(workflow):
+    """The eval scores with pyannote and tt-metal's accuracy module, and the
+    benchmark sends pyannote's bundled clip; neither is in WORKFLOW_RUN_SCRIPT."""
+    from workflows.workflow_types import WorkflowVenvType
+
+    spec = _spec(ModelType.DIARIZATION, name="speaker-diarization-community-1")
+    venvs = workflow_dispatch._engine_dependency_venv_types(spec, workflow)
+    assert venvs == [WorkflowVenvType.EVALS_DIARIZATION]
+
+
+def test_diarization_release_provisions_its_scoring_venv_once():
+    from workflows.workflow_types import WorkflowVenvType
+
+    spec = _spec(ModelType.DIARIZATION, name="speaker-diarization-community-1")
+    venvs = workflow_dispatch._engine_dependency_venv_types(spec, WorkflowType.RELEASE)
+    assert venvs == [WorkflowVenvType.EVALS_DIARIZATION]

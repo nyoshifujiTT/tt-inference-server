@@ -46,6 +46,7 @@ class WorkflowVenvType(IntEnum):
     EVALS_VISION = auto()
     EVALS_AUDIO = auto()
     EVALS_EMBEDDING = auto()
+    EVALS_DIARIZATION = auto()
     EVALS_AGENTIC = auto()
     BENCHMARKS_VLLM = auto()
     BENCHMARKS_VLLM_FORGE = auto()
