@@ -665,13 +665,22 @@ The endpoint has to be reachable **from inside the container**, which `run.py` s
 
 ## Benchmarking and accuracy
 
-`benchmarking/run_benchmarks.py` covers the served endpoint: `ModelType.DIARIZATION` selects `BenchmarkTaskDiarization`, so the sweep is a single diarization-typed run rather than the LLM prompt-length sweep.
+Both run through `run.py` against a started server, the same way as the other media models:
 
-`evals/run_evals.py` covers it too. Media model types are dispatched to `run_media_evals`, which calls the client's `run_eval` directly rather than going through `lm-evaluation-harness` — so the absence of an lm-eval diarization task is no obstacle, the same way the TTS model scores itself.
+```bash
+MODEL_SPECS_ENV=dev python3 run.py --model speaker-diarization-community-1 \
+  --workflow evals --tt-device p150 --device-id 0 \
+  --dev-mode --no-auth --service-port 8018 \
+  --override-docker-image tt-media-inference-server:<version>-<tt-metal commit>-<sha>-<timestamp>
+```
+
+`--workflow benchmarks` takes the same arguments. `test_module/eval_tests/diarization_eval_tests.py` and `test_module/benchmark_tests/diarization_benchmark_tests.py` do the work; the benchmark reports `ttft`, `rtr` (audio seconds per wall-clock second) and `throughput_rps` over three jobs on pyannote's 30 s sample.
 
 The metric is the diarization error rate, the standard for this task: the fraction of speaking time attributed to the wrong speaker, plus missed speech and false alarm. The reference is the hand annotation (`sample.rttm`) that ships beside pyannote's sample recording, so the eval scores the served pipeline against ground truth rather than against another run of itself. The speaker count is reported and checked alongside the DER, because a pipeline that splits or merges speakers can still post an acceptable DER.
 
-Measured on a p150: `DER = 0.052` with the two annotated speakers. That is not a porting error — the all-CPU pipeline scores **the same 0.052** against the same annotation, and the device run reproduces the CPU run exactly (`DER = 0.000` between them). It is the ordinary gap between any diarizer and a human transcript at turn boundaries. Nor does it contradict community-1's published 0.17: that figure is measured on AMI / DIHARD / VoxConverse, full corpora of hard meeting and broadcast audio, whereas this is a clean 30 s two-speaker clip.
+Scoring needs pyannote and tt-metal's scoring module, neither of which belongs in the workflow venv, so they get their own: `EVALS_DIARIZATION` (`requirements/evals-diarization.txt`), the same arrangement the embedding eval uses for mteb. Its setup checks out only `models/demos/audio/pyannote_diarization` from tt-metal, at the commit the image was built from, and the workflow process reaches it through `test_module/_diarization_scoring.py`. That commit comes from the image tag, so tag the image in the standard `<version>-<tt-metal commit>-<sha>-<timestamp>` form; with an ad-hoc tag such as `:dev` the setup stops and says so rather than scoring with some other revision's code. The benchmark provisions the same venv, because the sample recording ships inside pyannote.
+
+Measured on a p150 through `run.py`: `DER = 0.052` with the two annotated speakers (`accuracy_check` PASS), and `rtr` 5.3 for the benchmark. That is not a porting error — the all-CPU pipeline scores **the same 0.052** against the same annotation, and the device run reproduces the CPU run exactly (`DER = 0.000` between them). It is the ordinary gap between any diarizer and a human transcript at turn boundaries. Nor does it contradict community-1's published 0.17: that figure is measured on AMI / DIHARD / VoxConverse, full corpora of hard meeting and broadcast audio, whereas this is a clean 30 s two-speaker clip.
 
 The scoring is shared with tt-metal rather than reimplemented: both this eval and `models/demos/audio/pyannote_diarization/tests/test_diarization_e2e_ondevice.py` call `models.demos.audio.pyannote_diarization.accuracy`, so the served model and the on-device tests report the same figure against the same thresholds. That test asserts both directions — `DER < 0.05` for the device run against the host run (fidelity: the port has not drifted from the reference implementation) and `DER < 0.15` against the human annotation (accuracy: the pipeline is right in absolute terms, which fidelity alone cannot show, since host and device could be wrong together).
 
