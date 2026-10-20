@@ -685,3 +685,16 @@ def test_release_without_the_opt_in_forwards_nothing_agentic_traces(
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+@pytest.mark.parametrize("workflow", ["benchmarks", "evals"])
+def test_diarization_routes_to_v2(workflow):
+    """DIARIZATION's eval/benchmark runners are registered in test_module, so
+    run.py must hand these workflows to the engine instead of failing with
+    "No workflow driver"."""
+    spec, rc = (
+        _spec(ModelType.DIARIZATION, name="speaker-diarization-community-1"),
+        _rc(workflow=workflow),
+    )
+    assert workflow_dispatch.is_engine_routed_model(spec) is True
+    assert workflow_dispatch.can_dispatch_to_engine(spec, rc) is True

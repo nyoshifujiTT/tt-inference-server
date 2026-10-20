@@ -65,6 +65,7 @@ _ENGINE_ROUTED_MODEL_TYPES = frozenset(
         ModelType.TEXT_TO_SPEECH,
         ModelType.CNN,
         ModelType.EMBEDDING,
+        ModelType.DIARIZATION,
     }
 )
 
