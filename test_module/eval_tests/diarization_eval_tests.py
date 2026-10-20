@@ -18,7 +18,9 @@ count or noise, and its DER is not comparable to any published figure.
 The scoring itself comes from tt-metal's
 ``models.demos.audio.pyannote_diarization.accuracy``, the same module its
 on-device tests use, so the number reported for the served model and the number
-the tt-metal suite asserts on are produced by identical code.
+the tt-metal suite asserts on are produced by identical code. That module and
+pyannote live in the EVALS_DIARIZATION venv, reached through
+``test_module._diarization_scoring``; this process only calls the server.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from report_module.schema import Block
 
+from .. import _diarization_scoring as scoring
 from .._test_common import ReportCheckTypes, block_id
 from ..benchmark_tests.diarization_benchmark_tests import (
     audio_duration_seconds,
@@ -45,19 +48,6 @@ from ..benchmark_tests.diarization_benchmark_tests import (
 from ..context import MediaContext, require_health
 
 logger = logging.getLogger(__name__)
-
-
-def _accuracy():
-    """The scoring helpers from tt-metal, imported lazily.
-
-    The tt-metal checkout is on PYTHONPATH wherever the ttnn port runs
-    (``tt_model_runners/diarization_nn_accelerator`` imports from it the same way), but the
-    benchmark runner must keep working without it, so the import stays on the
-    eval path only.
-    """
-    from models.demos.audio.pyannote_diarization import accuracy
-
-    return accuracy
 
 
 def _eval_block(
@@ -93,20 +83,20 @@ def _eval_block(
     )
 
 
-def _eval_over_sample(ctx: MediaContext, accuracy) -> Block:
-    """Score the bundled sample against the annotation shipped beside it."""
-    audio_path = accuracy.sample_audio_path()
-    reference = accuracy.load_rttm(accuracy.sample_reference_path())
-
+def _diarize(ctx: MediaContext, wav_path: str):
     status = asyncio.run(
-        diarize_once(ctx, audio_path, audio_duration_seconds(audio_path))
+        diarize_once(ctx, wav_path, audio_duration_seconds(wav_path))
     )
     if not status.status:
-        raise RuntimeError("diarization request failed; cannot score a DER")
+        raise RuntimeError(f"diarization request failed for {wav_path}")
+    return status
 
-    scored = accuracy.score_against_reference(
-        accuracy.turns_to_annotation(status.turns), reference
-    )
+
+def _eval_over_sample(ctx: MediaContext, plan: dict) -> Block:
+    """Score the bundled sample against the annotation shipped beside it."""
+    audio_path = plan["sample_audio"]
+    status = _diarize(ctx, audio_path)
+    scored = scoring.score({audio_path: status.turns})
     logger.info(
         f"DER={scored['der']:.5f} | speakers={scored['num_speakers']} "
         f"(reference {scored['reference_num_speakers']}) | RTR={status.rtr}"
@@ -116,7 +106,7 @@ def _eval_over_sample(ctx: MediaContext, accuracy) -> Block:
     # so the speaker count is checked alongside it rather than folded in.
     if not scored["speaker_count_matches"]:
         check = ReportCheckTypes.FAIL
-    elif scored["der"] <= accuracy.ACCURACY_DER_MAX:
+    elif scored["der"] <= plan["accuracy_der_max"]:
         check = ReportCheckTypes.PASS
     else:
         check = ReportCheckTypes.FAIL
@@ -125,8 +115,8 @@ def _eval_over_sample(ctx: MediaContext, accuracy) -> Block:
         ctx,
         task_name="pyannote_sample_der",
         score=scored["der"],
-        published_score=accuracy.PUBLISHED_DER,
-        published_score_ref=accuracy.PUBLISHED_DER_REF,
+        published_score=plan["published_der"],
+        published_score_ref=plan["published_der_ref"],
         accuracy_check=check,
         extra={
             "num_speakers": scored["num_speakers"],
@@ -138,7 +128,7 @@ def _eval_over_sample(ctx: MediaContext, accuracy) -> Block:
 
 
 def _eval_over_corpus(
-    ctx: MediaContext, accuracy, root: str, corpus_name: str
+    ctx: MediaContext, plan: dict, corpus_name: str, limit: Optional[int]
 ) -> Block:
     """Score a whole corpus so the DER is comparable to the published one.
 
@@ -152,20 +142,10 @@ def _eval_over_corpus(
     -- dev is the easier half -- so a split with no published number of its own
     reports NA rather than a pass it did not earn.
     """
-    limit = os.environ.get("DIARIZATION_CORPUS_LIMIT")
-    limit = int(limit) if limit else None
+    turns = {wav: _diarize(ctx, wav).turns for wav in plan["corpus_audio"]}
+    scored = scoring.score(turns, corpus_root=plan["corpus_root"], limit=limit)
 
-    def diarize(wav_path):
-        status = asyncio.run(
-            diarize_once(ctx, wav_path, audio_duration_seconds(wav_path))
-        )
-        if not status.status:
-            raise RuntimeError(f"diarization request failed for {wav_path}")
-        return status.turns
-
-    scored = accuracy.corpus_der(diarize, root, limit=limit)
-
-    published = accuracy.published_corpus_der(corpus_name)
+    published = plan["published_corpus_der"]
     if published is None:
         check = ReportCheckTypes.NA
         logger.warning(
@@ -173,7 +153,7 @@ def _eval_over_corpus(
             "measured value without a pass/fail verdict"
         )
     else:
-        ceiling = published + accuracy.CORPUS_DER_TOLERANCE
+        ceiling = published + plan["corpus_der_tolerance"]
         check = (
             ReportCheckTypes.PASS
             if scored["der"] <= ceiling
@@ -190,7 +170,7 @@ def _eval_over_corpus(
         task_name=f"{corpus_name}_der",
         score=scored["der"],
         published_score=published,
-        published_score_ref=accuracy.PUBLISHED_DER_REF,
+        published_score_ref=plan["published_der_ref"],
         accuracy_check=check,
         extra={
             "num_recordings": scored["num_recordings"],
@@ -207,18 +187,19 @@ def run_diarization_eval(ctx: MediaContext) -> Block:
     )
     require_health(ctx)
 
-    accuracy = _accuracy()
     corpus_name = os.environ.get("DIARIZATION_CORPUS_NAME", "voxconverse-test")
-    corpus = accuracy.corpus_root(corpus_name)
+    limit = os.environ.get("DIARIZATION_CORPUS_LIMIT")
+    limit = int(limit) if limit else None
+    plan = scoring.plan(corpus_name, limit)
 
     started = time.monotonic()
-    if corpus:
-        block = _eval_over_corpus(ctx, accuracy, corpus, corpus_name)
+    if plan["corpus_root"]:
+        block = _eval_over_corpus(ctx, plan, corpus_name, limit)
     else:
         logger.info(
             "DIARIZATION_CORPUS_DIR is unset; scoring the bundled 30 s sample. "
             "Set it to a corpus to compare against the published DER."
         )
-        block = _eval_over_sample(ctx, accuracy)
+        block = _eval_over_sample(ctx, plan)
     logger.info(f"Diarization eval finished in {time.monotonic() - started:.1f}s")
     return block

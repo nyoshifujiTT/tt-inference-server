@@ -40,6 +40,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from report_module.schema import Block
 
+from .. import _diarization_scoring as scoring
 from .._test_common import (
     MetricSpec,
     block_id,
@@ -97,13 +98,10 @@ async def _await_job(session, ctx: MediaContext, job_id: str, headers: dict):
 def sample_audio_path() -> str:
     """pyannote's bundled 30 s two-speaker sample.
 
-    Built from the package path rather than by importing
-    ``pyannote.audio.sample``, which decodes the file eagerly at import time
-    and so needs a working torchcodec.
+    pyannote lives in the EVALS_DIARIZATION venv, not in the workflow venv this
+    runs in, so the path is asked of that venv.
     """
-    import pyannote.audio
-
-    return str(Path(pyannote.audio.__file__).parent / "sample" / "sample.wav")
+    return scoring.sample_audio_path()
 
 
 def audio_duration_seconds(path: str) -> Optional[float]:
