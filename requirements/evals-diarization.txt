@@ -16,3 +16,7 @@
 pyannote.audio>=4.0,<5
 torch==2.8.0+cpu
 torchaudio==2.8.0+cpu
+# pyannote.audio pulls torchcodec unpinned, and the newest wheel is built
+# against a later torch (undefined symbol torch_list_size on 2.8). 0.7 is the
+# release paired with torch 2.8.
+torchcodec==0.7.0
