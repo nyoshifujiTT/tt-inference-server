@@ -134,14 +134,14 @@ def test_warmup_audio_is_speech_so_the_embedding_net_compiles():
     A silent warmup left every embedding kernel to compile on the first real
     request (68 s instead of 6 s). The clip is pyannote's own two-speaker
     sample; check it is long enough to cover the 10 s segmentation window and
-    far from silent.
+    far from silent. Checked on the decoded samples rather than the tensor,
+    because this suite replaces torch with a mock.
     """
-    from tt_model_runners.diarization_runner import _speech_sample
+    from tt_model_runners.diarization_runner import _speech_waveform
 
-    audio = _speech_sample()
-    waveform = audio["waveform"]
+    samples, sample_rate = _speech_waveform()
 
-    assert audio["sample_rate"] == 16000
-    assert waveform.ndim == 2 and waveform.shape[0] == 1
-    assert waveform.shape[1] / audio["sample_rate"] >= 10.0
-    assert float(waveform.abs().mean()) > 1e-3
+    assert sample_rate == 16000
+    assert samples.ndim == 2 and samples.shape[0] == 1
+    assert samples.shape[1] / sample_rate >= 10.0
+    assert float(abs(samples).mean()) > 1e-3

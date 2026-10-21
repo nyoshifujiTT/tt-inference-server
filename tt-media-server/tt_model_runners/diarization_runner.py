@@ -124,22 +124,33 @@ class TTDiarizationRunner(BaseMetalDeviceRunner):
         return False
 
 
+def _speech_waveform():
+    """pyannote.audio's bundled speech clip as ``(channels, samples), rate``.
+
+    The file is located through the package's import spec rather than by
+    importing ``pyannote.audio``, whose ``__init__`` pulls in lightning and
+    torch just to report where the package lives.
+    """
+    import importlib.util
+    import os
+
+    import soundfile
+
+    package, resource = WARMUP_SAMPLE
+    (package_dir,) = importlib.util.find_spec(package).submodule_search_locations
+    samples, sample_rate = soundfile.read(
+        os.path.join(package_dir, resource), dtype="float32", always_2d=True
+    )
+    return samples.T.copy(), int(sample_rate)
+
+
 def _speech_sample() -> dict:
-    """pyannote.audio's bundled speech clip, in the in-memory shape it accepts.
+    """The warmup clip in the in-memory shape pyannote accepts.
 
     Handed as a tensor rather than a path so the pipeline never decodes a file:
     torchcodec cannot load against the torch pin this image ships.
     """
-    from importlib.resources import files
-
-    import soundfile
     import torch
 
-    package, resource = WARMUP_SAMPLE
-    samples, sample_rate = soundfile.read(
-        str(files(package).joinpath(resource)), dtype="float32", always_2d=True
-    )
-    return {
-        "waveform": torch.from_numpy(samples.T.copy()),
-        "sample_rate": int(sample_rate),
-    }
+    samples, sample_rate = _speech_waveform()
+    return {"waveform": torch.from_numpy(samples), "sample_rate": sample_rate}
