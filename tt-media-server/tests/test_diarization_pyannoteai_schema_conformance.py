@@ -97,6 +97,15 @@ def test_response_output_keys_match_official(official_schemas):
             assert set(seg.keys()) == official_seg_required
 
 
+def test_model_enum_matches_official_schema(official_schemas):
+    """Every model the official API names is known here, so one we do not serve
+    is answered "not served" rather than "unknown"."""
+    from config.constants import PyannoteAiDiarizationModel
+
+    official = set(official_schemas["DiarizeRequest"]["properties"]["model"]["enum"])
+    assert {m.value for m in PyannoteAiDiarizationModel} == official
+
+
 def test_request_fields_cover_official_schema(official_schemas):
     """Every official DiarizeRequest field is either implemented or explicitly
     marked unsupported -- nothing is silently ignored, and we do not invent

@@ -194,6 +194,17 @@ def test_diarize_rejects_precision_2_model():
     assert fake.last is None
 
 
+def test_diarize_rejects_precision_3_as_not_served_rather_than_unknown():
+    """precision-3 is a real pyannoteAI model, just not one served here."""
+    fake = _FakeService()
+    resp = _make_client(fake).post(
+        "/v1/diarize", json={"url": _URL, "model": "precision-3"}
+    )
+    assert resp.status_code == 400, resp.text
+    assert "not served" in resp.json()["detail"]
+    assert fake.last is None
+
+
 def test_diarize_rejects_unknown_model():
     fake = _FakeService()
     resp = _make_client(fake).post(

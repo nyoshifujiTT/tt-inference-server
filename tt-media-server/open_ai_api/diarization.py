@@ -76,9 +76,9 @@ def _validate_served_model(model):
     """Reject diarization models this server does not serve.
 
     The pyannoteAI ``DiarizeRequest.model`` enum is ``community-1`` /
-    ``precision-2`` (https://docs.pyannote.ai/openapi.json). This self-hosted
-    server serves ``community-1`` only; anything else (notably the paid
-    ``precision-2``) is rejected with HTTP 400.
+    ``precision-2`` / ``precision-3`` (https://docs.pyannote.ai/openapi.json).
+    This self-hosted server serves ``community-1`` only; anything else (notably
+    the paid ``precision-2`` and ``precision-3``) is rejected with HTTP 400.
     """
     from config.constants import PyannoteAiDiarizationModel, SERVED_DIARIZATION_MODEL
 
