@@ -12,18 +12,32 @@ import subprocess
 from typing import List
 
 
+def ffmpeg_binary() -> str:
+    """ffmpeg from PATH (the media server images install it), else the binary the
+    `imageio_ffmpeg` wheel ships -- the same lookup the video path uses
+    (``VideoManager._ffmpeg_binary``), so audio does not depend on a system package
+    that an image built some other way may not carry."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e:
+        raise RuntimeError(
+            "ffmpeg not found on PATH and imageio_ffmpeg is not available; "
+            "install ffmpeg or `pip install imageio-ffmpeg`"
+        ) from e
+
+
 def run_ffmpeg_stdin_stdout(input_bytes: bytes, ffmpeg_args: List[str]) -> bytes:
     """
     Run ffmpeg with stdin/stdout pipes (same as audio_manager._decode_audio_file).
     Feeds input_bytes to stdin, returns stdout bytes. Raises on failure.
     """
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError(
-            "ffmpeg not found in PATH. Install ffmpeg and ensure it is available "
-            "when the server starts."
-        )
     process = subprocess.Popen(
-        ["ffmpeg"] + ffmpeg_args,
+        [ffmpeg_binary()] + ffmpeg_args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
