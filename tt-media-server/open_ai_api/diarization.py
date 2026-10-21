@@ -42,13 +42,21 @@ IMPLEMENTED_REQUEST_FIELDS = frozenset(
         "webhookStatusOnly",
     }
 )
-# precision-2-only options: accepted by the parser only to reject them with 400.
+# Options only the paid models offer: accepted by the parser only to reject
+# them with 400. The official spec marks the first four as precision-2/3
+# features and the rest as "Only available for the `precision-3` model", so a
+# community-1 job on the cloud service cannot have them either.
 UNSUPPORTED_REQUEST_FIELDS = frozenset(
     {
         "confidence",
         "turnLevelConfidence",
         "transcription",
         "transcriptionConfig",
+        "vadSensitivity",
+        "crosstalkSensitivity",
+        "speechProbability",
+        "crosstalkProbability",
+        "speakerProbability",
     }
 )
 
@@ -101,14 +109,17 @@ def _validate_served_model(model):
         )
 
 
-def _reject_precision2_only_options(**options) -> None:
-    """Reject pyannoteAI options that only the paid precision-2 model supports.
+def _reject_paid_model_only_options(**options) -> None:
+    """Reject pyannoteAI options that only the paid models support.
 
     ``confidence`` / ``turnLevelConfidence`` / ``transcription`` /
-    ``transcriptionConfig`` are precision-2-only in the pyannoteAI cloud API
-    (https://docs.pyannote.ai/openapi.json) and cannot be produced by
-    community-1. If a client requests any of them, fail with HTTP 400 rather
-    than silently ignoring the flag.
+    ``transcriptionConfig`` belong to precision-2/precision-3, and
+    ``vadSensitivity`` / ``crosstalkSensitivity`` / ``speechProbability`` /
+    ``crosstalkProbability`` / ``speakerProbability`` to precision-3 only, in
+    the pyannoteAI cloud API (https://docs.pyannote.ai/openapi.json); none is
+    available to community-1. If a client requests any of them, fail with HTTP
+    400 rather than silently ignoring the flag. Their defaults (``false``, and
+    ``0`` for the sensitivities) request nothing and are accepted.
     """
     requested = [
         name for name, value in options.items() if value not in (None, False, "")
@@ -117,8 +128,9 @@ def _reject_precision2_only_options(**options) -> None:
         raise HTTPException(
             status_code=400,
             detail=(
-                "the following pyannoteAI options require the paid precision-2 "
-                f"model and are not supported by this community-1 server: "
+                "the following pyannoteAI options require a paid model "
+                "(precision-2 or precision-3) and are not supported by this "
+                f"community-1 server: "
                 f"{sorted(requested)}"
             ),
         )
@@ -292,18 +304,15 @@ async def _fetch_audio(url: str) -> bytes:
 async def _build_request_from_body(body: dict) -> DiarizationRequest:
     """Validate a pyannoteAI DiarizeRequest body and resolve it to a request.
 
-    Validates ``model`` and rejects precision-2-only options, requires ``url``
+    Validates ``model`` and rejects paid-model-only options, requires ``url``
     (http(s):// or media://, or inline base64 as a non-standard extension of
     this server -- the official API takes a url only), fetches the audio, and
     builds the internal
     DiarizationRequest. See https://docs.pyannote.ai/openapi.json.
     """
     _validate_served_model(body.get("model"))
-    _reject_precision2_only_options(
-        confidence=body.get("confidence"),
-        turnLevelConfidence=body.get("turnLevelConfidence"),
-        transcription=body.get("transcription"),
-        transcriptionConfig=body.get("transcriptionConfig"),
+    _reject_paid_model_only_options(
+        **{name: body.get(name) for name in sorted(UNSUPPORTED_REQUEST_FIELDS)}
     )
 
     url = body.get("url")

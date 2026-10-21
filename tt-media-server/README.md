@@ -584,7 +584,7 @@ The job's `output` is the pyannoteAI `DiarizationJobOutput` (`exclusiveDiarizati
 
 `model` follows the pyannoteAI `DiarizeRequest.model` enum. This server serves **`community-1`** only; `model=precision-2` or `model=precision-3` (the paid cloud models) is rejected with HTTP 400 as not served, and any other value as unknown.
 
-The following pyannoteAI options are **precision-2-only** and cannot be produced by community-1, so requesting them returns HTTP 400 (they are never silently ignored): `confidence`, `turnLevelConfidence`, `transcription`, `transcriptionConfig`. Correspondingly, the precision-2-only response fields (`confidence`, `wordLevelTranscription`, `turnLevelTranscription`) are never emitted. See https://docs.pyannote.ai/openapi.json.
+The following pyannoteAI options belong to the **paid models** and are not available to community-1, so requesting them returns HTTP 400 (they are never silently ignored): `confidence`, `turnLevelConfidence`, `transcription`, `transcriptionConfig` (precision-2/precision-3), and `vadSensitivity`, `crosstalkSensitivity`, `speechProbability`, `crosstalkProbability`, `speakerProbability` (the official spec: "Only available for the `precision-3` model"). Sending one at its default (`false`, or `0` for the sensitivities) requests nothing and is accepted. Correspondingly, the paid-model response fields (`confidence`, `wordLevelTranscription`, `turnLevelTranscription`, `speechProbability`, `crosstalkProbability`, `speakerProbability`) are never emitted. See https://docs.pyannote.ai/openapi.json.
 
 ## Job API (pyannoteAI-native)
 

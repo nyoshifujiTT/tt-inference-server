@@ -32,8 +32,9 @@ class DiarizationResponse(BaseModel):
         this via ``output.exclusive_speaker_diarization``.
 
     Note: ``confidence`` / ``wordLevelTranscription`` / ``turnLevelTranscription``
-    fields of the pyannoteAI API are precision-2 (paid) only and are
-    intentionally not emitted here. The ``diarization`` list is kept internally
+    (precision-2/3) and ``speechProbability`` / ``crosstalkProbability`` /
+    ``speakerProbability`` (precision-3) fields of the pyannoteAI API belong to
+    the paid models and are intentionally not emitted here. The ``diarization`` list is kept internally
     as ``segments`` for readability.
     """
 

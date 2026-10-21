@@ -222,6 +222,11 @@ def test_diarize_rejects_unknown_model():
         ("turnLevelConfidence", True),
         ("transcription", True),
         ("transcriptionConfig", {"model": "x"}),
+        ("vadSensitivity", 1.5),
+        ("crosstalkSensitivity", -2.0),
+        ("speechProbability", True),
+        ("crosstalkProbability", True),
+        ("speakerProbability", True),
     ],
 )
 def test_diarize_rejects_precision2_only_options(field, value):
@@ -230,6 +235,24 @@ def test_diarize_rejects_precision2_only_options(field, value):
     assert resp.status_code == 400, resp.text
     assert "precision-2" in resp.json()["detail"]
     assert fake.last is None
+
+
+def test_diarize_accepts_precision3_options_at_their_defaults():
+    """The official defaults (false, 0.0) ask for nothing, so they are not an
+    unsupported request; a client that spells them out must not get a 400."""
+    fake = _FakeService()
+    resp = _make_client(fake).post(
+        "/v1/diarize",
+        json={
+            "url": _URL,
+            "vadSensitivity": 0.0,
+            "crosstalkSensitivity": 0,
+            "speechProbability": False,
+            "crosstalkProbability": False,
+            "speakerProbability": False,
+        },
+    )
+    assert resp.status_code == 201, resp.text
 
 
 def test_diarize_allows_precision2_options_when_false():

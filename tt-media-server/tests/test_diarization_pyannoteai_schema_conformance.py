@@ -172,13 +172,18 @@ def test_inline_base64_is_a_documented_extension_not_official_behaviour(
 
 def test_response_fields_cover_official_schema(official_schemas):
     """Every official DiarizationJobOutput field is either emitted or explicitly
-    documented as not-emitted (precision-2-only)."""
+    documented as not-emitted (paid-model-only)."""
     official = set(official_schemas["DiarizationJobOutput"]["properties"].keys())
     emitted = {"diarization", "exclusiveDiarization", "warning"}
     not_emitted = {
         "confidence",
         "wordLevelTranscription",
         "turnLevelTranscription",
+        # precision-3 only, and only when the matching request flag is set,
+        # which this server refuses
+        "speechProbability",
+        "crosstalkProbability",
+        "speakerProbability",
         "error",  # only meaningful for the async job model; sync diarize uses HTTP status
     }
     assert emitted <= official, f"non-official emitted fields: {emitted - official}"
