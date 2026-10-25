@@ -364,6 +364,8 @@ sdxl_forge_impl = ImplSpec(
 #                             workloads and their benchmarks/release pins stay isolated.
 #   qwen36_blackhole_vlm   -> native vision (VLM); model_type=VLM, modalities
 #                             text+image+video, larger trace_region for the vision tower.
+#   qwen36_blackhole_mtp   -> MTP speculative decode (text-only) through the vllm-tt-plugin
+#                             spec-decode contract (Qwen36MTPContractForCausalLM).
 qwen36_blackhole_impl = ImplSpec(
     impl_id="qwen36_blackhole",
     impl_name="qwen36-blackhole",
@@ -376,6 +378,14 @@ qwen36_blackhole_impl = ImplSpec(
 qwen36_blackhole_vlm_impl = ImplSpec(
     impl_id="qwen36_blackhole_vlm",
     impl_name="qwen36-blackhole-vlm",
+    repo_url="https://github.com/tenstorrent/tt-metal",
+    code_path="models/demos/blackhole/qwen36",
+)
+# Same tt-metal code as qwen36_blackhole; distinct impl_id only so the MTP
+# speculative-decode spec gets its own model_id. Selectable via --impl qwen36-blackhole-mtp.
+qwen36_blackhole_mtp_impl = ImplSpec(
+    impl_id="qwen36_blackhole_mtp",
+    impl_name="qwen36-blackhole-mtp",
     repo_url="https://github.com/tenstorrent/tt-metal",
     code_path="models/demos/blackhole/qwen36",
 )
@@ -504,6 +514,7 @@ _IMPL_REGISTRY: Dict[str, ImplSpec] = {
     "sdxl_forge": sdxl_forge_impl,
     "qwen36_blackhole": qwen36_blackhole_impl,
     "qwen36_blackhole_vlm": qwen36_blackhole_vlm_impl,
+    "qwen36_blackhole_mtp": qwen36_blackhole_mtp_impl,
     "diffusion_gemma": diffusion_gemma_impl,
     "training_lora": training_lora_impl,
     "trainer_training_lora": trainer_training_lora_impl,

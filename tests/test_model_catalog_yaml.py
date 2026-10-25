@@ -20,6 +20,8 @@ from workflows.model_spec import (
     get_model_spec_map,
     load_templates_from_yaml,
     quetzal_impl,
+    qwen36_blackhole_impl,
+    qwen36_blackhole_mtp_impl,
     tt_transformers_impl,
 )
 from workflows.workflow_types import (
@@ -37,9 +39,17 @@ def test_impl_registry_is_populated():
     assert _IMPL_REGISTRY["tt_transformers"] is tt_transformers_impl
     assert _IMPL_REGISTRY["quetzal"] is quetzal_impl
     assert _IMPL_REGISTRY["blaze"] is blaze_impl
+    assert _IMPL_REGISTRY["qwen36_blackhole_mtp"] is qwen36_blackhole_mtp_impl
     # impl_id of each registry entry must match its key
     for impl_id, impl in _IMPL_REGISTRY.items():
         assert impl.impl_id == impl_id
+
+
+def test_qwen36_mtp_impl_shares_the_qwen36_code_path():
+    # A serving profile, not a separate implementation: only the name differs.
+    assert qwen36_blackhole_mtp_impl.impl_name == "qwen36-blackhole-mtp"
+    assert qwen36_blackhole_mtp_impl.repo_url == qwen36_blackhole_impl.repo_url
+    assert qwen36_blackhole_mtp_impl.code_path == qwen36_blackhole_impl.code_path
 
 
 def test_build_system_requirements_full():
