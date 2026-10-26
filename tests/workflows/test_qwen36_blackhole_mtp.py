@@ -13,6 +13,8 @@ MTP_CLASS = "models.demos.blackhole.qwen36.tt.qwen36_vllm:Qwen36MTPContractForCa
 # Qwen36MTPContractForCausalLM verifies max_num_seqs x (K+1) rows in one 32-row tile.
 VERIFY_TILE_ROWS = 32
 SUPPORTED_K = (3, 7, 11)
+# Qwen3.5-27B has the same structure and MTP head as Qwen3.6-27B.
+MODELS = ["Qwen/Qwen3.6-27B", "Qwen/Qwen3.5-27B"]
 
 
 def _specs(model):
@@ -37,7 +39,7 @@ def _resolve(model, impl=None):
     )
 
 
-@pytest.mark.parametrize("model", ["Qwen/Qwen3.6-27B"])
+@pytest.mark.parametrize("model", MODELS)
 def test_mtp_profile_is_opt_in(model):
     default = _resolve(model)
     mtp = _resolve(model, impl="qwen36-blackhole-mtp")
@@ -50,7 +52,7 @@ def test_mtp_profile_is_opt_in(model):
     assert mtp.supported_modalities == ["text"]
 
 
-@pytest.mark.parametrize("model", ["Qwen/Qwen3.6-27B"])
+@pytest.mark.parametrize("model", MODELS)
 def test_mtp_profile_selects_the_contract_class_and_custom_class_drafts(model):
     mtp = _resolve(model, impl="qwen36-blackhole-mtp")
     env = mtp.device_model_spec.env_vars
@@ -74,7 +76,7 @@ def test_mtp_profile_selects_the_contract_class_and_custom_class_drafts(model):
     assert "sample_on_device_mode" not in mtp.device_model_spec.override_tt_config
 
 
-@pytest.mark.parametrize("model", ["Qwen/Qwen3.6-27B"])
+@pytest.mark.parametrize("model", MODELS)
 def test_mtp_profile_fits_the_verify_tile_and_page_tables(model):
     mtp = _resolve(model, impl="qwen36-blackhole-mtp")
     args = mtp.device_model_spec.vllm_args
