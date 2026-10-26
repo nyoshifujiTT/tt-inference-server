@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 
 import json
+import shutil
 
 import pytest
 
+from scripts.release.promote_dev_spec_to_prod import promote
 from workflows.model_spec import load_templates_from_yaml, resolve_model_spec
 from workflows.utils import get_repo_root_path
 from workflows.workflow_types import ModelStatusTypes
@@ -86,3 +88,43 @@ def test_mtp_profile_fits_the_verify_tile_and_page_tables(model):
     assert int(args["max_num_seqs"]) == mtp.device_model_spec.max_concurrency == 8
     assert int(args["max_num_seqs"]) * (k + 1) <= VERIFY_TILE_ROWS
     assert args["block_size"] == "64"
+
+
+def test_promoting_the_plain_profile_carries_no_mtp_text(tmp_path):
+    specs_dir = get_repo_root_path() / "workflows" / "model_specs"
+    prod_dir = tmp_path / "prod"
+    shutil.copytree(specs_dir / "prod", prod_dir)
+    ci_path = tmp_path / "models-ci-config.json"
+    ci_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    model: {
+                        "inference_engine": "vLLM",
+                        "ci": {"release": {"devices": ["P150X4"]}},
+                    }
+                    for model in MODELS
+                }
+            }
+        )
+    )
+
+    report = promote(
+        ci_path,
+        specs_dir / "dev",
+        prod_dir,
+        tt_metal_commit="new-metal",
+        version="9.9.9",
+        vllm_commit="new-vllm",
+    )
+
+    assert {identity[3] for identity in report["requested_identities"]} == {
+        "qwen36_blackhole"
+    }
+    promoted = (prod_dir / "llm.yaml").read_text()
+    for mtp_text in (
+        "qwen36_blackhole_mtp",
+        "qwen36-blackhole-mtp",
+        "Qwen36MTPContractForCausalLM",
+    ):
+        assert mtp_text not in promoted
