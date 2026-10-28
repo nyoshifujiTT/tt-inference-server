@@ -1647,6 +1647,48 @@ templates:
       tool_call_parser_name: qwen3_coder
 
 - weights:
+    - Qwen/Qwen3.6-27B
+  impl: qwen36_blackhole_mtp
+  # Qwen3.6-27B MTP speculative decode (qwen36_blackhole_mtp), text-only, through the
+  # vllm-tt-plugin spec-decode contract (Qwen36MTPContractForCausalLM, tt-metal #60840).
+  # Select with --impl qwen36-blackhole-mtp; the plain qwen36_blackhole spec stays the default.
+  # The class verifies max_num_seqs x (K+1) rows in one 32-row tile, so K=3 allows 8 users,
+  # and it needs block_size 64 (the default for every spec).
+  inference_engine: VLLM
+  model_type: LLM
+  supported_modalities:
+    - text
+  device_model_specs:
+    - device: P150X4
+      max_concurrency: 8
+      max_context: 262144
+      max_tokens_all_users_override: 525312
+      env_vars:
+        TT_QWEN35_TEXT_VER: qwen36_blackhole
+        TT_MODEL_CLASS_OVERRIDES: "TTQwen3_5ForConditionalGeneration=models.demos.blackhole.qwen36.tt.qwen36_vllm:Qwen36MTPContractForCausalLM"
+        QWEN36_SPEC_K: "3"
+        HF_MODEL: Qwen/Qwen3.6-27B
+        MESH_DEVICE: "P150x4"
+        QWEN36_MAX_TOKENS_ALL_USERS: "525312"
+      vllm_args:
+        enable_auto_tool_choice: true
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        # "model_owned_drafter" is a sentinel read by vllm-tt-plugin#131; K comes from QWEN36_SPEC_K.
+        speculative_config: '{"method": "custom_class", "model": "vllm_tt_plugin.model_owned_drafter", "num_speculative_tokens": 3}'
+      # No sample_on_device_mode: the MTP class samples on the host.
+      override_tt_config:
+        fabric_config: FABRIC_1D
+        trace_region_size: 1073741824
+        l1_small_size: 24576
+  status: EXPERIMENTAL
+  has_builtin_warmup: true
+  metadata:
+    Qwen/Qwen3.6-27B:
+      reasoning_parser_name: qwen3
+      tool_call_parser_name: qwen3_coder
+
+- weights:
     - Qwen/Qwen3.8-27B
   impl: qwen38_27b_qb2
   inference_engine: VLLM
@@ -3671,6 +3713,45 @@ templates:
         trace_region_size: 1073741824
         l1_small_size: 24576
         sample_on_device_mode: decode_only
+  status: EXPERIMENTAL
+  has_builtin_warmup: true
+  metadata:
+    Qwen/Qwen3.5-27B:
+      reasoning_parser_name: qwen3
+      tool_call_parser_name: qwen3_coder
+
+- weights:
+    - Qwen/Qwen3.5-27B
+  impl: qwen36_blackhole_mtp
+  # Qwen3.5-27B MTP speculative decode: same model structure and MTP head as Qwen3.6-27B,
+  # so the same qwen36_blackhole_mtp profile (see the Qwen3.6-27B MTP entry).
+  inference_engine: VLLM
+  model_type: LLM
+  supported_modalities:
+    - text
+  device_model_specs:
+    - device: P150X4
+      max_concurrency: 8
+      max_context: 262144
+      max_tokens_all_users_override: 525312
+      env_vars:
+        TT_QWEN35_TEXT_VER: qwen36_blackhole
+        TT_MODEL_CLASS_OVERRIDES: "TTQwen3_5ForConditionalGeneration=models.demos.blackhole.qwen36.tt.qwen36_vllm:Qwen36MTPContractForCausalLM"
+        QWEN36_SPEC_K: "3"
+        HF_MODEL: Qwen/Qwen3.5-27B
+        MESH_DEVICE: "P150x4"
+        QWEN36_MAX_TOKENS_ALL_USERS: "525312"
+      vllm_args:
+        enable_auto_tool_choice: true
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        # "model_owned_drafter" is a sentinel read by vllm-tt-plugin#131; K comes from QWEN36_SPEC_K.
+        speculative_config: '{"method": "custom_class", "model": "vllm_tt_plugin.model_owned_drafter", "num_speculative_tokens": 3}'
+      # No sample_on_device_mode: the MTP class samples on the host.
+      override_tt_config:
+        fabric_config: FABRIC_1D
+        trace_region_size: 1073741824
+        l1_small_size: 24576
   status: EXPERIMENTAL
   has_builtin_warmup: true
   metadata:
